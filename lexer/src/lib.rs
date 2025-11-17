@@ -67,6 +67,28 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
+        // handle operators
+        if input.starts_with("==") {
+            tokens.push(Token::EqualEqual);
+            input = input[2..].to_string();
+            continue;
+        }
+
+        if input.starts_with(['+', '-', '*', '/', '=']) {
+            let (op, new_input) = input.split_at(1);
+            let token = match op {
+                "+" => Token::Plus,
+                "-" => Token::Minus,
+                "*" => Token::Star,
+                "/" => Token::Slash,
+                "=" => Token::Equal,
+                _ => unreachable!("This should never happen"),
+            };
+            tokens.push(token);
+            input = new_input.to_string();
+            continue;
+        }
+
         // find longest match at start of input for any regex in Table 1-1
         let mut longest_capture = "".to_string();
         let mut token_type = None;
@@ -85,15 +107,33 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
         };
 
         // convert matching substring into a token
-        let token = match token_type {
+        let mut token = match token_type {
             TokenType::Identifier => Token::Identifier { value: longest_capture.trim().to_string() },
-            // TODO
-            TokenType::Constant => Token::Constant { value: todo!("need to parse contstant as i64") /*longest_capture.trim()*/ }
+            TokenType::Constant => {
+                let value = longest_capture.trim().parse::<i64>()
+                    .map_err(|_| format!("Failed to parse constant: {}", longest_capture))?;
+                Token::Constant { value }
+            }
+        };
+
+        // convert identifiers that match keywords into keyword tokens
+        token = match token {
+            Token::Identifier { value } => match value.as_str() {
+                "int" => Token::Int,
+                "void" => Token::Void,
+                "return" => Token::Return,
+                "if" => Token::If,
+                "else" => Token::Else,
+                _ => Token::Identifier { value },
+            },
+            other => other,
         };
 
         // add token to the `tokens` vector at the end
+        tokens.push(token);
 
         // remove matching substring from start of input
+        input = input[longest_capture.len()..].to_string();
     }
 
     Ok(tokens)
@@ -102,4 +142,60 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lex_simple_identifier_and_constant() {
+        let input = "foo 123";
+        let tokens = lex(input).expect("lexing should succeed");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier { value: "foo".to_string() },
+                Token::Constant { value: 123 },
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_keywords_and_operators() {
+        let input = "int x = 1; if (x == 1) return;";
+        let tokens = lex(input).expect("lexing should succeed");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Int,
+                Token::Identifier { value: "x".to_string() },
+                Token::Equal,
+                Token::Constant { value: 1 },
+                Token::Semicolon,
+                Token::If,
+                Token::OpenParenthesis,
+                Token::Identifier { value: "x".to_string() },
+                Token::EqualEqual,
+                Token::Constant { value: 1 },
+                Token::CloseParenthesis,
+                Token::Return,
+                Token::Semicolon,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_ignores_comments_and_whitespace() {
+        let input = r#"
+            // line comment
+            int /* block comment */ x = 2;
+        "#;
+        let tokens = lex(input).expect("lexing should succeed");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Int,
+                Token::Identifier { value: "x".to_string() },
+                Token::Equal,
+                Token::Constant { value: 2 },
+                Token::Semicolon,
+            ]
+        );
+    }
 }

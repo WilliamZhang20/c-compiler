@@ -1,3 +1,4 @@
+#[derive(PartialEq, Debug)]
 pub enum Token {
     Identifier { value: String },
     Constant { value: i64 },
@@ -6,4 +7,17 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
+    // Keywords
+    Int,
+    Void,
+    Return,
+    If,
+    Else,
+    // Operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Equal,
+    EqualEqual,
 }
