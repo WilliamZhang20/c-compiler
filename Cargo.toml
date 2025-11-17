@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["driver", "lexer", "model"]
+
+[profile.dev]
+debug = "line-tables-only" # For speeding up local builds; comment out for serious debugging
+
+[workspace.lints.rust]
+improper_ctypes = "deny"
+improper_ctypes_definitions = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+ptr_as_ptr = "deny"
+ptr_cast_constness = "deny"
+cast_lossless = "deny"
+type_complexity = "allow"

@@ -1,0 +1,12 @@
+[package]
+name = "lexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+model = { path = "../model" }
+regex-lite = "0.1"
+
+
+[lints]
+workspace = true
