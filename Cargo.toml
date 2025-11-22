@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["driver", "lexer", "model"]
+members = ["driver", "lexer", "model", "parser"]
 
 [profile.dev]
 debug = "line-tables-only" # For speeding up local builds; comment out for serious debugging
