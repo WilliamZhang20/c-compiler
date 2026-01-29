@@ -1,14 +1,15 @@
 [package]
-name = "driver"
+name = "codegen"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.47", features = ["derive"] }
+model = { path = "../model" }
+ir = { path = "../ir" }
+
+[dev-dependencies]
 lexer = { path = "../lexer" }
 parser = { path = "../parser" }
-ir = { path = "../ir" }
-codegen = { path = "../codegen" }
 
 [lints]
 workspace = true

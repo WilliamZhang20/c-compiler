@@ -51,90 +51,122 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // handle braces and semicolons
-        if input.starts_with([';', '(', ')', '{', '}']) {
-            let (token, new_input) = input.split_at(1);
-            let token = match token {
-                ";" => Token::Semicolon,
-                "(" => Token::OpenParenthesis,
-                ")" => Token::CloseParenthesis,
-                "{" => Token::OpenBrace,
-                "}" => Token::CloseBrace,
-                _ => unreachable!("This should never happen"),
-            };
-            tokens.push(token);
-            input = new_input.to_string();
-            continue;
-        }
-
-        // handle operators
-        if input.starts_with("==") {
-            tokens.push(Token::EqualEqual);
-            input = input[2..].to_string();
-            continue;
-        }
-
-        if input.starts_with(['+', '-', '*', '/', '=']) {
-            let (op, new_input) = input.split_at(1);
-            let token = match op {
-                "+" => Token::Plus,
-                "-" => Token::Minus,
-                "*" => Token::Star,
-                "/" => Token::Slash,
-                "=" => Token::Equal,
-                _ => unreachable!("This should never happen"),
-            };
-            tokens.push(token);
-            input = new_input.to_string();
-            continue;
-        }
-
-        // find longest match at start of input for any regex in Table 1-1
-        let mut longest_capture = "".to_string();
-        let mut token_type = None;
-
-        for (tok_type, re) in &regexes {
-            let Some(caps) = re.captures(&input) else { continue };
-            if caps[0].len() > longest_capture.len() {
-                longest_capture = caps[0].to_string();
-                token_type = Some(tok_type);
-            }
-        }
-
-        // if no match is found, raise an error
-        let Some(token_type) = token_type else {
-            return Err("Found invalid token".to_string());
+    // handle braces, semicolons, and commas
+    if input.starts_with([';', '(', ')', '{', '}', ',']) {
+        let (token, new_input) = input.split_at(1);
+        let token = match token {
+            ";" => Token::Semicolon,
+            "(" => Token::OpenParenthesis,
+            ")" => Token::CloseParenthesis,
+            "{" => Token::OpenBrace,
+            "}" => Token::CloseBrace,
+            "," => Token::Comma,
+            _ => unreachable!("This should never happen"),
         };
-
-        // convert matching substring into a token
-        let mut token = match token_type {
-            TokenType::Identifier => Token::Identifier { value: longest_capture.trim().to_string() },
-            TokenType::Constant => {
-                let value = longest_capture.trim().parse::<i64>()
-                    .map_err(|_| format!("Failed to parse constant: {}", longest_capture))?;
-                Token::Constant { value }
-            }
-        };
-
-        // convert identifiers that match keywords into keyword tokens
-        token = match token {
-            Token::Identifier { value } => match value.as_str() {
-                "int" => Token::Int,
-                "void" => Token::Void,
-                "return" => Token::Return,
-                "if" => Token::If,
-                "else" => Token::Else,
-                _ => Token::Identifier { value },
-            },
-            other => other,
-        };
-
-        // add token to the `tokens` vector at the end
         tokens.push(token);
-
-        // remove matching substring from start of input
-        input = input[longest_capture.len()..].to_string();
+        input = new_input.to_string();
+        continue;
     }
+
+    // handle operators
+    if input.starts_with("==") {
+        tokens.push(Token::EqualEqual);
+        input = input[2..].to_string();
+        continue;
+    }
+    if input.starts_with("!=") {
+        tokens.push(Token::BangEqual);
+        input = input[2..].to_string();
+        continue;
+    }
+    if input.starts_with("<=") {
+        tokens.push(Token::LessEqual);
+        input = input[2..].to_string();
+        continue;
+    }
+    if input.starts_with(">=") {
+        tokens.push(Token::GreaterEqual);
+        input = input[2..].to_string();
+        continue;
+    }
+    if input.starts_with("&&") {
+        tokens.push(Token::AndAnd);
+        input = input[2..].to_string();
+        continue;
+    }
+    if input.starts_with("||") {
+        tokens.push(Token::OrOr);
+        input = input[2..].to_string();
+        continue;
+    }
+
+    if input.starts_with(['+', '-', '*', '/', '=', '<', '>', '!']) {
+        let (op, new_input) = input.split_at(1);
+        let token = match op {
+            "+" => Token::Plus,
+            "-" => Token::Minus,
+            "*" => Token::Star,
+            "/" => Token::Slash,
+            "=" => Token::Equal,
+            "<" => Token::Less,
+            ">" => Token::Greater,
+            "!" => Token::Bang,
+            _ => unreachable!("This should never happen"),
+        };
+        tokens.push(token);
+        input = new_input.to_string();
+        continue;
+    }
+
+    // find longest match at start of input for any regex in Table 1-1
+    let mut longest_capture = "".to_string();
+    let mut token_type = None;
+
+    for (tok_type, re) in &regexes {
+        let Some(caps) = re.captures(&input) else { continue };
+        if caps[0].len() > longest_capture.len() {
+            longest_capture = caps[0].to_string();
+            token_type = Some(tok_type);
+        }
+    }
+
+    // if no match is found, raise an error
+    let Some(token_type) = token_type else {
+        return Err("Found invalid token".to_string());
+    };
+
+    // convert matching substring into a token
+    let mut token = match token_type {
+        TokenType::Identifier => Token::Identifier { value: longest_capture.trim().to_string() },
+        TokenType::Constant => {
+            let value = longest_capture.trim().parse::<i64>()
+                .map_err(|_| format!("Failed to parse constant: {}", longest_capture))?;
+            Token::Constant { value }
+        }
+    };
+
+    // convert identifiers that match keywords into keyword tokens
+    token = match token {
+        Token::Identifier { value } => match value.as_str() {
+            "int" => Token::Int,
+            "void" => Token::Void,
+            "return" => Token::Return,
+            "if" => Token::If,
+            "else" => Token::Else,
+            "while" => Token::While,
+            "for" => Token::For,
+            "do" => Token::Do,
+            _ => Token::Identifier { value },
+        },
+        other => other,
+    };
+
+    // add token to the `tokens` vector at the end
+    tokens.push(token);
+
+    // remove matching substring from start of input
+    input = input[longest_capture.len()..].to_string();
+}
 
     Ok(tokens)
 }

@@ -37,12 +37,6 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // --lex: we should only lex
-    // --parse: we should lex and parse
-    // --codegen: we should lex, parse, and generate code, but not create assemly file
-    // --emit-asm: we should lex, parse, generate code, and create assembly file
-    // no option: we should lex, parse, generate code, create assembly file, and link
-
     let stop_after_emit_asm = args.emit_asm;
     let stop_after_codegen = args.codegen;
     let stop_after_parse = args.parse;
@@ -53,41 +47,46 @@ fn main() {
 
     preprocess(&input_path, input_file);
 
-    lex();
+    let preprocessed_path = input_file.file_stem().unwrap().to_string_lossy().to_string() + ".i";
+    let src = std::fs::read_to_string(&preprocessed_path).expect("failed to read preprocessed file");
 
+    let tokens = lexer::lex(&src).expect("Lexing failed");
     if stop_after_lex {
+        println!("Tokens: {:?}", tokens);
         return;
     }
 
-    parse();
-
+    let program = parser::parse_tokens(&tokens).expect("Parsing failed");
     if stop_after_parse {
+        println!("AST: {:?}", program);
         return;
     }
 
-    code_gen();
-
+    let mut lowerer = ir::Lowerer::new();
+    let ir_prog = lowerer.lower_program(&program).expect("IR lowering failed");
     if stop_after_codegen {
+        println!("IR: {:?}", ir_prog);
         return;
     }
 
-    let mut asm_path = input_file.file_stem().unwrap().to_string_lossy();
-    asm_path.to_mut().push_str(".s");
+    let mut cg = codegen::Codegen::new();
+    let asm = cg.gen_program(&ir_prog);
 
-    emit_asm(&input_path, &asm_path);
-    println!("Ran assembler");
+    let mut asm_path = input_file.file_stem().unwrap().to_string_lossy().into_owned();
+    asm_path.push_str(".s");
+    std::fs::write(&asm_path, asm).expect("failed to write assembly file");
 
     if stop_after_emit_asm {
         return;
     }
 
     run_linker(&input_file, &asm_path);
-    println!("Ran linker");
+    println!("Compilation successful. Generated executable: {}", input_file.file_stem().unwrap().to_string_lossy());
 }
 
 fn preprocess(input_path: &str, input_file: &Path) {
-    let mut preprocessed_path = input_file.file_stem().unwrap().to_string_lossy();
-    preprocessed_path.to_mut().push_str(".i");
+    let mut preprocessed_path = input_file.file_stem().unwrap().to_string_lossy().to_string();
+    preprocessed_path.push_str(".i");
 
     let exit_code = Command::new("gcc")
         .args(["-E", "-P", {input_path}, "-o", {&preprocessed_path}])
@@ -102,34 +101,9 @@ fn preprocess(input_path: &str, input_file: &Path) {
     }
 }
 
-fn lex() {
-    println!("No lexer yet");
-}
-
-fn parse() {
-    println!("No parser yet");
-}
-
-fn code_gen() {
-    println!("No code generator yet");
-}
-
-fn emit_asm(input_path: &str, output_path: &str) {
-    let exit_code = Command::new("gcc")
-        .args(["-S", {input_path}, "-o", {&output_path}])
-        .status()
-        .expect("preprocessed file should compile successfully");
-
-    if !exit_code.success() {
-        if let Some(code) = exit_code.code() {
-            panic!("gcc compilation failed with exit code {}", code);
-        }
-        panic!("gcc compilation was terminated by a signal");
-    }
-}
-
 fn run_linker(input_file: &Path, asm_path: &str) {
-    let executable_file = input_file.file_stem().unwrap().to_string_lossy();
+    let mut executable_file = input_file.file_stem().unwrap().to_string_lossy().into_owned();
+    executable_file.push_str(".exe");
 
     let exit_code = Command::new("gcc")
         .args([{&asm_path}, "-o", &executable_file])

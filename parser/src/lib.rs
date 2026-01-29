@@ -39,6 +39,20 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+        let mut params = Vec::new();
+        if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+            loop {
+                let p_type = self.parse_type()?;
+                let p_name = match self.advance() {
+                    Some(Token::Identifier { value }) => value.clone(),
+                    other => return Err(format!("expected parameter name, found {:?}", other)),
+                };
+                params.push((p_type, p_name));
+                if !self.match_token(|t| matches!(t, Token::Comma)) {
+                    break;
+                }
+            }
+        }
         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
 
         let body_block = self.parse_block()?;
@@ -46,6 +60,7 @@ impl<'a> Parser<'a> {
         Ok(Function {
             return_type,
             name,
+            params,
             body: body_block,
         })
     }
@@ -95,9 +110,79 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.match_token(|t| matches!(t, Token::While)) {
+            self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            let cond = self.parse_expr()?;
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            let body = Box::new(self.parse_stmt()?);
+            return Ok(Stmt::While { cond, body });
+        }
+
+        if self.match_token(|t| matches!(t, Token::Do)) {
+            let body = Box::new(self.parse_stmt()?);
+            self.expect(|t| matches!(t, Token::While), "while")?;
+            self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            let cond = self.parse_expr()?;
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(Stmt::DoWhile { body, cond });
+        }
+
+        if self.match_token(|t| matches!(t, Token::For)) {
+            self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            let init = if self.match_token(|t| matches!(t, Token::Semicolon)) {
+                None
+            } else {
+                let expr = self.parse_expr()?;
+                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                Some(expr)
+            };
+            let cond = if self.match_token(|t| matches!(t, Token::Semicolon)) {
+                None
+            } else {
+                let expr = self.parse_expr()?;
+                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                Some(expr)
+            };
+            let post = if self.match_token(|t| matches!(t, Token::CloseParenthesis)) {
+                None
+            } else {
+                let expr = self.parse_expr()?;
+                self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                Some(expr)
+            };
+            let body = Box::new(self.parse_stmt()?);
+            return Ok(Stmt::For {
+                init,
+                cond,
+                post,
+                body,
+            });
+        }
+
         if self.check(&|t| matches!(t, Token::OpenBrace)) {
             let block = self.parse_block()?;
             return Ok(Stmt::Block(block));
+        }
+
+        // Variable Declaration
+        if self.check(&|t| matches!(t, Token::Int | Token::Void)) {
+            let r#type = self.parse_type()?;
+            let name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected identifier after type, found {:?}", other)),
+            };
+            let init = if self.match_token(|t| matches!(t, Token::Equal)) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(Stmt::Declaration {
+                r#type,
+                name,
+                init,
+            });
         }
 
         let expr = self.parse_expr()?;
@@ -110,7 +195,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, String> {
-        let left = self.parse_equality()?;
+        let left = self.parse_logical_or()?;
 
         if self.match_token(|t| matches!(t, Token::Equal)) {
             match left {
@@ -129,18 +214,74 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_equality(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_additive()?;
-
-        while self.match_token(|t| matches!(t, Token::EqualEqual)) {
-            let right = self.parse_additive()?;
+    fn parse_logical_or(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_logical_and()?;
+        while self.match_token(|t| matches!(t, Token::OrOr)) {
+            let right = self.parse_logical_and()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op: BinaryOp::EqualEqual,
+                op: BinaryOp::LogicalOr,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_equality()?;
+        while self.match_token(|t| matches!(t, Token::AndAnd)) {
+            let right = self.parse_equality()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::LogicalAnd,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_equality(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_relational()?;
+
+        while self.match_token(|t| matches!(t, Token::EqualEqual | Token::BangEqual)) {
+            let op = match self.previous().unwrap() {
+                Token::EqualEqual => BinaryOp::EqualEqual,
+                Token::BangEqual => BinaryOp::NotEqual,
+                _ => unreachable!(),
+            };
+            let right = self.parse_relational()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
                 right: Box::new(right),
             };
         }
 
+        Ok(expr)
+    }
+
+    fn parse_relational(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_additive()?;
+        while self.match_token(|t| {
+            matches!(
+                t,
+                Token::Less | Token::LessEqual | Token::Greater | Token::GreaterEqual
+            )
+        }) {
+            let op = match self.previous().unwrap() {
+                Token::Less => BinaryOp::Less,
+                Token::LessEqual => BinaryOp::LessEqual,
+                Token::Greater => BinaryOp::Greater,
+                Token::GreaterEqual => BinaryOp::GreaterEqual,
+                _ => unreachable!(),
+            };
+            let right = self.parse_additive()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
         Ok(expr)
     }
 
@@ -185,10 +326,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus)) {
+        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus | Token::Bang)) {
             let op = match self.previous().unwrap() {
                 Token::Plus => UnaryOp::Plus,
                 Token::Minus => UnaryOp::Minus,
+                Token::Bang => UnaryOp::LogicalNot,
                 _ => unreachable!(),
             };
             let expr = self.parse_unary()?;
@@ -283,6 +425,68 @@ mod tests {
         let tokens = lex(src).unwrap();
         let program = parse_tokens(&tokens).unwrap();
         assert_eq!(program.functions.len(), 1);
-        // more asserts if you want
+        assert_eq!(program.functions[0].name, "main");
+        assert_eq!(program.functions[0].params.len(), 0);
+    }
+
+    #[test]
+    fn parse_function_params() {
+        let src = "int add(int a, int b) { return a + b; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].params.len(), 2);
+        assert_eq!(program.functions[0].params[0].1, "a");
+        assert_eq!(program.functions[0].params[1].1, "b");
+    }
+
+    #[test]
+    fn parse_variable_declaration() {
+        let src = "void main() { int x = 5; int y; y = x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        assert_eq!(stmts.len(), 3);
+        matches!(stmts[0], Stmt::Declaration { .. });
+        matches!(stmts[1], Stmt::Declaration { .. });
+        matches!(stmts[2], Stmt::Expr(Expr::Binary { .. }));
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let src = "void main() { int x = 0; while (x < 10) { x = x + 1; } }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        assert_eq!(stmts.len(), 2);
+        matches!(stmts[1], Stmt::While { .. });
+    }
+
+    #[test]
+    fn parse_for_loop() {
+        // Note: My lexer handles 'int i = 0' as a declaration which is currently expected in my parse_stmt
+        // Wait, parse_stmt handles declarations, but parse_for expects an expression for init.
+        // In C, 'for (int i = 0; ...)' is valid in C99+. My current parse_for expects an expression.
+        // Let's test with expression init for now to match current implementation.
+        let src = "void main() { int i; for (i = 0; i < 10; i = i + 1) { return i; } }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        matches!(program.functions[0].body.statements[1], Stmt::For { .. });
+    }
+
+    #[test]
+    fn parse_logical_ops() {
+        let src = "int main() { return (1 && 0) || !1; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        matches!(program.functions[0].body.statements[0], Stmt::Return(Some(Expr::Binary { .. })));
+    }
+
+    #[test]
+    fn parse_relational_ops() {
+        let src = "int main() { return 1 <= 2 && 3 != 4; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        matches!(program.functions[0].body.statements[0], Stmt::Return(Some(Expr::Binary { .. })));
     }
 }

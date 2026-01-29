@@ -1,4 +1,4 @@
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum Token {
     Identifier { value: String },
     Constant { value: i64 },
@@ -7,12 +7,16 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
+    Comma,
     // Keywords
     Int,
     Void,
     Return,
     If,
     Else,
+    While,
+    For,
+    Do,
     // Operators
     Plus,
     Minus,
@@ -20,6 +24,14 @@ pub enum Token {
     Slash,
     Equal,
     EqualEqual,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    AndAnd,
+    OrOr,
+    Bang,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -37,6 +49,7 @@ pub struct Program {
 pub struct Function {
     pub return_type: Type,
     pub name: String,
+    pub params: Vec<(Type, String)>,
     pub body: Block,
 }
 
@@ -54,7 +67,26 @@ pub enum Stmt {
         then_branch: Box<Stmt>,
         else_branch: Option<Box<Stmt>>,
     },
+    While {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
+    DoWhile {
+        body: Box<Stmt>,
+        cond: Expr,
+    },
+    For {
+        init: Option<Expr>,
+        cond: Option<Expr>,
+        post: Option<Expr>,
+        body: Box<Stmt>,
+    },
     Block(Block),
+    Declaration {
+        r#type: Type,
+        name: String,
+        init: Option<Expr>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -79,6 +111,13 @@ pub enum BinaryOp {
     Mul,
     Div,
     EqualEqual,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    LogicalAnd,
+    LogicalOr,
     Assign,
 }
 
@@ -86,4 +125,5 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Plus,
     Minus,
+    LogicalNot,
 }
