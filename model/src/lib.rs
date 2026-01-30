@@ -2,12 +2,15 @@
 pub enum Token {
     Identifier { value: String },
     Constant { value: i64 },
+    StringLiteral { value: String },
     OpenParenthesis,
     CloseParenthesis,
     OpenBrace,
     CloseBrace,
     Semicolon,
     Comma,
+    OpenBracket,
+    CloseBracket,
     // Keywords
     Int,
     Void,
@@ -17,6 +20,24 @@ pub enum Token {
     While,
     For,
     Do,
+    Static,
+    Extern,
+    Inline,
+    Const,
+    Typedef,
+    Struct,
+    Char,
+    Hash, // #
+    Ellipsis, // ...
+    Colon, // :
+    Dot, // .
+    Ampersand, // &
+    Tilde, // ~
+    // Internal/Compiler Keywords often found in headers
+    Attribute, // __attribute__
+    Extension, // __extension__
+    Restrict, // restrict
+    SizeOf, // sizeof
     // Operators
     Plus,
     Minus,
@@ -38,6 +59,9 @@ pub enum Token {
 pub enum Type {
     Int,
     Void,
+    Array(Box<Type>, usize),
+    Pointer(Box<Type>),
+    Char,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -102,6 +126,18 @@ pub enum Expr {
     },
     Variable(String),
     Constant(i64),
+    StringLiteral(String),
+    Index {
+        array: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    SizeOf(Type),
+    SizeOfExpr(Box<Expr>),
+    Cast(Type, Box<Expr>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -126,4 +162,6 @@ pub enum UnaryOp {
     Plus,
     Minus,
     LogicalNot,
+    AddrOf,
+    Deref,
 }

@@ -62,8 +62,14 @@ fn main() {
         return;
     }
 
+    let mut analyzer = semantic::SemanticAnalyzer::new();
+    analyzer.analyze(&program).expect("Semantic analysis failed");
+
     let mut lowerer = ir::Lowerer::new();
     let ir_prog = lowerer.lower_program(&program).expect("IR lowering failed");
+    
+    let ir_prog = optimizer::optimize(ir_prog);
+
     if stop_after_codegen {
         println!("IR: {:?}", ir_prog);
         return;
@@ -106,7 +112,7 @@ fn run_linker(input_file: &Path, asm_path: &str) {
     executable_file.push_str(".exe");
 
     let exit_code = Command::new("gcc")
-        .args([{&asm_path}, "-o", &executable_file])
+        .args([{&asm_path}, "runtime/malloc.o", "-o", &executable_file, "-mconsole"])
         .status()
         .expect("executable generated sucessfully");
 

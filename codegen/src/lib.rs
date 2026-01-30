@@ -1,4 +1,4 @@
-use model::{BinaryOp, UnaryOp, Type};
+use model::{BinaryOp, UnaryOp};
 use ir::{IRProgram, Function as IrFunction, BlockId, VarId, Operand as IrOperand, Instruction as IrInstruction, Terminator as IrTerminator};
 use std::collections::HashMap;
 
@@ -35,7 +35,7 @@ impl X86Operand {
             Self::Reg(r) => r.to_str().to_string(),
             Self::Mem(r, offset) => format!("QWORD PTR [{}{:+}]", r.to_str(), offset),
             Self::Imm(i) => i.to_string(),
-            Self::Label(s) => s.clone(),
+            Self::Label(s) => format!("[rip + {}]", s),
         }
     }
 }
@@ -58,6 +58,7 @@ pub enum X86Instr {
     Label(String),
     Cqto, // CDQ/CQO for division
     Xor(X86Operand, X86Operand),
+    Lea(X86Operand, X86Operand),
 }
 
 pub struct Codegen {
@@ -79,6 +80,17 @@ impl Codegen {
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
         let mut output = String::new();
         output.push_str(".intel_syntax noprefix\n");
+        
+        if !prog.global_strings.is_empty() {
+            output.push_str(".data\n");
+            for (label, content) in &prog.global_strings {
+                // Escape string properly
+                let escaped = content.replace("\"", "\\\"");
+                output.push_str(&format!("{}: .asciz \"{}\"\n", label, escaped));
+            }
+        }
+
+        output.push_str(".text\n");
         output.push_str(".globl main\n\n");
         
         for func in &prog.functions {
@@ -142,6 +154,21 @@ impl Codegen {
                     IrInstruction::Copy { dest, .. } => {
                         self.get_or_create_slot(*dest);
                     }
+                    IrInstruction::Alloca { dest, r#type } => {
+                        self.get_or_create_slot(*dest);
+                        let size = self.get_type_size(r#type) as i32;
+                        self.next_slot += size;
+                    }
+                    IrInstruction::Load { dest, .. } |
+                    IrInstruction::GetElementPtr { dest, .. } => {
+                        self.get_or_create_slot(*dest);
+                    }
+                    IrInstruction::Call { dest, .. } => {
+                        if let Some(d) = dest {
+                            self.get_or_create_slot(*d);
+                        }
+                    }
+                    IrInstruction::Store { .. } => {}
                 }
             }
         }
@@ -169,6 +196,7 @@ impl Codegen {
         match op {
             IrOperand::Constant(c) => X86Operand::Imm(*c),
             IrOperand::Var(v) => self.var_to_op(*v),
+            IrOperand::Global(s) => X86Operand::Label(s.clone()),
         }
     }
 
@@ -251,10 +279,89 @@ impl Codegen {
                         self.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                     }
-                    _ => {}
+                    UnaryOp::Plus => {
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                    }
+                    UnaryOp::AddrOf | UnaryOp::Deref => unreachable!("AddrOf and Deref should be lowered by IR"),
                 }
             }
             IrInstruction::Phi { .. } => {}
+            IrInstruction::Alloca { dest, r#type } => {
+                let size = self.get_type_size(r#type);
+                let ptr_slot = *self.stack_slots.get(dest).expect("alloca dest must have slot");
+                // The buffer was allocated immediately after the pointer slot in allocate_stack_slots
+                let buffer_offset = ptr_slot - size as i32;
+                let d_op = self.var_to_op(*dest);
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, buffer_offset)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            IrInstruction::Load { dest, addr } => {
+                let a_op = self.var_to_op(*addr);
+                let d_op = self.var_to_op(*dest);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            IrInstruction::Store { addr, src } => {
+                let a_op = self.var_to_op(*addr);
+                let s_op = self.operand_to_op(src);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                if matches!(s_op, X86Operand::Mem(..)) {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), s_op));
+                }
+            }
+            IrInstruction::GetElementPtr { dest, base, index } => {
+                let b_op = self.var_to_op(*base);
+                let i_op = self.operand_to_op(index);
+                let d_op = self.var_to_op(*dest);
+                
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
+                self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rcx), X86Operand::Imm(8))); // Hardcoded 8 for now
+                self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            IrInstruction::Call { dest, name, args } => {
+                let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
+                for (i, arg) in args.iter().enumerate() {
+                    let val = self.operand_to_op(arg);
+                    if i < 4 {
+                        if let X86Operand::Label(_) = val {
+                            self.asm.push(X86Instr::Lea(X86Operand::Reg(param_regs[i].clone()), val));
+                        } else {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
+                        }
+                    } else {
+                        let offset = 32 + (i - 4) * 8;
+                        if let X86Operand::Label(_) = val {
+                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), val));
+                            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
+                        } else {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
+                        }
+                    }
+                }
+                self.asm.push(X86Instr::Call(name.clone()));
+                if let Some(d) = dest {
+                    let d_op = self.var_to_op(*d);
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+        }
+    }
+
+    fn get_type_size(&self, r#type: &model::Type) -> usize {
+        match r#type {
+            model::Type::Int => 8,
+            model::Type::Void => 0,
+            model::Type::Array(inner, size) => self.get_type_size(inner) * size,
+            model::Type::Pointer(_) => 8,
+            model::Type::Char => 1,
         }
     }
 
@@ -350,6 +457,7 @@ impl Codegen {
                 X86Instr::Ret => s.push_str("  ret\n"),
                 X86Instr::Cqto => s.push_str("  cqo\n"),
                 X86Instr::Xor(d, s_op) => s.push_str(&format!("  xor {}, {}\n", d.to_string(), s_op.to_string())),
+                X86Instr::Lea(d, s_op) => s.push_str(&format!("  lea {}, {}\n", d.to_string(), s_op.to_string())),
             }
         }
         s

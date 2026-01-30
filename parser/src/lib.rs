@@ -21,9 +21,73 @@ impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Result<Program, String> {
         let mut functions = Vec::new();
         while !self.is_at_end() {
-            functions.push(self.parse_function()?);
+            if self.is_function_definition() {
+                functions.push(self.parse_function()?);
+            } else {
+                self.skip_top_level_item()?;
+            }
         }
         Ok(Program { functions })
+    }
+
+    fn is_function_definition(&self) -> bool {
+        let mut temp_pos = self.pos;
+        // Skip modifiers
+        while temp_pos < self.tokens.len() {
+            let tok = &self.tokens[temp_pos];
+            if matches!(tok, Token::Static | Token::Extern | Token::Inline | Token::Attribute | Token::Extension | Token::Const | Token::Restrict | Token::Hash) {
+                temp_pos += 1;
+                // If it's attribute or extension, it might have parentheses
+                if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+                    let mut depth = 1;
+                    temp_pos += 1;
+                    while depth > 0 && temp_pos < self.tokens.len() {
+                        if matches!(self.tokens[temp_pos], Token::OpenParenthesis) { depth += 1; }
+                        else if matches!(self.tokens[temp_pos], Token::CloseParenthesis) { depth -= 1; }
+                        temp_pos += 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        if temp_pos >= self.tokens.len() { return false; }
+        // Must start with a known type for now
+        if !matches!(self.tokens[temp_pos], Token::Int | Token::Void | Token::Char) {
+            return false;
+        }
+        temp_pos += 1;
+
+        // Followed by identifier or star (for pointers)
+        while temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Star) {
+            temp_pos += 1;
+        }
+        
+        if temp_pos >= self.tokens.len() { return false; }
+        if !matches!(self.tokens[temp_pos], Token::Identifier { .. }) {
+            return false;
+        }
+        temp_pos += 1;
+
+        // Followed by '('
+        if temp_pos >= self.tokens.len() || !matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+            return false;
+        }
+
+        // Search for '{' or ';' to distinguish definition vs prototype
+        let mut paren_depth = 0;
+        while temp_pos < self.tokens.len() {
+            match &self.tokens[temp_pos] {
+                Token::OpenParenthesis => paren_depth += 1,
+                Token::CloseParenthesis => paren_depth -= 1,
+                Token::OpenBrace if paren_depth == 0 => return true,
+                Token::Semicolon if paren_depth == 0 => return false,
+                _ => {}
+            }
+            temp_pos += 1;
+        }
+        false
     }
 
     fn parse_function(&mut self) -> Result<Function, String> {
@@ -42,6 +106,13 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
             loop {
+                if self.match_token(|t| matches!(t, Token::Ellipsis)) {
+                    // Just skip ellipsis for now
+                    if !self.match_token(|t| matches!(t, Token::Comma)) {
+                        break;
+                    }
+                    continue;
+                }
                 let p_type = self.parse_type()?;
                 let p_name = match self.advance() {
                     Some(Token::Identifier { value }) => value.clone(),
@@ -66,11 +137,76 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<Type, String> {
-        match self.advance() {
-            Some(Token::Int) => Ok(Type::Int),
-            Some(Token::Void) => Ok(Type::Void),
-            other => Err(format!("expected type specifier, found {:?}", other)),
+        loop {
+            if self.match_token(|t| matches!(t, Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension)) {
+                if let Some(Token::Attribute | Token::Extension) = self.previous() {
+                    self.skip_parentheses()?;
+                }
+            } else {
+                break;
+            }
         }
+
+        let mut base = match self.advance() {
+            Some(Token::Int) => Type::Int,
+            Some(Token::Void) => Type::Void,
+            Some(Token::Char) => Type::Char,
+            other => return Err(format!("expected type specifier, found {:?}", other)),
+        };
+
+        while self.match_token(|t| matches!(t, Token::Star)) {
+            base = Type::Pointer(Box::new(base));
+        }
+
+        Ok(base)
+    }
+
+    fn skip_parentheses(&mut self) -> Result<(), String> {
+        if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+            return Ok(());
+        }
+        let mut depth = 1;
+        while depth > 0 && !self.is_at_end() {
+            match self.advance() {
+                Some(Token::OpenParenthesis) => depth += 1,
+                Some(Token::CloseParenthesis) => depth -= 1,
+                None => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_top_level_item(&mut self) -> Result<(), String> {
+        while !self.is_at_end() {
+            match self.peek() {
+                Some(Token::Semicolon) => {
+                    self.advance();
+                    return Ok(());
+                }
+                Some(Token::OpenBrace) => {
+                    self.skip_block_internal()?;
+                    return Ok(());
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_block_internal(&mut self) -> Result<(), String> {
+        self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
+        let mut depth = 1;
+        while depth > 0 && !self.is_at_end() {
+            match self.advance() {
+                Some(Token::OpenBrace) => depth += 1,
+                Some(Token::CloseBrace) => depth -= 1,
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn parse_block(&mut self) -> Result<Block, String> {
@@ -166,12 +302,23 @@ impl<'a> Parser<'a> {
         }
 
         // Variable Declaration
-        if self.check(&|t| matches!(t, Token::Int | Token::Void)) {
-            let r#type = self.parse_type()?;
+        if self.check(&|t| matches!(t, Token::Int | Token::Void | Token::Char | Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension)) {
+            let mut r#type = self.parse_type()?;
             let name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
                 other => return Err(format!("expected identifier after type, found {:?}", other)),
             };
+
+            // Check for array
+            if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                let size = match self.advance() {
+                    Some(Token::Constant { value }) => *value as usize,
+                    other => return Err(format!("expected constant array size, found {:?}", other)),
+                };
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                r#type = Type::Array(Box::new(r#type), size);
+            }
+
             let init = if self.match_token(|t| matches!(t, Token::Equal)) {
                 Some(self.parse_expr()?)
             } else {
@@ -203,6 +350,14 @@ impl<'a> Parser<'a> {
                     let value = self.parse_assignment()?;
                     Ok(Expr::Binary {
                         left: Box::new(Expr::Variable(name)),
+                        op: BinaryOp::Assign,
+                        right: Box::new(value),
+                    })
+                }
+                Expr::Index { .. } => {
+                    let value = self.parse_assignment()?;
+                    Ok(Expr::Binary {
+                        left: Box::new(left),
                         op: BinaryOp::Assign,
                         right: Box::new(value),
                     })
@@ -326,11 +481,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus | Token::Bang)) {
-            let op = match self.previous().unwrap() {
+        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus | Token::Bang | Token::Star | Token::Ampersand)) {
+            let token = self.previous().unwrap().clone();
+            let op = match token {
                 Token::Plus => UnaryOp::Plus,
                 Token::Minus => UnaryOp::Minus,
                 Token::Bang => UnaryOp::LogicalNot,
+                Token::Star => UnaryOp::Deref,
+                Token::Ampersand => UnaryOp::AddrOf,
                 _ => unreachable!(),
             };
             let expr = self.parse_unary()?;
@@ -338,15 +496,83 @@ impl<'a> Parser<'a> {
                 op,
                 expr: Box::new(expr),
             })
+        } else if self.match_token(|t| matches!(t, Token::SizeOf)) {
+            if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                if self.check_is_type() {
+                    let ty = self.parse_type()?;
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    Ok(Expr::SizeOf(ty))
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    Ok(Expr::SizeOfExpr(Box::new(expr)))
+                }
+            } else {
+                let expr = self.parse_unary()?;
+                Ok(Expr::SizeOfExpr(Box::new(expr)))
+            }
+        } else if self.check(&|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1) {
+            self.advance(); // consume '('
+            let ty = self.parse_type()?;
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            let expr = self.parse_unary()?;
+            Ok(Expr::Cast(ty, Box::new(expr)))
         } else {
-            self.parse_primary()
+            self.parse_postfix()
         }
+    }
+
+    fn check_is_type(&self) -> bool {
+        self.check_is_type_at(0)
+    }
+
+    fn check_is_type_at(&self, offset: usize) -> bool {
+        match self.tokens.get(self.pos + offset) {
+            Some(Token::Int | Token::Void | Token::Char | Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension) => true,
+            _ => false,
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_primary()?;
+
+        loop {
+            if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                let index = self.parse_expr()?;
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                expr = Expr::Index {
+                    array: Box::new(expr),
+                    index: Box::new(index),
+                };
+            } else if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                let mut args = Vec::new();
+                if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if !self.match_token(|t| matches!(t, Token::Comma)) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                if let Expr::Variable(name) = expr {
+                    expr = Expr::Call { name, args };
+                } else {
+                    return Err("can only call variables (functions)".to_string());
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(expr)
     }
 
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.advance() {
             Some(Token::Identifier { value }) => Ok(Expr::Variable(value.clone())),
             Some(Token::Constant { value }) => Ok(Expr::Constant(*value)),
+            Some(Token::StringLiteral { value }) => Ok(Expr::StringLiteral(value.clone())),
             Some(Token::OpenParenthesis) => {
                 let expr = self.parse_expr()?;
                 self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
@@ -488,5 +714,22 @@ mod tests {
         let tokens = lex(src).unwrap();
         let program = parse_tokens(&tokens).unwrap();
         matches!(program.functions[0].body.statements[0], Stmt::Return(Some(Expr::Binary { .. })));
+    }
+
+    #[test]
+    fn test_header_tolerance() {
+        let src = r#"
+            typedef int my_int;
+            struct foo { int x; };
+            extern int bar(int x);
+            static inline int baz(int x) { return x; }
+            int main() {
+                return 0;
+            }
+        "#;
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "main");
     }
 }

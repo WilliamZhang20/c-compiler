@@ -11,6 +11,7 @@ pub struct BlockId(pub usize);
 pub enum Operand {
     Constant(i64),
     Var(VarId),
+    Global(String),
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,28 @@ pub enum Instruction {
     Copy {
         dest: VarId,
         src: Operand,
+    },
+    Alloca {
+        dest: VarId,
+        r#type: Type,
+    },
+    Load {
+        dest: VarId,
+        addr: VarId,
+    },
+    Store {
+        addr: VarId,
+        src: Operand,
+    },
+    GetElementPtr {
+        dest: VarId,
+        base: VarId,
+        index: Operand,
+    },
+    Call {
+        dest: Option<VarId>,
+        name: String,
+        args: Vec<Operand>,
     },
 }
 
@@ -68,6 +91,7 @@ pub struct Function {
 #[derive(Debug, Clone)]
 pub struct IRProgram {
     pub functions: Vec<Function>,
+    pub global_strings: Vec<(String, String)>, // (label, content)
 }
 
 pub struct Lowerer {
@@ -84,6 +108,8 @@ pub struct Lowerer {
     // Incomplete Phis: BlockId -> Variable Name -> VarId (the Phi dest)
     incomplete_phis: HashMap<BlockId, HashMap<String, VarId>>,
     sealed_blocks: HashSet<BlockId>,
+    global_strings: Vec<(String, String)>,
+    variable_allocas: HashMap<String, VarId>,
 }
 
 impl Lowerer {
@@ -98,6 +124,8 @@ impl Lowerer {
             current_block: None,
             incomplete_phis: HashMap::new(),
             sealed_blocks: HashSet::new(),
+            global_strings: Vec::new(),
+            variable_allocas: HashMap::new(),
         }
     }
 
@@ -113,12 +141,22 @@ impl Lowerer {
         BlockId(id)
     }
 
+    fn get_type_size(&self, ty: &Type) -> i64 {
+        match ty {
+            Type::Int => 4,
+            Type::Char => 1,
+            Type::Void => 0,
+            Type::Pointer(_) => 8, // x64 pointers are 8 bytes
+            Type::Array(inner, size) => self.get_type_size(inner) * (*size as i64),
+        }
+    }
+
     pub fn lower_program(&mut self, ast: &AstProgram) -> Result<IRProgram, String> {
         let mut functions = Vec::new();
         for f in &ast.functions {
             functions.push(self.lower_function(f)?);
         }
-        Ok(IRProgram { functions })
+        Ok(IRProgram { functions, global_strings: self.global_strings.clone() })
     }
 
     fn lower_function(&mut self, f: &AstFunction) -> Result<Function, String> {
@@ -130,6 +168,7 @@ impl Lowerer {
         self.next_block = 0;
         self.incomplete_phis.clear();
         self.sealed_blocks.clear();
+        self.variable_allocas.clear();
 
         let entry_id = self.new_block();
         self.current_block = Some(entry_id);
@@ -190,25 +229,46 @@ impl Lowerer {
                 self.current_block = None; // Dead code after return
             }
             AstStmt::Declaration { r#type, name, init } => {
-                if self.symbol_table.contains_key(name) {
-                    return Err(format!("Redeclaration of variable {}", name));
-                }
                 self.symbol_table.insert(name.clone(), r#type.clone());
-                if let Some(e) = init {
-                    let val = self.lower_expr(e)?;
-                    let bid = self.current_block.ok_or("Declaration outside of block")?;
-                    let var = match val {
-                        Operand::Var(v) => v,
-                        Operand::Constant(_) => {
-                            let v = self.new_var();
-                            self.blocks[bid.0].instructions.push(Instruction::Copy {
-                                dest: v,
-                                src: val,
-                            });
-                            v
-                        }
-                    };
+                let bid = self.current_block.ok_or("Declaration outside of block")?;
+                
+                if matches!(r#type, Type::Array(..)) {
+                    let var = self.new_var();
+                    self.blocks[bid.0].instructions.push(Instruction::Alloca {
+                        dest: var,
+                        r#type: r#type.clone(),
+                    });
                     self.write_variable(name, bid, var);
+                    self.variable_allocas.insert(name.clone(), var);
+                } else {
+                    // Alloca for all scalars too to support & operator
+                    let alloca_var = self.new_var();
+                    self.blocks[bid.0].instructions.push(Instruction::Alloca {
+                        dest: alloca_var,
+                        r#type: r#type.clone(),
+                    });
+                    self.variable_allocas.insert(name.clone(), alloca_var);
+
+                    if let Some(e) = init {
+                        let val = self.lower_expr(e)?;
+                        self.blocks[bid.0].instructions.push(Instruction::Store {
+                            addr: alloca_var,
+                            src: val.clone(),
+                        });
+                        
+                        let var = match val {
+                            Operand::Var(v) => v,
+                            Operand::Constant(_) | Operand::Global(_) => {
+                                let v = self.new_var();
+                                self.blocks[bid.0].instructions.push(Instruction::Copy {
+                                    dest: v,
+                                    src: val,
+                                });
+                                v
+                            }
+                        };
+                        self.write_variable(name, bid, var);
+                    }
                 }
             }
             AstStmt::Expr(e) => {
@@ -299,7 +359,95 @@ impl Lowerer {
                 
                 self.current_block = Some(exit_id);
             }
-            _ => return Err("Stmt not implemented in lowerer yet".to_string()),
+            AstStmt::DoWhile { body, cond } => {
+                let body_id = self.new_block();
+                let latch_id = self.new_block();
+                let exit_id = self.new_block();
+
+                let bid = self.current_block.ok_or("Do-while outside of block")?;
+                self.blocks[bid.0].terminator = Terminator::Br(body_id);
+
+                self.blocks.push(BasicBlock { id: body_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+                self.blocks.push(BasicBlock { id: latch_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+                self.blocks.push(BasicBlock { id: exit_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+
+                // Body
+                // Body pred: current (entry) and latch. NOT sealed yet.
+                self.current_block = Some(body_id);
+                self.lower_stmt(body)?;
+                if let Some(curr) = self.current_block {
+                    self.blocks[curr.0].terminator = Terminator::Br(latch_id);
+                }
+
+                // Latch
+                self.sealed_blocks.insert(latch_id);
+                self.current_block = Some(latch_id);
+                let cond_val = self.lower_expr(cond)?;
+                self.blocks[latch_id.0].terminator = Terminator::CondBr {
+                    cond: cond_val,
+                    then_block: body_id,
+                    else_block: exit_id,
+                };
+
+                // Seal body and exit
+                self.seal_block(body_id);
+                self.seal_block(exit_id);
+
+                self.current_block = Some(exit_id);
+            }
+            AstStmt::For { init, cond, post, body } => {
+                if let Some(e) = init {
+                    self.lower_expr(e)?;
+                }
+
+                let header_id = self.new_block();
+                let body_id = self.new_block();
+                let post_id = self.new_block();
+                let exit_id = self.new_block();
+
+                let bid = self.current_block.ok_or("For loop outside of block")?;
+                self.blocks[bid.0].terminator = Terminator::Br(header_id);
+
+                self.blocks.push(BasicBlock { id: header_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+                self.blocks.push(BasicBlock { id: body_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+                self.blocks.push(BasicBlock { id: post_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+                self.blocks.push(BasicBlock { id: exit_id, instructions: Vec::new(), terminator: Terminator::Unreachable });
+
+                // Header
+                self.current_block = Some(header_id);
+                if let Some(c) = cond {
+                    let cond_val = self.lower_expr(c)?;
+                    self.blocks[header_id.0].terminator = Terminator::CondBr {
+                        cond: cond_val,
+                        then_block: body_id,
+                        else_block: exit_id,
+                    };
+                } else {
+                    self.blocks[header_id.0].terminator = Terminator::Br(body_id);
+                }
+
+                // Body
+                self.sealed_blocks.insert(body_id);
+                self.current_block = Some(body_id);
+                self.lower_stmt(body)?;
+                if let Some(curr) = self.current_block {
+                    self.blocks[curr.0].terminator = Terminator::Br(post_id);
+                }
+
+                // Post
+                self.sealed_blocks.insert(post_id);
+                self.current_block = Some(post_id);
+                if let Some(p) = post {
+                    self.lower_expr(p)?;
+                }
+                self.blocks[post_id.0].terminator = Terminator::Br(header_id);
+
+                // Seal header and exit
+                self.seal_block(header_id);
+                self.seal_block(exit_id);
+
+                self.current_block = Some(exit_id);
+            }
         }
         Ok(())
     }
@@ -322,21 +470,47 @@ impl Lowerer {
             }
             AstExpr::Binary { left, op, right } => {
                 if *op == BinaryOp::Assign {
+                    let bid = self.current_block.ok_or("Assignment outside block")?;
+                    let val = self.lower_expr(right)?;
+
                     if let AstExpr::Variable(name) = &**left {
-                        let val = self.lower_expr(right)?;
-                        let bid = self.current_block.ok_or("Assignment outside block")?;
                         let var = match val {
                             Operand::Var(v) => v,
-                            Operand::Constant(_) => {
+                            Operand::Constant(_) | Operand::Global(_) => {
                                 let v = self.new_var();
-                                self.blocks[bid.0].instructions.push(Instruction::Copy { dest: v, src: val });
+                                self.blocks[bid.0].instructions.push(Instruction::Copy { dest: v, src: val.clone() });
                                 v
                             }
                         };
                         self.write_variable(name, bid, var);
-                        return Ok(Operand::Var(var));
+                        
+                        if let Some(addr) = self.variable_allocas.get(name) {
+                            self.blocks[bid.0].instructions.push(Instruction::Store {
+                                addr: *addr,
+                                src: val.clone(),
+                            });
+                        }
+                        return Ok(val);
+                    } else if let AstExpr::Index { array, index } = &**left {
+                        let addr = self.lower_index_to_addr(array, index)?;
+                        self.blocks[bid.0].instructions.push(Instruction::Store {
+                            addr,
+                            src: val.clone(),
+                        });
+                        return Ok(val);
+                    } else if let AstExpr::Unary { op: UnaryOp::Deref, expr } = &**left {
+                        let addr_op = self.lower_expr(expr)?;
+                        let addr = match addr_op {
+                            Operand::Var(v) => v,
+                            _ => return Err("Dereference assignment target must be in a variable".to_string()),
+                        };
+                        self.blocks[bid.0].instructions.push(Instruction::Store {
+                            addr,
+                            src: val.clone(),
+                        });
+                        return Ok(val);
                     }
-                    return Err("LHS of assignment must be variable".to_string());
+                    return Err("invalid assignment target".to_string());
                 }
                 let l_val = self.lower_expr(left)?;
                 let r_val = self.lower_expr(right)?;
@@ -351,6 +525,31 @@ impl Lowerer {
                 Ok(Operand::Var(dest))
             }
             AstExpr::Unary { op, expr } => {
+                if *op == UnaryOp::AddrOf {
+                    if let AstExpr::Variable(name) = &**expr {
+                        let addr = self.variable_allocas.get(name).ok_or_else(|| format!("Variable {} not found for &", name))?;
+                        return Ok(Operand::Var(*addr));
+                    } else if let AstExpr::Index { array, index } = &**expr {
+                        let addr = self.lower_index_to_addr(array, index)?;
+                        return Ok(Operand::Var(addr));
+                    } else {
+                        return Err("Can only take address of variables or array elements".to_string());
+                    }
+                }
+                if *op == UnaryOp::Deref {
+                    let addr_op = self.lower_expr(expr)?;
+                    let addr = match addr_op {
+                        Operand::Var(v) => v,
+                        _ => return Err("Dereference operand must be in a variable".to_string()),
+                    };
+                    let bid = self.current_block.ok_or("Deref outside block")?;
+                    let dest = self.new_var();
+                    self.blocks[bid.0].instructions.push(Instruction::Load {
+                        dest,
+                        addr,
+                    });
+                    return Ok(Operand::Var(dest));
+                }
                 let val = self.lower_expr(expr)?;
                 let bid = self.current_block.ok_or("Unary op outside block")?;
                 let dest = self.new_var();
@@ -361,7 +560,64 @@ impl Lowerer {
                 });
                 Ok(Operand::Var(dest))
             }
+            AstExpr::Index { array, index } => {
+                let addr = self.lower_index_to_addr(array, index)?;
+                let bid = self.current_block.ok_or("Index outside block")?;
+                let dest = self.new_var();
+                self.blocks[bid.0].instructions.push(Instruction::Load {
+                    dest,
+                    addr,
+                });
+                Ok(Operand::Var(dest))
+            }
+            AstExpr::StringLiteral(s) => {
+                let label = format!("str_{}", self.global_strings.len());
+                self.global_strings.push((label.clone(), s.clone()));
+                Ok(Operand::Global(label))
+            }
+            AstExpr::Call { name, args } => {
+                let mut ir_args = Vec::new();
+                for arg in args {
+                    ir_args.push(self.lower_expr(arg)?);
+                }
+                let bid = self.current_block.ok_or("Call outside block")?;
+                let dest = self.new_var();
+                self.blocks[bid.0].instructions.push(Instruction::Call {
+                    dest: Some(dest),
+                    name: name.clone(),
+                    args: ir_args,
+                });
+                Ok(Operand::Var(dest))
+            }
+            AstExpr::SizeOf(ty) => {
+                Ok(Operand::Constant(self.get_type_size(ty)))
+            }
+            AstExpr::SizeOfExpr(_expr) => {
+                Ok(Operand::Constant(8)) 
+            }
+            AstExpr::Cast(_ty, expr) => {
+                self.lower_expr(expr)
+            }
         }
+    }
+
+    fn lower_index_to_addr(&mut self, array: &AstExpr, index: &AstExpr) -> Result<VarId, String> {
+        let array_op = self.lower_expr(array)?;
+        let index_op = self.lower_expr(index)?;
+        let bid = self.current_block.ok_or("Index to addr outside block")?;
+        
+        let base_var = match array_op {
+            Operand::Var(v) => v,
+            _ => return Err("Array must be a variable or at least have a base pointer".to_string()),
+        };
+
+        let dest = self.new_var();
+        self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
+            dest,
+            base: base_var,
+            index: index_op,
+        });
+        Ok(dest)
     }
 
     fn write_variable(&mut self, name: &str, block: BlockId, value: VarId) {

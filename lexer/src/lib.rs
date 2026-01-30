@@ -1,11 +1,11 @@
 use model::Token;
 use regex_lite::Regex;
-use std::collections::HashMap;
 
 #[derive(PartialEq, Eq, Hash)]
 enum TokenType {
     Identifier,
     Constant,
+    StringLiteral,
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -14,159 +14,184 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     let Ok(block_comment_regex) = Regex::new("\\/\\*[\\s\\S]*?\\*\\/") else {
         return Err("Failed to compile block comment regex".to_string());
     };
-    let Ok(identifier_regex) = Regex::new("^[a-zA-Z]\\w*\\b") else {
+    
+    // Pre-process: remove block comments and line comments are handled in-loop or pre-processed
+    let input_processed = block_comment_regex.replace_all(input, "");
+    let mut current_input: &str = &input_processed;
+
+    let Ok(identifier_regex) = Regex::new("^[a-zA-Z_]\\w*\\b") else {
         return Err("Failed to compile identifier regex".to_string());
     };
-    let Ok(constant_regex) = Regex::new("^[0-9]+\\b") else {
+    let Ok(constant_regex) = Regex::new("^(0x[0-9a-fA-F]+|[0-9]+)\\b") else {
         return Err("Failed to compile constant regex".to_string());
     };
+    let Ok(string_regex) = Regex::new("^\"(([^\"]|\\\\\")*)\"") else {
+        return Err("Failed to compile string regex".to_string());
+    };
 
-    let mut regexes = HashMap::new();
-    regexes.insert(TokenType::Identifier, identifier_regex);
-    regexes.insert(TokenType::Constant, constant_regex);
-
-    let mut input = input.to_string();
-    while !input.is_empty() {
-        input = input.trim_start().to_string();
-
-        // if the string is empty after trimming then go to the next line
-        if input.is_empty() {
-            continue;
+    while !current_input.is_empty() {
+        current_input = current_input.trim_start();
+        if current_input.is_empty() {
+            break;
         }
-
-        // remove C style block comments
-        input = block_comment_regex.replace_all(&input, "").to_string();
 
         // handle C++ style comments
-        if input.starts_with("//") {
-            let (_, input_str) = input.split_once('\n').unwrap();
-            input = input_str.to_string();
+        if current_input.starts_with("//") {
+            if let Some((_, rest)) = current_input.split_once('\n') {
+                current_input = rest;
+            } else {
+                current_input = "";
+            }
             continue;
         }
 
-        // handle newlines
-        if input.starts_with('\n') {
-            let (_, input_str) = input.split_at(1);
-            input = input_str.to_string();
+        // handle multicharacter symbols
+        if current_input.starts_with("...") {
+            tokens.push(Token::Ellipsis);
+            current_input = &current_input[3..];
+            continue;
+        }
+        if current_input.starts_with("==") {
+            tokens.push(Token::EqualEqual);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with("!=") {
+            tokens.push(Token::BangEqual);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with("<=") {
+            tokens.push(Token::LessEqual);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with(">=") {
+            tokens.push(Token::GreaterEqual);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with("&&") {
+            tokens.push(Token::AndAnd);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with("||") {
+            tokens.push(Token::OrOr);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with("->") {
+            // Treat as individual tokens for now? -> is usually for struct pointers.
+            // But we don't support it yet, so let's just skip it as two symbols or a token.
+            // I'll add a token later if needed. For now just consume.
+            current_input = &current_input[2..];
             continue;
         }
 
-    // handle braces, semicolons, and commas
-    if input.starts_with([';', '(', ')', '{', '}', ',']) {
-        let (token, new_input) = input.split_at(1);
-        let token = match token {
-            ";" => Token::Semicolon,
-            "(" => Token::OpenParenthesis,
-            ")" => Token::CloseParenthesis,
-            "{" => Token::OpenBrace,
-            "}" => Token::CloseBrace,
-            "," => Token::Comma,
-            _ => unreachable!("This should never happen"),
-        };
-        tokens.push(token);
-        input = new_input.to_string();
-        continue;
-    }
-
-    // handle operators
-    if input.starts_with("==") {
-        tokens.push(Token::EqualEqual);
-        input = input[2..].to_string();
-        continue;
-    }
-    if input.starts_with("!=") {
-        tokens.push(Token::BangEqual);
-        input = input[2..].to_string();
-        continue;
-    }
-    if input.starts_with("<=") {
-        tokens.push(Token::LessEqual);
-        input = input[2..].to_string();
-        continue;
-    }
-    if input.starts_with(">=") {
-        tokens.push(Token::GreaterEqual);
-        input = input[2..].to_string();
-        continue;
-    }
-    if input.starts_with("&&") {
-        tokens.push(Token::AndAnd);
-        input = input[2..].to_string();
-        continue;
-    }
-    if input.starts_with("||") {
-        tokens.push(Token::OrOr);
-        input = input[2..].to_string();
-        continue;
-    }
-
-    if input.starts_with(['+', '-', '*', '/', '=', '<', '>', '!']) {
-        let (op, new_input) = input.split_at(1);
-        let token = match op {
-            "+" => Token::Plus,
-            "-" => Token::Minus,
-            "*" => Token::Star,
-            "/" => Token::Slash,
-            "=" => Token::Equal,
-            "<" => Token::Less,
-            ">" => Token::Greater,
-            "!" => Token::Bang,
-            _ => unreachable!("This should never happen"),
-        };
-        tokens.push(token);
-        input = new_input.to_string();
-        continue;
-    }
-
-    // find longest match at start of input for any regex in Table 1-1
-    let mut longest_capture = "".to_string();
-    let mut token_type = None;
-
-    for (tok_type, re) in &regexes {
-        let Some(caps) = re.captures(&input) else { continue };
-        if caps[0].len() > longest_capture.len() {
-            longest_capture = caps[0].to_string();
-            token_type = Some(tok_type);
+        // handle single character symbols
+        if let Some(c) = current_input.chars().next() {
+            let token = match c {
+                ';' => Some(Token::Semicolon),
+                '(' => Some(Token::OpenParenthesis),
+                ')' => Some(Token::CloseParenthesis),
+                '{' => Some(Token::OpenBrace),
+                '}' => Some(Token::CloseBrace),
+                ',' => Some(Token::Comma),
+                '[' => Some(Token::OpenBracket),
+                ']' => Some(Token::CloseBracket),
+                '#' => Some(Token::Hash),
+                ':' => Some(Token::Colon),
+                '.' => Some(Token::Dot),
+                '&' => Some(Token::Ampersand),
+                '~' => Some(Token::Tilde),
+                '+' => Some(Token::Plus),
+                '-' => Some(Token::Minus),
+                '*' => Some(Token::Star),
+                '/' => Some(Token::Slash),
+                '=' => Some(Token::Equal),
+                '<' => Some(Token::Less),
+                '>' => Some(Token::Greater),
+                '!' => Some(Token::Bang),
+                _ => None,
+            };
+            if let Some(t) = token {
+                tokens.push(t);
+                current_input = &current_input[c.len_utf8()..];
+                continue;
+            }
         }
-    }
 
-    // if no match is found, raise an error
-    let Some(token_type) = token_type else {
-        return Err("Found invalid token".to_string());
-    };
+        // handle regex matches
+        let mut longest_capture = "";
+        let mut tok_type = None;
 
-    // convert matching substring into a token
-    let mut token = match token_type {
-        TokenType::Identifier => Token::Identifier { value: longest_capture.trim().to_string() },
-        TokenType::Constant => {
-            let value = longest_capture.trim().parse::<i64>()
-                .map_err(|_| format!("Failed to parse constant: {}", longest_capture))?;
-            Token::Constant { value }
+        if let Some(caps) = identifier_regex.captures(current_input) {
+            longest_capture = caps.get(0).unwrap().as_str();
+            tok_type = Some(TokenType::Identifier);
         }
-    };
+        if let Some(caps) = constant_regex.captures(current_input) {
+            let text = caps.get(0).unwrap().as_str();
+            if text.len() > longest_capture.len() {
+                longest_capture = text;
+                tok_type = Some(TokenType::Constant);
+            }
+        }
+        if let Some(caps) = string_regex.captures(current_input) {
+            let text = caps.get(0).unwrap().as_str();
+            if text.len() > longest_capture.len() {
+                longest_capture = text;
+                tok_type = Some(TokenType::StringLiteral);
+            }
+        }
 
-    // convert identifiers that match keywords into keyword tokens
-    token = match token {
-        Token::Identifier { value } => match value.as_str() {
-            "int" => Token::Int,
-            "void" => Token::Void,
-            "return" => Token::Return,
-            "if" => Token::If,
-            "else" => Token::Else,
-            "while" => Token::While,
-            "for" => Token::For,
-            "do" => Token::Do,
-            _ => Token::Identifier { value },
-        },
-        other => other,
-    };
+        let Some(tt) = tok_type else {
+            return Err(format!("Found invalid token: '{}' at \"{}\"...", current_input.chars().next().unwrap(), &current_input[..current_input.len().min(20)]));
+        };
 
-    // add token to the `tokens` vector at the end
-    tokens.push(token);
+        let token = match tt {
+            TokenType::Identifier => {
+                let value = longest_capture.to_string();
+                match value.as_str() {
+                    "int" => Token::Int,
+                    "void" => Token::Void,
+                    "return" => Token::Return,
+                    "if" => Token::If,
+                    "else" => Token::Else,
+                    "while" => Token::While,
+                    "for" => Token::For,
+                    "do" => Token::Do,
+                    "static" => Token::Static,
+                    "extern" => Token::Extern,
+                    "inline" => Token::Inline,
+                    "const" => Token::Const,
+                    "typedef" => Token::Typedef,
+                    "struct" => Token::Struct,
+                    "char" => Token::Char,
+                    "__attribute__" => Token::Attribute,
+                    "__extension__" => Token::Extension,
+                    "restrict" => Token::Restrict,
+                    "sizeof" => Token::SizeOf,
+                    _ => Token::Identifier { value },
+                }
+            }
+            TokenType::Constant => {
+                let value = if longest_capture.starts_with("0x") {
+                    i64::from_str_radix(&longest_capture[2..], 16).map_err(|_| format!("Failed to parse hex constant: {}", longest_capture))?
+                } else {
+                    longest_capture.parse::<i64>().map_err(|_| format!("Failed to parse constant: {}", longest_capture))?
+                };
+                Token::Constant { value }
+            }
+            TokenType::StringLiteral => {
+                let value = longest_capture[1..longest_capture.len()-1].to_string();
+                Token::StringLiteral { value }
+            }
+        };
 
-    // remove matching substring from start of input
-    input = input[longest_capture.len()..].to_string();
-}
+        tokens.push(token);
+        current_input = &current_input[longest_capture.len()..];
+    }
 
     Ok(tokens)
 }

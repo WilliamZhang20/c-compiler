@@ -9,6 +9,8 @@ lexer = { path = "../lexer" }
 parser = { path = "../parser" }
 ir = { path = "../ir" }
 codegen = { path = "../codegen" }
+semantic = { path = "../semantic" }
+optimizer = { path = "../optimizer" }
 
 [lints]
 workspace = true

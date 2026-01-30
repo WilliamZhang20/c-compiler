@@ -116,7 +116,9 @@ dependencies = [
  "codegen",
  "ir",
  "lexer",
+ "optimizer",
  "parser",
+ "semantic",
 ]
 
 [[package]]
@@ -159,6 +161,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
 
 [[package]]
+name = "optimizer"
+version = "0.1.0"
+dependencies = [
+ "ir",
+ "model",
+]
+
+[[package]]
 name = "parser"
 version = "0.1.0"
 dependencies = [
@@ -189,6 +199,13 @@ name = "regex-lite"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d942b98df5e658f56f20d592c7f868833fe38115e65c33003d8cd224b0155da"
+
+[[package]]
+name = "semantic"
+version = "0.1.0"
+dependencies = [
+ "model",
+]
 
 [[package]]
 name = "strsim"
