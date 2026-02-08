@@ -1,14 +1,14 @@
 ﻿# Benchmark Results
 
-Generated: 2026-02-07 21:04:12
+Generated: 2026-02-08 09:08:34
 
 | Benchmark | Our Compiler (ms) | GCC -O0 (ms) | GCC -O2 (ms) | Speedup vs GCC-O0 | Speedup vs GCC-O2 |
 |-----------|-------------------|--------------|--------------|-------------------|-------------------|
-| fib | 24 | 19.93 | 20.2 | 0.83x | 0.84x |
-| array_sum | 21.02 | 18.66 | 17.7 | 0.89x | 0.84x |
-| matmul | 21.59 | 17.81 | 16.33 | 0.82x | 0.76x |
-| bitwise | 23.17 | 19.45 | 15.05 | 0.84x | 0.65x |
-| struct_bench | 18.81 | 17.69 | 18.41 | 0.94x | 0.98x |
+| fib | 15.23 | 14.32 | 14.61 | 0.94x | 0.96x |
+| array_sum | 12.34 | 14.18 | 12.13 | 1.15x | 0.98x |
+| matmul | 13.27 | 12.52 | 14.33 | 0.94x | 1.08x |
+| bitwise | 14.64 | 12.69 | 13.11 | 0.87x | 0.9x |
+| struct_bench | 14.24 | 15.02 | 13.43 | 1.05x | 0.94x |
 
 ## Notes
 - Times are averaged over 10 runs

@@ -141,40 +141,54 @@ impl Codegen {
     }
 
     fn allocate_stack_slots(&mut self, func: &IrFunction) {
+        // Only allocate stack slots for variables that:
+        // 1. Need Alloca (arrays/structs) - these always need stack space
+        // 2. Didn't get a register assigned (spilled variables)
+        
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
-                    IrInstruction::Binary { dest, .. } |
-                    IrInstruction::Unary { dest, .. } |
-                    IrInstruction::Phi { dest, .. } |
-                    IrInstruction::Copy { dest, .. } => {
-                        self.get_or_create_slot(*dest);
-                    }
                     IrInstruction::Alloca { dest, r#type } => {
+                        // Allocas always need stack space
                         self.get_or_create_slot(*dest);
                         let size = self.get_type_size(r#type) as i32;
                         self.next_slot += size;
                     }
+                    IrInstruction::Binary { dest, .. } |
+                    IrInstruction::Unary { dest, .. } |
+                    IrInstruction::Phi { dest, .. } |
+                    IrInstruction::Copy { dest, .. } |
                     IrInstruction::Load { dest, .. } |
                     IrInstruction::GetElementPtr { dest, .. } => {
-                        self.get_or_create_slot(*dest);
+                        // Only allocate if no register was assigned
+                        if !self.reg_alloc.contains_key(dest) {
+                            self.get_or_create_slot(*dest);
+                        }
                     }
                     IrInstruction::Call { dest, .. } => {
                         if let Some(d) = dest {
-                            self.get_or_create_slot(*d);
+                            if !self.reg_alloc.contains_key(d) {
+                                self.get_or_create_slot(*d);
+                            }
                         }
                     }
                     IrInstruction::IndirectCall { dest, .. } => {
                         if let Some(d) = dest {
-                            self.get_or_create_slot(*d);
+                            if !self.reg_alloc.contains_key(d) {
+                                self.get_or_create_slot(*d);
+                            }
                         }
                     }
                     IrInstruction::Store { .. } => {}
                 }
             }
         }
+        
+        // Parameters: only allocate stack if no register
         for (_, var) in &func.params {
-            self.get_or_create_slot(*var);
+            if !self.reg_alloc.contains_key(var) {
+                self.get_or_create_slot(*var);
+            }
         }
     }
 

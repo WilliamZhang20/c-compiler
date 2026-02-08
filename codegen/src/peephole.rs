@@ -1,14 +1,105 @@
 // Peephole optimization pass for assembly-level improvements
 use crate::x86::{X86Instr, X86Operand, X86Reg};
+use std::collections::HashMap;
 
 /// apply_peephole performs pattern-based optimizations on generated assembly
 pub fn apply_peephole(instructions: &mut Vec<X86Instr>) {
+    // First pass: eliminate jump chains
+    eliminate_jump_chains(instructions);
+    
+    // Second pass: other peephole optimizations
     let mut i = 0;
     while i < instructions.len() {
         let removed = try_optimize_at(instructions, i);
         if !removed {
             i += 1;
         }
+    }
+}
+
+/// Eliminate jump-to-jump chains: if label A jumps to label B which immediately jumps to label C,
+/// redirect all jumps to A to go directly to C
+fn eliminate_jump_chains(instructions: &mut Vec<X86Instr>) {
+    // Build a map of label -> target if the label immediately jumps
+    let mut jump_targets: HashMap<String, String> = HashMap::new();
+    
+    let mut i = 0;
+    while i < instructions.len() {
+        if let X86Instr::Label(label) = &instructions[i] {
+            // Check if next instruction is a jump
+            if i + 1 < instructions.len() {
+                if let X86Instr::Jmp(target) = &instructions[i + 1] {
+                    jump_targets.insert(label.clone(), target.clone());
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    // Resolve transitive jumps: if A -> B and B -> C, then A -> C
+    for _ in 0..10 {  // Max 10 iterations to prevent infinite loops
+        let mut changed = false;
+        let entries: Vec<(String, String)> = jump_targets.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        
+        for (label, target) in entries {
+            if let Some(new_target) = jump_targets.get(&target).cloned() {
+                if new_target != label {  // Avoid self-loops
+                    jump_targets.insert(label, new_target);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    
+    // Now redirect all jumps using the map
+    for inst in instructions.iter_mut() {
+        match inst {
+            X86Instr::Jmp(target) => {
+                if let Some(new_target) = jump_targets.get(target) {
+                    *target = new_target.clone();
+                }
+            }
+            X86Instr::Jcc(_, target) => {
+                if let Some(new_target) = jump_targets.get(target) {
+                    *target = new_target.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Finally, remove useless label+jmp pairs that are now dead
+    let mut i = 0;
+    while i + 1 < instructions.len() {
+        if let (X86Instr::Label(_), X86Instr::Jmp(_)) = (&instructions[i], &instructions[i + 1]) {
+            // Check if this label is still referenced
+            let label_name = if let X86Instr::Label(name) = &instructions[i] {
+                name.clone()
+            } else {
+                unreachable!()
+            };
+            
+            let is_referenced = instructions.iter().enumerate().any(|(idx, inst)| {
+                if idx == i { return false; }  // Don't count self
+                match inst {
+                    X86Instr::Jmp(t) | X86Instr::Jcc(_, t) => t == &label_name,
+                    _ => false,
+                }
+            });
+            
+            if !is_referenced {
+                // Remove the label and jmp
+                instructions.remove(i);
+                instructions.remove(i);  // After removal, next is still at i
+                continue;
+            }
+        }
+        i += 1;
     }
 }
 
