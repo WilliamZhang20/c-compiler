@@ -81,8 +81,6 @@ Individual test files are located in the `testing/` directory. Each test file us
 
 ## Linux Kernel Compatibility Roadmap
 
-**Status**: The compiler now supports essential type system features (Section 1 below) as of January 2025. Remaining work focuses on storage qualifiers, attributes, and advanced features needed for systems programming.
-
 To fully compile the Linux kernel, the following features are prioritized:
 
 ### Section 1: Storage Qualifiers and Type Modifiers
