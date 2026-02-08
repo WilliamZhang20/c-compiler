@@ -20,6 +20,8 @@ pub enum Token {
     While,
     For,
     Do,
+    Break,
+    Continue,
     Static,
     Extern,
     Inline,
@@ -27,6 +29,9 @@ pub enum Token {
     Typedef,
     Struct,
     Char,
+    Switch,
+    Case,
+    Default,
     Hash, // #
     Ellipsis, // ...
     Colon, // :
@@ -43,6 +48,7 @@ pub enum Token {
     Minus,
     Star,
     Slash,
+    Percent,
     Equal,
     EqualEqual,
     BangEqual,
@@ -50,9 +56,14 @@ pub enum Token {
     LessEqual,
     Greater,
     GreaterEqual,
+    LessLess,
+    GreaterGreater,
     AndAnd,
     OrOr,
     Bang,
+    Pipe,
+    Caret,
+    Arrow, // ->
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -62,11 +73,28 @@ pub enum Type {
     Array(Box<Type>, usize),
     Pointer(Box<Type>),
     Char,
+    Struct(String),
+    Typedef(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub functions: Vec<Function>,
+    pub globals: Vec<GlobalVar>,
+    pub structs: Vec<StructDef>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<(Type, String)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct GlobalVar {
+    pub r#type: Type,
+    pub name: String,
+    pub init: Option<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -100,7 +128,7 @@ pub enum Stmt {
         cond: Expr,
     },
     For {
-        init: Option<Expr>,
+        init: Option<Box<Stmt>>,
         cond: Option<Expr>,
         post: Option<Expr>,
         body: Box<Stmt>,
@@ -111,6 +139,14 @@ pub enum Stmt {
         name: String,
         init: Option<Expr>,
     },
+    Break,
+    Continue,
+    Switch {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
+    Case(Expr),
+    Default,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -138,6 +174,14 @@ pub enum Expr {
     SizeOf(Type),
     SizeOfExpr(Box<Expr>),
     Cast(Type, Box<Expr>),
+    Member {
+        expr: Box<Expr>,
+        member: String,
+    },
+    PtrMember {
+        expr: Box<Expr>,
+        member: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -146,6 +190,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Mod,
     EqualEqual,
     NotEqual,
     Less,
@@ -154,6 +199,11 @@ pub enum BinaryOp {
     GreaterEqual,
     LogicalAnd,
     LogicalOr,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
     Assign,
 }
 
@@ -162,6 +212,7 @@ pub enum UnaryOp {
     Plus,
     Minus,
     LogicalNot,
+    BitwiseNot,
     AddrOf,
     Deref,
 }

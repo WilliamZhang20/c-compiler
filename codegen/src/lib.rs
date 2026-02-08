@@ -1,71 +1,24 @@
-use model::{BinaryOp, UnaryOp};
-use ir::{IRProgram, Function as IrFunction, BlockId, VarId, Operand as IrOperand, Instruction as IrInstruction, Terminator as IrTerminator};
+mod x86;
+mod regalloc;
+mod peephole;
+
+use model::{BinaryOp, UnaryOp, Type};
+use ir::{IRProgram, Function as IrFunction, BlockId, VarId, Operand, Instruction as IrInstruction, Terminator as IrTerminator};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-pub enum X86Reg {
-    Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi,
-    R8, R9, R10, R11, R12, R13, R14, R15,
-    Al, // 8-bit rax
-}
-
-impl X86Reg {
-    fn to_str(&self) -> &str {
-        match self {
-            Self::Rax => "rax", Self::Rcx => "rcx", Self::Rdx => "rdx", Self::Rbx => "rbx",
-            Self::Rsp => "rsp", Self::Rbp => "rbp", Self::Rsi => "rsi", Self::Rdi => "rdi",
-            Self::R8 => "r8", Self::R9 => "r9", Self::R10 => "r10", Self::R11 => "r11",
-            Self::R12 => "r12", Self::R13 => "r13", Self::R14 => "r14", Self::R15 => "r15",
-            Self::Al => "al",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum X86Operand {
-    Reg(X86Reg),
-    Mem(X86Reg, i32), // [reg + offset]
-    Imm(i64),
-    Label(String),
-}
-
-impl X86Operand {
-    fn to_string(&self) -> String {
-        match self {
-            Self::Reg(r) => r.to_str().to_string(),
-            Self::Mem(r, offset) => format!("QWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::Imm(i) => i.to_string(),
-            Self::Label(s) => format!("[rip + {}]", s),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum X86Instr {
-    Mov(X86Operand, X86Operand),
-    Add(X86Operand, X86Operand),
-    Sub(X86Operand, X86Operand),
-    Imul(X86Operand, X86Operand),
-    Idiv(X86Operand),
-    Cmp(X86Operand, X86Operand),
-    Set(String, X86Operand), // e.g., sete, setl
-    Jmp(String),
-    Jcc(String, String), // condition, label
-    Push(X86Reg),
-    Pop(X86Reg),
-    Call(String),
-    Ret,
-    Label(String),
-    Cqto, // CDQ/CQO for division
-    Xor(X86Operand, X86Operand),
-    Lea(X86Operand, X86Operand),
-}
+pub use x86::{X86Reg, X86Operand, X86Instr, emit_asm};
+pub use regalloc::{PhysicalReg, allocate_registers};
+use peephole::apply_peephole;
 
 pub struct Codegen {
-    // SSA Var -> Stack Offset
+    // SSA Var -> Stack Offset (for spills or non-register vars)
     stack_slots: HashMap<VarId, i32>,
     next_slot: i32,
     asm: Vec<X86Instr>,
+    structs: HashMap<String, model::StructDef>,
+    // Register allocation
+    reg_alloc: HashMap<VarId, PhysicalReg>,
+    enable_regalloc: bool,
 }
 
 impl Codegen {
@@ -74,20 +27,55 @@ impl Codegen {
             stack_slots: HashMap::new(),
             next_slot: 0,
             asm: Vec::new(),
+            structs: HashMap::new(),
+            reg_alloc: HashMap::new(),
+            enable_regalloc: true, // Enable register allocation by default
         }
     }
 
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
+        self.structs.clear();
+        for s_def in &prog.structs {
+            self.structs.insert(s_def.name.clone(), s_def.clone());
+        }
         let mut output = String::new();
         output.push_str(".intel_syntax noprefix\n");
         
+        // Strings
         if !prog.global_strings.is_empty() {
             output.push_str(".data\n");
             for (label, content) in &prog.global_strings {
-                // Escape string properly
                 let escaped = content.replace("\"", "\\\"");
                 output.push_str(&format!("{}: .asciz \"{}\"\n", label, escaped));
             }
+        }
+
+        // Globals (use .quad for all to simplify codegen - int values will be sign-extended)
+        if !prog.globals.is_empty() {
+             if prog.global_strings.is_empty() { output.push_str(".data\n"); }
+             for g in &prog.globals {
+                 output.push_str(&format!(".globl {}\n", g.name));
+                 output.push_str(&format!(".align 4\n"));  // Ensure 4-byte alignment for ints
+                 if let Some(init) = &g.init {
+                     // Initialized - use .quad for all for simplicity
+                     match &g.r#type {
+                        Type::Array(_, _size) => {
+                             let bytes = self.get_type_size(&g.r#type);
+                             output.push_str(&format!("{}: .zero {}\n", g.name, bytes));
+                        }
+                        _ => {
+                            if let model::Expr::Constant(c) = init {
+                                output.push_str(&format!("{}: .long {}\n", g.name, c));
+                            } else {
+                                output.push_str(&format!("{}: .long 0\n", g.name));
+                            }
+                        }
+                     }
+                 } else {
+                     // Uninitialized
+                     output.push_str(&format!("{}: .long 0\n", g.name));
+                 }
+             }
         }
 
         output.push_str(".text\n");
@@ -95,9 +83,14 @@ impl Codegen {
         
         for func in &prog.functions {
             self.gen_function(func);
-            output.push_str(&self.emit_asm());
+            
+            // Apply peephole optimizations
+            apply_peephole(&mut self.asm);
+            
+            output.push_str(&emit_asm(&self.asm));
             self.asm.clear();
             self.stack_slots.clear();
+            self.reg_alloc.clear();
             self.next_slot = 0;
         }
         
@@ -105,6 +98,11 @@ impl Codegen {
     }
 
     fn gen_function(&mut self, func: &IrFunction) {
+        // Perform register allocation
+        if self.enable_regalloc {
+            self.reg_alloc = allocate_registers(func);
+        }
+        
         self.asm.push(X86Instr::Label(func.name.clone()));
         
         // Prologue
@@ -112,8 +110,6 @@ impl Codegen {
         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rbp), X86Operand::Reg(X86Reg::Rsp)));
         
         self.allocate_stack_slots(func);
-        // Windows requires 32 bytes shadow space for calls, plus we need space for locals.
-        // Stack must be 16-byte aligned.
         let locals_size = self.next_slot;
         let shadow_space = 32;
         let total_stack = (locals_size + shadow_space + 15) & !15;
@@ -188,15 +184,21 @@ impl Codegen {
     }
 
     fn var_to_op(&mut self, var: VarId) -> X86Operand {
+        // Check if variable has a register allocated
+        if let Some(reg) = self.reg_alloc.get(&var) {
+            return X86Operand::Reg(reg.to_x86());
+        }
+        
+        // Fall back to stack slot
         let slot = self.get_or_create_slot(var);
         X86Operand::Mem(X86Reg::Rbp, slot)
     }
 
-    fn operand_to_op(&mut self, op: &IrOperand) -> X86Operand {
+    fn operand_to_op(&mut self, op: &Operand) -> X86Operand {
         match op {
-            IrOperand::Constant(c) => X86Operand::Imm(*c),
-            IrOperand::Var(v) => self.var_to_op(*v),
-            IrOperand::Global(s) => X86Operand::Label(s.clone()),
+            Operand::Constant(c) => X86Operand::Imm(*c),
+            Operand::Var(v) => self.var_to_op(*v),
+            Operand::Global(s) => X86Operand::Label(s.clone()),
         }
     }
 
@@ -205,153 +207,317 @@ impl Codegen {
             IrInstruction::Copy { dest, src } => {
                 let d_op = self.var_to_op(*dest);
                 let s_op = self.operand_to_op(src);
-                if matches!(s_op, X86Operand::Mem(..)) {
+                if matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..)) {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                } else if matches!(s_op, X86Operand::Label(..)) {
+                    // For labels (globals), use LEA with RIP-relative addressing to get the address
+                    if let X86Operand::Label(name) = s_op {
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name)));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                    }
                 } else {
                     self.asm.push(X86Instr::Mov(d_op, s_op));
                 }
             }
             IrInstruction::Binary { dest, op, left, right } => {
-                let l_op = self.operand_to_op(left);
-                let r_op = self.operand_to_op(right);
-                let d_op = self.var_to_op(*dest);
-                
-                match op {
-                    BinaryOp::Add => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
-                        self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), r_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    BinaryOp::Sub => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
-                        self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rax), r_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    BinaryOp::Mul => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
-                        self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rax), r_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    BinaryOp::Div => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
-                        self.asm.push(X86Instr::Cqto);
-                        if let X86Operand::Imm(_) = r_op {
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), r_op));
-                            self.asm.push(X86Instr::Idiv(X86Operand::Reg(X86Reg::Rcx)));
-                        } else {
-                            self.asm.push(X86Instr::Idiv(r_op));
-                        }
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    BinaryOp::EqualEqual | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
-                        self.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Rax), r_op));
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
-                        let cond = match op {
-                            BinaryOp::EqualEqual => "e",
-                            BinaryOp::NotEqual => "ne",
-                            BinaryOp::Less => "l",
-                            BinaryOp::LessEqual => "le",
-                            BinaryOp::Greater => "g",
-                            BinaryOp::GreaterEqual => "ge",
-                            _ => unreachable!(),
-                        };
-                        self.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    _ => {}
-                }
+                self.gen_binary_op(*dest, op, left, right);
             }
             IrInstruction::Unary { dest, op, src } => {
-                let s_op = self.operand_to_op(src);
-                let d_op = self.var_to_op(*dest);
-                match op {
-                    UnaryOp::Minus => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
-                        self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rax), s_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    UnaryOp::LogicalNot => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                        self.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
-                        self.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    UnaryOp::Plus => {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                    }
-                    UnaryOp::AddrOf | UnaryOp::Deref => unreachable!("AddrOf and Deref should be lowered by IR"),
-                }
+                self.gen_unary_op(*dest, op, src);
             }
             IrInstruction::Phi { .. } => {}
             IrInstruction::Alloca { dest, r#type } => {
                 let size = self.get_type_size(r#type);
                 let ptr_slot = *self.stack_slots.get(dest).expect("alloca dest must have slot");
-                // The buffer was allocated immediately after the pointer slot in allocate_stack_slots
                 let buffer_offset = ptr_slot - size as i32;
                 let d_op = self.var_to_op(*dest);
                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, buffer_offset)));
                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
             IrInstruction::Load { dest, addr } => {
-                let a_op = self.var_to_op(*addr);
-                let d_op = self.var_to_op(*dest);
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                self.gen_load(*dest, addr);
             }
             IrInstruction::Store { addr, src } => {
-                let a_op = self.var_to_op(*addr);
-                let s_op = self.operand_to_op(src);
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                if matches!(s_op, X86Operand::Mem(..)) {
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
-                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
-                } else {
-                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), s_op));
-                }
+                self.gen_store(addr, src);
             }
-            IrInstruction::GetElementPtr { dest, base, index } => {
-                let b_op = self.var_to_op(*base);
-                let i_op = self.operand_to_op(index);
-                let d_op = self.var_to_op(*dest);
-                
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
-                self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rcx), X86Operand::Imm(8))); // Hardcoded 8 for now
-                self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            IrInstruction::GetElementPtr { dest, base, index, element_type } => {
+                self.gen_gep(*dest, base, index, element_type);
             }
             IrInstruction::Call { dest, name, args } => {
-                let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-                for (i, arg) in args.iter().enumerate() {
-                    let val = self.operand_to_op(arg);
-                    if i < 4 {
-                        if let X86Operand::Label(_) = val {
-                            self.asm.push(X86Instr::Lea(X86Operand::Reg(param_regs[i].clone()), val));
-                        } else {
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
-                        }
-                    } else {
-                        let offset = 32 + (i - 4) * 8;
-                        if let X86Operand::Label(_) = val {
-                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), val));
-                            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
-                        } else {
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
-                            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
-                        }
-                    }
-                }
-                self.asm.push(X86Instr::Call(name.clone()));
-                if let Some(d) = dest {
-                    let d_op = self.var_to_op(*d);
+                self.gen_call(dest, name, args);
+            }
+        }
+    }
+
+    fn gen_binary_op(&mut self, dest: VarId, op: &BinaryOp, left: &Operand, right: &Operand) {
+        let l_op = self.operand_to_op(left);
+        let r_op = self.operand_to_op(right);
+        let d_op = self.var_to_op(dest);
+        
+        match op {
+            BinaryOp::Add => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::Add(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), r_op));
                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 }
             }
+            BinaryOp::Sub => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::Sub(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rax), r_op));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::Mul => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::Imul(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rax), r_op));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::Div => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                self.asm.push(X86Instr::Cqto);
+                if let X86Operand::Imm(_) = r_op {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), r_op));
+                    self.asm.push(X86Instr::Idiv(X86Operand::Reg(X86Reg::Rcx)));
+                } else {
+                    self.asm.push(X86Instr::Idiv(r_op));
+                }
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            BinaryOp::Mod => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                self.asm.push(X86Instr::Cqto);
+                if let X86Operand::Imm(_) = r_op {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), r_op));
+                    self.asm.push(X86Instr::Idiv(X86Operand::Reg(X86Reg::Rcx)));
+                } else {
+                    self.asm.push(X86Instr::Idiv(r_op));
+                }
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rdx)));
+            }
+            BinaryOp::EqualEqual | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                self.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Rax), r_op));
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
+                let cond = match op {
+                    BinaryOp::EqualEqual => "e",
+                    BinaryOp::NotEqual => "ne",
+                    BinaryOp::Less => "l",
+                    BinaryOp::LessEqual => "le",
+                    BinaryOp::Greater => "g",
+                    BinaryOp::GreaterEqual => "ge",
+                    _ => unreachable!(),
+                };
+                self.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            BinaryOp::BitwiseAnd => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::And(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::And(X86Operand::Reg(X86Reg::Rax), r_op));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::BitwiseOr => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::Or(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Or(X86Operand::Reg(X86Reg::Rax), r_op));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::BitwiseXor => {
+                if matches!(d_op, X86Operand::Reg(_)) {
+                    self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                    self.asm.push(X86Instr::Xor(d_op, r_op));
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Xor(X86Operand::Reg(X86Reg::Rax), r_op));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::ShiftLeft => {
+                if let X86Operand::Imm(shift) = r_op {
+                    if matches!(d_op, X86Operand::Reg(_)) {
+                        self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                        self.asm.push(X86Instr::Shl(d_op, X86Operand::Imm(shift)));
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                        self.asm.push(X86Instr::Shl(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(shift)));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                    }
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), r_op));
+                    self.asm.push(X86Instr::Shl(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            BinaryOp::ShiftRight => {
+                if let X86Operand::Imm(shift) = r_op {
+                    if matches!(d_op, X86Operand::Reg(_)) {
+                        self.asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                        self.asm.push(X86Instr::Shr(d_op, X86Operand::Imm(shift)));
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                        self.asm.push(X86Instr::Shr(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(shift)));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                    }
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), l_op));
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), r_op));
+                    self.asm.push(X86Instr::Shr(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn gen_unary_op(&mut self, dest: VarId, op: &UnaryOp, src: &Operand) {
+        let s_op = self.operand_to_op(src);
+        let d_op = self.var_to_op(dest);
+        match op {
+            UnaryOp::Minus => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
+                self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            UnaryOp::LogicalNot => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)));
+                self.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            UnaryOp::BitwiseNot => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Not(X86Operand::Reg(X86Reg::Rax)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            UnaryOp::Plus => {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            UnaryOp::AddrOf | UnaryOp::Deref => unreachable!("AddrOf and Deref should be lowered by IR"),
+        }
+    }
+
+    fn gen_load(&mut self, dest: VarId, addr: &Operand) {
+        let d_op = self.var_to_op(dest);
+        match addr {
+            Operand::Global(name) => {
+                 // Load address into a register using RIP-relative LEA, then access through it
+                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                 // movsx rax, eax to sign-extend 32-bit to 64-bit
+                 self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            Operand::Var(var) => {
+                 let a_op = self.var_to_op(*var);
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            Operand::Constant(addr_const) => {
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+        }
+    }
+
+    fn gen_store(&mut self, addr: &Operand, src: &Operand) {
+        let s_op = self.operand_to_op(src);
+        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+
+        match addr {
+            Operand::Global(name) => {
+                 // Load address into a register using RIP-relative LEA, then store through it
+                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                 self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+            }
+            Operand::Var(var) => {
+                 let a_op = self.var_to_op(*var);
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                 self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+            }
+            Operand::Constant(addr_const) => {
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
+                 self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+            }
+        }
+    }
+
+    fn gen_gep(&mut self, dest: VarId, base: &Operand, index: &Operand, element_type: &Type) {
+        let i_op = self.operand_to_op(index);
+        let d_op = self.var_to_op(dest);
+        let elem_size = self.get_element_size(element_type) as i64;
+        
+        // Calculate base into RAX
+        match base {
+            Operand::Global(name) => {
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Label(name.clone())));
+            }
+            Operand::Var(var) => {
+                 let b_op = self.var_to_op(*var);
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
+            }
+            Operand::Constant(c) => {
+                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*c)));
+            }
+        }
+
+        // Calculate Index with proper element size
+        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
+        if elem_size != 1 {
+            self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rcx), X86Operand::Imm(elem_size)));
+        }
+        self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
+        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+    }
+
+    fn gen_call(&mut self, dest: &Option<VarId>, name: &str, args: &[Operand]) {
+        let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
+        for (i, arg) in args.iter().enumerate() {
+            let val = self.operand_to_op(arg);
+            let target_reg_or_mem = if i < 4 {
+                Some(X86Operand::Reg(param_regs[i].clone()))
+            } else {
+                None
+            };
+
+            if let Some(target) = target_reg_or_mem {
+                self.asm.push(X86Instr::Mov(target, val));
+            } else {
+                let offset = 32 + (i - 4) * 8;
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
+            }
+        }
+        self.asm.push(X86Instr::Call(name.to_string()));
+        if let Some(d) = dest {
+            let d_op = self.var_to_op(*d);
+            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
         }
     }
 
@@ -362,6 +528,40 @@ impl Codegen {
             model::Type::Array(inner, size) => self.get_type_size(inner) * size,
             model::Type::Pointer(_) => 8,
             model::Type::Char => 1,
+            model::Type::Struct(name) => {
+                if let Some(s_def) = self.structs.get(name) {
+                    let mut size = 0;
+                    for (f_ty, _) in &s_def.fields {
+                        size += self.get_type_size(f_ty);
+                    }
+                    size
+                } else {
+                    8
+                }
+            }
+            model::Type::Typedef(_) => 8,
+        }
+    }
+
+    fn get_element_size(&self, r#type: &model::Type) -> usize {
+        match r#type {
+            model::Type::Int => 8,
+            model::Type::Void => 0,
+            model::Type::Array(inner, size) => self.get_element_size(inner) * size,
+            model::Type::Pointer(_) => 8,
+            model::Type::Char => 1,
+            model::Type::Struct(name) => {
+                if let Some(s_def) = self.structs.get(name) {
+                    let mut size = 0;
+                    for (f_ty, _) in &s_def.fields {
+                        size += self.get_element_size(f_ty);
+                    }
+                    size
+                } else {
+                    8
+                }
+            }
+            model::Type::Typedef(_) => 8,
         }
     }
 
@@ -404,7 +604,6 @@ impl Codegen {
     }
 
     fn get_current_block_id(&self) -> BlockId {
-        // This is a bit hacky, but since we iterate in order, it's the last label we added.
         for instr in self.asm.iter().rev() {
             if let X86Instr::Label(l) = instr {
                 if let Some(pos) = l.rfind('_') {
@@ -428,38 +627,11 @@ impl Codegen {
                     if *pred_id == from {
                         let d_op = self.var_to_op(*dest);
                         let s_op = self.var_to_op(*src_var);
-                        // mov cannot have both operands as memory
                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                     }
                 }
             }
         }
-    }
-
-    fn emit_asm(&self) -> String {
-        let mut s = String::new();
-        for instr in &self.asm {
-            match instr {
-                X86Instr::Label(l) => s.push_str(&format!("{}:\n", l)),
-                X86Instr::Mov(d, src) => s.push_str(&format!("  mov {}, {}\n", d.to_string(), src.to_string())),
-                X86Instr::Add(d, src) => s.push_str(&format!("  add {}, {}\n", d.to_string(), src.to_string())),
-                X86Instr::Sub(d, src) => s.push_str(&format!("  sub {}, {}\n", d.to_string(), src.to_string())),
-                X86Instr::Imul(d, src) => s.push_str(&format!("  imul {}, {}\n", d.to_string(), src.to_string())),
-                X86Instr::Idiv(src) => s.push_str(&format!("  idiv {}\n", src.to_string())),
-                X86Instr::Cmp(l, r) => s.push_str(&format!("  cmp {}, {}\n", l.to_string(), r.to_string())),
-                X86Instr::Set(c, d) => s.push_str(&format!("  set{} {}\n", c, d.to_string())),
-                X86Instr::Jmp(l) => s.push_str(&format!("  jmp {}\n", l)),
-                X86Instr::Jcc(c, l) => s.push_str(&format!("  j{} {}\n", c, l)),
-                X86Instr::Push(r) => s.push_str(&format!("  push {}\n", r.to_str())),
-                X86Instr::Pop(r) => s.push_str(&format!("  pop {}\n", r.to_str())),
-                X86Instr::Call(l) => s.push_str(&format!("  call {}\n", l)),
-                X86Instr::Ret => s.push_str("  ret\n"),
-                X86Instr::Cqto => s.push_str("  cqo\n"),
-                X86Instr::Xor(d, s_op) => s.push_str(&format!("  xor {}, {}\n", d.to_string(), s_op.to_string())),
-                X86Instr::Lea(d, s_op) => s.push_str(&format!("  lea {}, {}\n", d.to_string(), s_op.to_string())),
-            }
-        }
-        s
     }
 }

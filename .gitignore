@@ -10,8 +10,6 @@
 # Test C, assembly, or preprocessed files.
 # Use ! patterns on directories to allow such files that we want
 # to version control.
-*.c
 *.i
 *.s
-
-todo.md
+*.exe

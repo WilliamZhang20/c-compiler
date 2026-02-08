@@ -1,5 +1,6 @@
 use model::Token;
 use regex_lite::Regex;
+use std::sync::OnceLock;
 
 #[derive(PartialEq, Eq, Hash)]
 enum TokenType {
@@ -11,23 +12,29 @@ enum TokenType {
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
 
-    let Ok(block_comment_regex) = Regex::new("\\/\\*[\\s\\S]*?\\*\\/") else {
-        return Err("Failed to compile block comment regex".to_string());
-    };
+    static BLOCK_COMMENT_REGEX: OnceLock<Regex> = OnceLock::new();
+    let block_comment_regex = BLOCK_COMMENT_REGEX.get_or_init(|| {
+        Regex::new(r"/\*[\s\S]*?\*/").expect("Failed to compile block comment regex")
+    });
     
     // Pre-process: remove block comments and line comments are handled in-loop or pre-processed
     let input_processed = block_comment_regex.replace_all(input, "");
     let mut current_input: &str = &input_processed;
 
-    let Ok(identifier_regex) = Regex::new("^[a-zA-Z_]\\w*\\b") else {
-        return Err("Failed to compile identifier regex".to_string());
-    };
-    let Ok(constant_regex) = Regex::new("^(0x[0-9a-fA-F]+|[0-9]+)\\b") else {
-        return Err("Failed to compile constant regex".to_string());
-    };
-    let Ok(string_regex) = Regex::new("^\"(([^\"]|\\\\\")*)\"") else {
-        return Err("Failed to compile string regex".to_string());
-    };
+    static IDENTIFIER_REGEX: OnceLock<Regex> = OnceLock::new();
+    let identifier_regex = IDENTIFIER_REGEX.get_or_init(|| {
+        Regex::new(r"^[a-zA-Z_]\w*\b").expect("Failed to compile identifier regex")
+    });
+
+    static CONSTANT_REGEX: OnceLock<Regex> = OnceLock::new();
+    let constant_regex = CONSTANT_REGEX.get_or_init(|| {
+        Regex::new(r"^(0x[0-9a-fA-F]+|[0-9]+)\b").expect("Failed to compile constant regex")
+    });
+
+    static STRING_REGEX: OnceLock<Regex> = OnceLock::new();
+    let string_regex = STRING_REGEX.get_or_init(|| {
+        Regex::new(r#"^"(([^"]|\\")*)""#).expect("Failed to compile string regex")
+    });
 
     while !current_input.is_empty() {
         current_input = current_input.trim_start();
@@ -37,6 +44,20 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
 
         // handle C++ style comments
         if current_input.starts_with("//") {
+            if let Some((_, rest)) = current_input.split_once('\n') {
+                current_input = rest;
+            } else {
+                current_input = "";
+            }
+            continue;
+        }
+
+        // handle preprocessor line markers (e.g., # 1 "file.c")
+        if current_input.starts_with('#') {
+            // Check if it's a line marker or a single '#' token
+            // Line markers usually follow the pattern # line "file" ...
+            // For now, we'll skip any line starting with # if we are at the start of a line (or start of input)
+            // In a more robust implementation, we'd only skip if it's a valid line marker.
             if let Some((_, rest)) = current_input.split_once('\n') {
                 current_input = rest;
             } else {
@@ -81,10 +102,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             current_input = &current_input[2..];
             continue;
         }
+        if current_input.starts_with("<<") {
+            tokens.push(Token::LessLess);
+            current_input = &current_input[2..];
+            continue;
+        }
+        if current_input.starts_with(">>") {
+            tokens.push(Token::GreaterGreater);
+            current_input = &current_input[2..];
+            continue;
+        }
         if current_input.starts_with("->") {
-            // Treat as individual tokens for now? -> is usually for struct pointers.
-            // But we don't support it yet, so let's just skip it as two symbols or a token.
-            // I'll add a token later if needed. For now just consume.
+            tokens.push(Token::Arrow);
             current_input = &current_input[2..];
             continue;
         }
@@ -109,10 +138,13 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 '-' => Some(Token::Minus),
                 '*' => Some(Token::Star),
                 '/' => Some(Token::Slash),
+                '%' => Some(Token::Percent),
                 '=' => Some(Token::Equal),
                 '<' => Some(Token::Less),
                 '>' => Some(Token::Greater),
                 '!' => Some(Token::Bang),
+                '|' => Some(Token::Pipe),
+                '^' => Some(Token::Caret),
                 _ => None,
             };
             if let Some(t) = token {
@@ -161,6 +193,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     "while" => Token::While,
                     "for" => Token::For,
                     "do" => Token::Do,
+                    "break" => Token::Break,
+                    "continue" => Token::Continue,
                     "static" => Token::Static,
                     "extern" => Token::Extern,
                     "inline" => Token::Inline,

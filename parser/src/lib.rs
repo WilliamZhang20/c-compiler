@@ -1,6 +1,6 @@
 // take a list of tokens, output a syntax tree or an error
 use model::{
-    BinaryOp, Block, Expr, Function, Program, Stmt, Token, Type, UnaryOp,
+    BinaryOp, Block, Expr, Function, GlobalVar, Program, Stmt, Token, Type, UnaryOp,
 };
 
 pub fn parse_tokens(tokens: &[Token]) -> Result<Program, String> {
@@ -11,23 +11,46 @@ pub fn parse_tokens(tokens: &[Token]) -> Result<Program, String> {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    typedefs: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, typedefs: Vec::new() }
     }
 
     fn parse_program(&mut self) -> Result<Program, String> {
         let mut functions = Vec::new();
+        let mut globals = Vec::new();
+        let mut structs = Vec::new();
+
         while !self.is_at_end() {
-            if self.is_function_definition() {
+            if self.match_token(|t| matches!(t, Token::Typedef)) {
+                // handle typedef
+                let _ty = self.parse_type()?;
+                let name = match self.advance() {
+                    Some(Token::Identifier { value }) => value.clone(),
+                    other => return Err(format!("expected identifier for typedef name, found {:?}", other)),
+                };
+                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                self.typedefs.push(name);
+            } else if self.is_function_definition() {
                 functions.push(self.parse_function()?);
+            } else if self.check_is_type() {
+                // Could be a global declaration or a struct definition
+                if self.check(&|t| matches!(t, Token::Struct)) && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace)) {
+                     // struct definition without variable: struct foo { ... };
+                     structs.push(self.parse_struct_definition()?);
+                     self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                } else {
+                    globals.push(self.parse_global()?);
+                }
             } else {
+                // If not function and not type (e.g. typedef, struct, etc.), skip
                 self.skip_top_level_item()?;
             }
         }
-        Ok(Program { functions })
+        Ok(Program { functions, globals, structs })
     }
 
     fn is_function_definition(&self) -> bool {
@@ -54,10 +77,18 @@ impl<'a> Parser<'a> {
 
         if temp_pos >= self.tokens.len() { return false; }
         // Must start with a known type for now
-        if !matches!(self.tokens[temp_pos], Token::Int | Token::Void | Token::Char) {
+        if !(matches!(self.tokens[temp_pos], Token::Int | Token::Void | Token::Char | Token::Struct) || 
+             (if let Token::Identifier { value } = &self.tokens[temp_pos] { self.typedefs.contains(value) } else { false })) {
             return false;
         }
-        temp_pos += 1;
+        if matches!(self.tokens[temp_pos], Token::Struct) {
+            temp_pos += 1; // skip struct
+            if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Identifier { .. }) {
+                temp_pos += 1; // skip tag
+            }
+        } else {
+            temp_pos += 1;
+        }
 
         // Followed by identifier or star (for pointers)
         while temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Star) {
@@ -136,6 +167,37 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_global(&mut self) -> Result<GlobalVar, String> {
+        let mut r#type = self.parse_type()?;
+        let name = match self.advance() {
+            Some(Token::Identifier { value }) => value.clone(),
+            other => return Err(format!("expected identifier after type, found {:?}", other)),
+        };
+
+        // Check for array
+        if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+            let size = match self.advance() {
+                Some(Token::Constant { value }) => *value as usize,
+                other => return Err(format!("expected constant array size, found {:?}", other)),
+            };
+            self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+            r#type = Type::Array(Box::new(r#type), size);
+        }
+
+        let init = if self.match_token(|t| matches!(t, Token::Equal)) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        
+        Ok(GlobalVar {
+            r#type,
+            name,
+            init,
+        })
+    }
+
     fn parse_type(&mut self) -> Result<Type, String> {
         loop {
             if self.match_token(|t| matches!(t, Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension)) {
@@ -147,11 +209,28 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let mut base = match self.advance() {
-            Some(Token::Int) => Type::Int,
-            Some(Token::Void) => Type::Void,
-            Some(Token::Char) => Type::Char,
-            other => return Err(format!("expected type specifier, found {:?}", other)),
+        let mut base = if let Some(Token::Identifier { value }) = self.peek() {
+            if self.typedefs.contains(value) {
+                let v = value.clone();
+                self.advance();
+                Type::Typedef(v)
+            } else {
+                return Err(format!("expected type specifier, found identifier {:?}", value));
+            }
+        } else {
+            match self.advance() {
+                Some(Token::Int) => Type::Int,
+                Some(Token::Void) => Type::Void,
+                Some(Token::Char) => Type::Char,
+                Some(Token::Struct) => {
+                    let name = match self.advance() {
+                        Some(Token::Identifier { value }) => value.clone(),
+                        other => return Err(format!("expected struct name identifier, found {:?}", other)),
+                    };
+                    Type::Struct(name)
+                }
+                other => return Err(format!("expected type specifier, found {:?}", other)),
+            }
         };
 
         while self.match_token(|t| matches!(t, Token::Star)) {
@@ -178,19 +257,20 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_top_level_item(&mut self) -> Result<(), String> {
+        // Simple panic mode recovery: skip until semicolon or brace
+        // This allows the parser to continue finding valid functions/declarations
         while !self.is_at_end() {
-            match self.peek() {
+             match self.peek() {
                 Some(Token::Semicolon) => {
                     self.advance();
                     return Ok(());
                 }
                 Some(Token::OpenBrace) => {
+                    // Consume the block and stop skipping
                     self.skip_block_internal()?;
                     return Ok(());
                 }
-                _ => {
-                    self.advance();
-                }
+                _ => { self.advance(); }
             }
         }
         Ok(())
@@ -227,6 +307,16 @@ impl<'a> Parser<'a> {
             let expr = self.parse_expr()?;
             self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
             return Ok(Stmt::Return(Some(expr)));
+        }
+
+        if self.match_token(|t| matches!(t, Token::Break)) {
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(Stmt::Break);
+        }
+
+        if self.match_token(|t| matches!(t, Token::Continue)) {
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(Stmt::Continue);
         }
 
         if self.match_token(|t| matches!(t, Token::If)) {
@@ -266,13 +356,16 @@ impl<'a> Parser<'a> {
 
         if self.match_token(|t| matches!(t, Token::For)) {
             self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            
+            // init
             let init = if self.match_token(|t| matches!(t, Token::Semicolon)) {
                 None
             } else {
-                let expr = self.parse_expr()?;
-                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
-                Some(expr)
+                // Parse a statement (declaration or expression)
+                // Note: parse_stmt consumes the semicolon
+                Some(Box::new(self.parse_stmt()?))
             };
+
             let cond = if self.match_token(|t| matches!(t, Token::Semicolon)) {
                 None
             } else {
@@ -280,6 +373,7 @@ impl<'a> Parser<'a> {
                 self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
                 Some(expr)
             };
+
             let post = if self.match_token(|t| matches!(t, Token::CloseParenthesis)) {
                 None
             } else {
@@ -296,13 +390,32 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.match_token(|t| matches!(t, Token::Switch)) {
+            self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            let cond = self.parse_expr()?;
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            let body = Box::new(self.parse_stmt()?);
+            return Ok(Stmt::Switch { cond, body });
+        }
+
+        if self.match_token(|t| matches!(t, Token::Case)) {
+            let expr = self.parse_expr()?;
+            self.expect(|t| matches!(t, Token::Colon), "':'")?;
+            return Ok(Stmt::Case(expr));
+        }
+
+        if self.match_token(|t| matches!(t, Token::Default)) {
+            self.expect(|t| matches!(t, Token::Colon), "':'")?;
+            return Ok(Stmt::Default);
+        }
+
         if self.check(&|t| matches!(t, Token::OpenBrace)) {
             let block = self.parse_block()?;
             return Ok(Stmt::Block(block));
         }
 
         // Variable Declaration
-        if self.check(&|t| matches!(t, Token::Int | Token::Void | Token::Char | Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension)) {
+        if self.check_is_type() {
             let mut r#type = self.parse_type()?;
             let name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
@@ -346,15 +459,7 @@ impl<'a> Parser<'a> {
 
         if self.match_token(|t| matches!(t, Token::Equal)) {
             match left {
-                Expr::Variable(name) => {
-                    let value = self.parse_assignment()?;
-                    Ok(Expr::Binary {
-                        left: Box::new(Expr::Variable(name)),
-                        op: BinaryOp::Assign,
-                        right: Box::new(value),
-                    })
-                }
-                Expr::Index { .. } => {
+                Expr::Variable(_) | Expr::Index { .. } | Expr::Member { .. } | Expr::PtrMember { .. } | Expr::Unary { op: UnaryOp::Deref, .. } => {
                     let value = self.parse_assignment()?;
                     Ok(Expr::Binary {
                         left: Box::new(left),
@@ -362,7 +467,7 @@ impl<'a> Parser<'a> {
                         right: Box::new(value),
                     })
                 }
-                _ => Err("invalid assignment target".to_string()),
+                _ => Err(format!("invalid assignment target: {:?}", left)),
             }
         } else {
             Ok(left)
@@ -383,12 +488,51 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_logical_and(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_equality()?;
+        let mut expr = self.parse_bitwise_or()?;
         while self.match_token(|t| matches!(t, Token::AndAnd)) {
-            let right = self.parse_equality()?;
+            let right = self.parse_bitwise_or()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::LogicalAnd,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_bitwise_xor()?;
+        while self.match_token(|t| matches!(t, Token::Pipe)) {
+            let right = self.parse_bitwise_xor()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitwiseOr,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_bitwise_and()?;
+        while self.match_token(|t| matches!(t, Token::Caret)) {
+            let right = self.parse_bitwise_and()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitwiseXor,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_equality()?;
+        while self.match_token(|t| matches!(t, Token::Ampersand)) {
+            let right = self.parse_equality()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitwiseAnd,
                 right: Box::new(right),
             };
         }
@@ -416,7 +560,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_relational(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_additive()?;
+        let mut expr = self.parse_shift()?;
         while self.match_token(|t| {
             matches!(
                 t,
@@ -428,6 +572,24 @@ impl<'a> Parser<'a> {
                 Token::LessEqual => BinaryOp::LessEqual,
                 Token::Greater => BinaryOp::Greater,
                 Token::GreaterEqual => BinaryOp::GreaterEqual,
+                _ => unreachable!(),
+            };
+            let right = self.parse_shift()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_additive()?;
+        while self.match_token(|t| matches!(t, Token::LessLess | Token::GreaterGreater)) {
+            let op = match self.previous().unwrap() {
+                Token::LessLess => BinaryOp::ShiftLeft,
+                Token::GreaterGreater => BinaryOp::ShiftRight,
                 _ => unreachable!(),
             };
             let right = self.parse_additive()?;
@@ -463,10 +625,11 @@ impl<'a> Parser<'a> {
     fn parse_multiplicative(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_unary()?;
 
-        while self.match_token(|t| matches!(t, Token::Star | Token::Slash)) {
+        while self.match_token(|t| matches!(t, Token::Star | Token::Slash | Token::Percent)) {
             let op = match self.previous().unwrap() {
                 Token::Star => BinaryOp::Mul,
                 Token::Slash => BinaryOp::Div,
+                Token::Percent => BinaryOp::Mod,
                 _ => unreachable!(),
             };
             let right = self.parse_unary()?;
@@ -481,12 +644,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus | Token::Bang | Token::Star | Token::Ampersand)) {
+        if self.match_token(|t| matches!(t, Token::Plus | Token::Minus | Token::Bang | Token::Tilde | Token::Star | Token::Ampersand)) {
             let token = self.previous().unwrap().clone();
             let op = match token {
                 Token::Plus => UnaryOp::Plus,
                 Token::Minus => UnaryOp::Minus,
                 Token::Bang => UnaryOp::LogicalNot,
+                Token::Tilde => UnaryOp::BitwiseNot,
                 Token::Star => UnaryOp::Deref,
                 Token::Ampersand => UnaryOp::AddrOf,
                 _ => unreachable!(),
@@ -528,7 +692,8 @@ impl<'a> Parser<'a> {
 
     fn check_is_type_at(&self, offset: usize) -> bool {
         match self.tokens.get(self.pos + offset) {
-            Some(Token::Int | Token::Void | Token::Char | Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension) => true,
+            Some(Token::Int | Token::Void | Token::Char | Token::Struct | Token::Static | Token::Extern | Token::Inline | Token::Const | Token::Restrict | Token::Attribute | Token::Extension) => true,
+            Some(Token::Identifier { value }) => self.typedefs.contains(value),
             _ => false,
         }
     }
@@ -560,6 +725,24 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err("can only call variables (functions)".to_string());
                 }
+            } else if self.match_token(|t| matches!(t, Token::Dot)) {
+                let member = match self.advance() {
+                    Some(Token::Identifier { value }) => value.clone(),
+                    other => return Err(format!("expected member name after '.', found {:?}", other)),
+                };
+                expr = Expr::Member {
+                    expr: Box::new(expr),
+                    member,
+                };
+            } else if self.match_token(|t| matches!(t, Token::Arrow)) {
+                let member = match self.advance() {
+                    Some(Token::Identifier { value }) => value.clone(),
+                    other => return Err(format!("expected member name after '->', found {:?}", other)),
+                };
+                expr = Expr::PtrMember {
+                    expr: Box::new(expr),
+                    member,
+                };
             } else {
                 break;
             }
@@ -580,6 +763,45 @@ impl<'a> Parser<'a> {
             }
             other => Err(format!("expected expression, found {:?}", other)),
         }
+    }
+
+    fn parse_struct_definition(&mut self) -> Result<model::StructDef, String> {
+        self.expect(|t| matches!(t, Token::Struct), "struct")?;
+        let name = match self.advance() {
+            Some(Token::Identifier { value }) => value.clone(),
+            other => return Err(format!("expected struct name identifier, found {:?}", other)),
+        };
+        self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
+        let mut fields = Vec::new();
+        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+            let ty = self.parse_type()?;
+            let field_name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected field name, found {:?}", other)),
+            };
+            // handle optional array in struct field
+            let final_ty = if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                 let size = match self.advance() {
+                    Some(Token::Constant { value }) => *value as usize,
+                    other => return Err(format!("expected constant array size, found {:?}", other)),
+                };
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                model::Type::Array(Box::new(ty), size)
+            } else {
+                ty
+            };
+            fields.push((final_ty, field_name));
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        }
+        self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
+        Ok(model::StructDef { name, fields })
+    }
+
+    fn check_at<F>(&self, offset: usize, predicate: F) -> bool
+    where
+        F: Fn(&Token) -> bool,
+    {
+        self.tokens.get(self.pos + offset).map_or(false, predicate)
     }
 
     fn is_at_end(&self) -> bool {
@@ -656,6 +878,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_global_variable() {
+        let src = "int g_x = 10; int main() { return g_x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.globals.len(), 1);
+        assert_eq!(program.globals[0].name, "g_x");
+    }
+
+    #[test]
+    fn parse_for_loop_decl() {
+        let src = "void main() { for (int i = 0; i < 10; i = i + 1) { } }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmt = &program.functions[0].body.statements[0];
+        if let Stmt::For { init, .. } = stmt {
+            assert!(init.is_some());
+            let init_box = init.as_ref().unwrap();
+            matches!(**init_box, Stmt::Declaration { .. });
+        } else {
+            panic!("Expected For loop");
+        }
+    }
+
+    #[test]
     fn parse_function_params() {
         let src = "int add(int a, int b) { return a + b; }";
         let tokens = lex(src).unwrap();
@@ -690,10 +937,7 @@ mod tests {
 
     #[test]
     fn parse_for_loop() {
-        // Note: My lexer handles 'int i = 0' as a declaration which is currently expected in my parse_stmt
-        // Wait, parse_stmt handles declarations, but parse_for expects an expression for init.
-        // In C, 'for (int i = 0; ...)' is valid in C99+. My current parse_for expects an expression.
-        // Let's test with expression init for now to match current implementation.
+        // Test expression init too
         let src = "void main() { int i; for (i = 0; i < 10; i = i + 1) { return i; } }";
         let tokens = lex(src).unwrap();
         let program = parse_tokens(&tokens).unwrap();

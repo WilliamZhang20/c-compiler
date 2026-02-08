@@ -1,15 +1,7 @@
 use clap::Parser; // clap crate for CLI argument parsing
 use std::{path::Path, process::Command};
 
-/*
-"short" means the field can be specified using a short,
-single-character option on the command line, typically
-a single dash (e.g., -n).
 
-If you just write short without a character (like #[arg(short = 'n')]),
-clap will infer the short flag from the first letter of the field name,
-which in this case is n.
-*/
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -32,6 +24,10 @@ struct Args {
     /// Emit assembly but do not assemble or link
     #[arg(short = 'S', long)]
     emit_asm: bool,
+
+    /// Keep intermediate files (.i, .s)
+    #[arg(long, default_value_t = false)]
+    keep_intermediates: bool,
 }
 
 fn main() {
@@ -41,9 +37,20 @@ fn main() {
     let stop_after_codegen = args.codegen;
     let stop_after_parse = args.parse;
     let stop_after_lex = args.lex;
+    let keep_intermediates = args.keep_intermediates || stop_after_emit_asm;
+
+    // Check for gcc
+    if Command::new("gcc").arg("--version").output().is_err() {
+        eprintln!("Error: 'gcc' not found in PATH. Please install GCC.");
+        std::process::exit(1);
+    }
 
     let input_path = args.input_path.clone();
     let input_file = Path::new(&input_path);
+    if !input_file.exists() {
+         eprintln!("Error: Input file '{}' not found.", input_path);
+         std::process::exit(1);
+    }
 
     preprocess(&input_path, input_file);
 
@@ -53,12 +60,18 @@ fn main() {
     let tokens = lexer::lex(&src).expect("Lexing failed");
     if stop_after_lex {
         println!("Tokens: {:?}", tokens);
+        if !keep_intermediates {
+            let _ = std::fs::remove_file(&preprocessed_path);
+        }
         return;
     }
 
     let program = parser::parse_tokens(&tokens).expect("Parsing failed");
     if stop_after_parse {
         println!("AST: {:?}", program);
+        if !keep_intermediates {
+            let _ = std::fs::remove_file(&preprocessed_path);
+        }
         return;
     }
 
@@ -72,6 +85,9 @@ fn main() {
 
     if stop_after_codegen {
         println!("IR: {:?}", ir_prog);
+        if !keep_intermediates {
+            let _ = std::fs::remove_file(&preprocessed_path);
+        }
         return;
     }
 
@@ -83,11 +99,20 @@ fn main() {
     std::fs::write(&asm_path, asm).expect("failed to write assembly file");
 
     if stop_after_emit_asm {
+        if !keep_intermediates {
+             let _ = std::fs::remove_file(&preprocessed_path);
+        }
         return;
     }
 
     run_linker(&input_file, &asm_path);
     println!("Compilation successful. Generated executable: {}", input_file.file_stem().unwrap().to_string_lossy());
+
+    // Cleanup
+    if !keep_intermediates {
+        let _ = std::fs::remove_file(&preprocessed_path);
+        let _ = std::fs::remove_file(&asm_path);
+    }
 }
 
 fn preprocess(input_path: &str, input_file: &Path) {
