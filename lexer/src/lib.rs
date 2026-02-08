@@ -7,6 +7,7 @@ enum TokenType {
     Identifier,
     Constant,
     StringLiteral,
+    CharLiteral,
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -34,6 +35,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     static STRING_REGEX: OnceLock<Regex> = OnceLock::new();
     let string_regex = STRING_REGEX.get_or_init(|| {
         Regex::new(r#"^"(([^"]|\\")*)""#).expect("Failed to compile string regex")
+    });
+
+    static CHAR_REGEX: OnceLock<Regex> = OnceLock::new();
+    let char_regex = CHAR_REGEX.get_or_init(|| {
+        Regex::new(r"^'(\\.|[^'])'").expect("Failed to compile char regex")
     });
 
     while !current_input.is_empty() {
@@ -176,6 +182,13 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 tok_type = Some(TokenType::StringLiteral);
             }
         }
+        if let Some(caps) = char_regex.captures(current_input) {
+            let text = caps.get(0).unwrap().as_str();
+            if text.len() > longest_capture.len() {
+                longest_capture = text;
+                tok_type = Some(TokenType::CharLiteral);
+            }
+        }
 
         let Some(tt) = tok_type else {
             return Err(format!("Found invalid token: '{}' at \"{}\"...", current_input.chars().next().unwrap(), &current_input[..current_input.len().min(20)]));
@@ -217,6 +230,32 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     i64::from_str_radix(&longest_capture[2..], 16).map_err(|_| format!("Failed to parse hex constant: {}", longest_capture))?
                 } else {
                     longest_capture.parse::<i64>().map_err(|_| format!("Failed to parse constant: {}", longest_capture))?
+                };
+                Token::Constant { value }
+            }
+            TokenType::CharLiteral => {
+                // Parse character literal to integer value
+                let content = &longest_capture[1..longest_capture.len()-1];
+                let value = if content.starts_with('\\') {
+                    // Escape sequence
+                    match content.chars().nth(1) {
+                        Some('n') => 10,  // newline
+                        Some('t') => 9,   // tab
+                        Some('r') => 13,  // carriage return
+                        Some('0') => 0,   // null
+                        Some('\\') => 92, // backslash
+                        Some('\'') => 39, // single quote
+                        Some('"') => 34,  // double quote
+                        Some(c) if c.is_ascii_digit() => {
+                            // Octal escape sequence like '\077'
+                            let octal = content[1..].chars().take_while(|ch| ch.is_ascii_digit()).collect::<String>();
+                            i64::from_str_radix(&octal, 8).unwrap_or(0)
+                        }
+                        _ => return Err(format!("Unknown escape sequence in character literal: {}", longest_capture)),
+                    }
+                } else {
+                    // Regular character
+                    content.chars().next().unwrap() as i64
                 };
                 Token::Constant { value }
             }

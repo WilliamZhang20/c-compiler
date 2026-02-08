@@ -150,9 +150,16 @@ impl Codegen {
                 match inst {
                     IrInstruction::Alloca { dest, r#type } => {
                         // Allocas always need stack space
-                        self.get_or_create_slot(*dest);
                         let size = self.get_type_size(r#type) as i32;
-                        self.next_slot += size;
+                        // Align to 8 bytes for proper stack access
+                        let aligned_size = ((size + 7) / 8) * 8;
+                        self.next_slot += aligned_size;
+                        let buffer_slot = -self.next_slot;
+                        
+                        // Now allocate slot for the pointer variable itself
+                        self.next_slot += 8;
+                        let ptr_slot = -self.next_slot;
+                        self.stack_slots.insert(*dest, ptr_slot);
                     }
                     IrInstruction::Binary { dest, .. } |
                     IrInstruction::Unary { dest, .. } |
