@@ -55,6 +55,7 @@ pub struct LiveInterval {
     pub start: usize,
     pub end: usize,
     pub reg: Option<PhysicalReg>,
+    #[allow(dead_code)] // Reserved for future spilling implementation
     pub spill_slot: Option<i32>,
 }
 
@@ -106,6 +107,7 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::Load { dest, .. } |
                 IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
                 IrInstruction::Call { dest, .. } => *dest,
+                IrInstruction::IndirectCall { dest, .. } => *dest,
                 IrInstruction::Alloca { .. } | IrInstruction::Store { .. } => None,
             };
             
@@ -176,6 +178,12 @@ where F: FnMut(VarId) {
             if let Operand::Var(v) = index { f(*v); }
         }
         IrInstruction::Call { args, .. } => {
+            for arg in args {
+                if let Operand::Var(v) = arg { f(*v); }
+            }
+        }
+        IrInstruction::IndirectCall { func_ptr, args, .. } => {
+            if let Operand::Var(v) = func_ptr { f(*v); }
             for arg in args {
                 if let Operand::Var(v) = arg { f(*v); }
             }

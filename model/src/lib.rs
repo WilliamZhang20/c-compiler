@@ -75,6 +75,10 @@ pub enum Type {
     Char,
     Struct(String),
     Typedef(String),
+    FunctionPointer {
+        return_type: Box<Type>,
+        param_types: Vec<Type>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -168,7 +172,7 @@ pub enum Expr {
         index: Box<Expr>,
     },
     Call {
-        name: String,
+        func: Box<Expr>,  // Can be Variable(name) for direct calls or any expr for function pointers
         args: Vec<Expr>,
     },
     SizeOf(Type),

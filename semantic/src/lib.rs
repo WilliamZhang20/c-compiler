@@ -32,6 +32,18 @@ impl SemanticAnalyzer {
             }
             self.global_scope.insert(global.name.clone(), global.r#type.clone());
         }
+        
+        // Add function names as function pointers to global scope
+        for function in &program.functions {
+            let func_type = Type::FunctionPointer {
+                return_type: Box::new(function.return_type.clone()),
+                param_types: function.params.iter().map(|(t, _)| t.clone()).collect(),
+            };
+            if self.global_scope.contains_key(&function.name) {
+                return Err(format!("Redeclaration of function {}", function.name));
+            }
+            self.global_scope.insert(function.name.clone(), func_type);
+        }
 
         for function in &program.functions {
             self.analyze_function(function)?;
@@ -184,7 +196,8 @@ impl SemanticAnalyzer {
                 self.analyze_expr(array)?;
                 self.analyze_expr(index)?;
             }
-            Expr::Call { name: _, args } => {
+            Expr::Call { func, args } => {
+                self.analyze_expr(func)?;
                 for arg in args {
                     self.analyze_expr(arg)?;
                 }

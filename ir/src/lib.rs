@@ -59,6 +59,11 @@ pub enum Instruction {
         name: String,
         args: Vec<Operand>,
     },
+    IndirectCall {
+        dest: Option<VarId>,
+        func_ptr: Operand,
+        args: Vec<Operand>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +115,7 @@ pub struct Lowerer {
     global_strings: Vec<(String, String)>,
     variable_allocas: HashMap<String, VarId>,
     global_vars: HashSet<String>,
+    function_names: HashSet<String>,
     // Stack of (continue_target, break_target) for nested loops
     loop_context: Vec<(BlockId, BlockId)>,
     struct_defs: HashMap<String, model::StructDef>,
@@ -134,6 +140,7 @@ impl Lowerer {
             global_strings: Vec::new(),
             variable_allocas: HashMap::new(),
             global_vars: HashSet::new(),
+            function_names: HashSet::new(),
             loop_context: Vec::new(),
             struct_defs: HashMap::new(),
             typedefs: HashMap::new(),
@@ -164,13 +171,6 @@ impl Lowerer {
     fn add_instruction(&mut self, instr: Instruction) {
         if let Some(bid) = self.current_block {
             self.blocks[bid.0].instructions.push(instr);
-        }
-    }
-
-    fn add_terminator(&mut self, term: Terminator) {
-        if let Some(bid) = self.current_block {
-            self.blocks[bid.0].terminator = term;
-            self.current_block = None;
         }
     }
 
@@ -252,7 +252,7 @@ impl Lowerer {
                     _ => Type::Int,
                 }
             }
-            AstExpr::Call { name: _, args: _ } => Type::Int, // Assume int return
+            AstExpr::Call { func: _, args: _ } => Type::Int, // Assume int return
             AstExpr::SizeOf(_) | AstExpr::SizeOfExpr(_) => Type::Int,
             AstExpr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
         }
@@ -264,6 +264,7 @@ impl Lowerer {
             Type::Char => 1,
             Type::Void => 0,
             Type::Pointer(_) => 8,
+            Type::FunctionPointer { .. } => 8, // Function pointers are 8 bytes
             Type::Array(base, size) => self.get_type_size(base) * (*size as i64),
             Type::Struct(name) => {
                 if let Some(s_def) = self.struct_defs.get(name) {
@@ -301,12 +302,18 @@ impl Lowerer {
     }
     pub fn lower_program(&mut self, ast: &AstProgram) -> Result<IRProgram, String> {
         self.global_vars.clear();
+        self.function_names.clear();
         self.struct_defs.clear();
         for s_def in &ast.structs {
             self.struct_defs.insert(s_def.name.clone(), s_def.clone());
         }
         for g in &ast.globals {
             self.global_vars.insert(g.name.clone());
+        }
+        // Add function names as globals (they can be used as function pointers)
+        for f in &ast.functions {
+            self.global_vars.insert(f.name.clone());
+            self.function_names.insert(f.name.clone());
         }
 
         let mut functions = Vec::new();
@@ -779,6 +786,15 @@ impl Lowerer {
                 let bid = self.current_block.ok_or("Variable access outside block")?;
                 Ok(Operand::Var(self.read_variable(name, bid)))
             }
+            AstExpr::Variable(name) if self.is_function(name) => {
+                // Function names evaluate to their address (function pointer)
+                let dest = self.new_var();
+                self.add_instruction(Instruction::Copy {
+                    dest,
+                    src: Operand::Global(name.clone()),
+                });
+                Ok(Operand::Var(dest))
+            }
             AstExpr::Variable(_) | AstExpr::Index { .. } | AstExpr::Member { .. } | AstExpr::PtrMember { .. } | AstExpr::Unary { op: UnaryOp::Deref, .. } => {
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
@@ -803,18 +819,39 @@ impl Lowerer {
                 self.global_strings.push((label.clone(), s.clone()));
                 Ok(Operand::Global(label))
             }
-            AstExpr::Call { name, args } => {
+            AstExpr::Call { func, args } => {
                 let mut ir_args = Vec::new();
                 for arg in args {
                     ir_args.push(self.lower_expr(arg)?);
                 }
                 let bid = self.current_block.ok_or("Call outside block")?;
                 let dest = self.new_var();
-                self.blocks[bid.0].instructions.push(Instruction::Call {
-                    dest: Some(dest),
-                    name: name.clone(),
-                    args: ir_args,
-                });
+                
+                // Check if it's a direct call (function name) or indirect call (function pointer variable)
+                let is_direct_call = if let AstExpr::Variable(name) = func.as_ref() {
+                    self.is_function(name)
+                } else {
+                    false
+                };
+                
+                if is_direct_call {
+                    // Direct call to a function
+                    if let AstExpr::Variable(name) = func.as_ref() {
+                        self.blocks[bid.0].instructions.push(Instruction::Call {
+                            dest: Some(dest),
+                            name: name.clone(),
+                            args: ir_args,
+                        });
+                    }
+                } else {
+                    // Indirect call through function pointer
+                    let func_ptr = self.lower_expr(func)?;
+                    self.blocks[bid.0].instructions.push(Instruction::IndirectCall {
+                        dest: Some(dest),
+                        func_ptr,
+                        args: ir_args,
+                    });
+                }
                 Ok(Operand::Var(dest))
             }
             AstExpr::SizeOf(ty) => {
@@ -873,9 +910,13 @@ impl Lowerer {
             }
             AstExpr::Member { expr, member } => {
                 let base_addr = self.lower_to_addr(expr)?;
-                // In a real implementation we'd know the type of 'expr' from semantic analysis.
-                // For this prototype, we'll use a hack or assume we track types in symbol_table.
-                let (offset, _) = self.get_member_offset("UNKNOWN", member); 
+                // Get the struct type from the expression
+                let expr_type = self.get_expr_type(expr);
+                let struct_name = match &expr_type {
+                    Type::Struct(name) => name.clone(),
+                    _ => return Err(format!("Member access on non-struct type {:?}", expr_type)),
+                };
+                let (offset, _) = self.get_member_offset(&struct_name, member); 
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,
@@ -891,7 +932,18 @@ impl Lowerer {
                     Operand::Var(v) => v,
                     _ => return Err("-> operand must be in a variable".to_string()),
                 };
-                let (offset, _) = self.get_member_offset("UNKNOWN", member);
+                // Get the struct type from the pointer
+                let expr_type = self.get_expr_type(expr);
+                let struct_name = match &expr_type {
+                    Type::Pointer(inner) => {
+                        match &**inner {
+                            Type::Struct(name) => name.clone(),
+                            _ => return Err(format!("Pointer member access on non-struct pointer {:?}", expr_type)),
+                        }
+                    }
+                    _ => return Err(format!("-> operator on non-pointer type {:?}", expr_type)),
+                };
+                let (offset, _) = self.get_member_offset(&struct_name, member);
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,
@@ -907,6 +959,16 @@ impl Lowerer {
 
     fn is_local(&self, name: &str) -> bool {
         self.variable_defs.contains_key(name) || self.variable_allocas.contains_key(name)
+    }
+
+    fn is_function(&self, name: &str) -> bool {
+        // A name is a function if it's in function_names
+        self.function_names.contains(name)
+    }
+    
+    fn is_global_var(&self, name: &str) -> bool {
+        // A name is a global variable if it's in global_vars but not in function_names
+        self.global_vars.contains(name) && !self.function_names.contains(name)
     }
 
     fn write_variable(&mut self, name: &str, block: BlockId, value: VarId) {

@@ -164,6 +164,11 @@ impl Codegen {
                             self.get_or_create_slot(*d);
                         }
                     }
+                    IrInstruction::IndirectCall { dest, .. } => {
+                        if let Some(d) = dest {
+                            self.get_or_create_slot(*d);
+                        }
+                    }
                     IrInstruction::Store { .. } => {}
                 }
             }
@@ -206,12 +211,21 @@ impl Codegen {
         match inst {
             IrInstruction::Copy { dest, src } => {
                 let d_op = self.var_to_op(*dest);
+                // Special handling for Global sources (function addresses, globals)
+                if let Operand::Global(name) = src {
+                    // Use LEA with RIP-relative addressing to get the address
+                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                    return;
+                }
+                
                 let s_op = self.operand_to_op(src);
                 if matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..)) {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 } else if matches!(s_op, X86Operand::Label(..)) {
-                    // For labels (globals), use LEA with RIP-relative addressing to get the address
+                    // This shouldn't happen now that we handle Global above
+                    // But just in case, use LEA for any remaining labels
                     if let X86Operand::Label(name) = s_op {
                         self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name)));
                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
@@ -246,6 +260,9 @@ impl Codegen {
             }
             IrInstruction::Call { dest, name, args } => {
                 self.gen_call(dest, name, args);
+            }
+            IrInstruction::IndirectCall { dest, func_ptr, args } => {
+                self.gen_indirect_call(dest, func_ptr, args);
             }
         }
     }
@@ -447,8 +464,13 @@ impl Codegen {
     }
 
     fn gen_store(&mut self, addr: &Operand, src: &Operand) {
-        let s_op = self.operand_to_op(src);
-        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+        // Special handling for Global sources (function pointers) - need LEA not MOV
+        if let Operand::Global(func_name) = src {
+            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::RipRelLabel(func_name.clone())));
+        } else {
+            let s_op = self.operand_to_op(src);
+            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+        }
 
         match addr {
             Operand::Global(name) => {
@@ -521,12 +543,47 @@ impl Codegen {
         }
     }
 
+    fn gen_indirect_call(&mut self, dest: &Option<VarId>, func_ptr: &Operand, args: &[Operand]) {
+        let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
+        
+        // First, save the function pointer to a safe location (R10)
+        let fp_op = self.operand_to_op(func_ptr);
+        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
+        
+        // Now set up arguments
+        for (i, arg) in args.iter().enumerate() {
+            let val = self.operand_to_op(arg);
+            let target_reg_or_mem = if i < 4 {
+                Some(X86Operand::Reg(param_regs[i].clone()))
+            } else {
+                None
+            };
+
+            if let Some(target) = target_reg_or_mem {
+                self.asm.push(X86Instr::Mov(target, val));
+            } else {
+                let offset = 32 + (i - 4) * 8;
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
+            }
+        }
+        
+        // Indirect call through R10
+        self.asm.push(X86Instr::CallIndirect(X86Operand::Reg(X86Reg::R10)));
+        
+        if let Some(d) = dest {
+            let d_op = self.var_to_op(*d);
+            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+    }
+
     fn get_type_size(&self, r#type: &model::Type) -> usize {
         match r#type {
             model::Type::Int => 8,
             model::Type::Void => 0,
             model::Type::Array(inner, size) => self.get_type_size(inner) * size,
             model::Type::Pointer(_) => 8,
+            model::Type::FunctionPointer { .. } => 8,
             model::Type::Char => 1,
             model::Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {
@@ -549,6 +606,7 @@ impl Codegen {
             model::Type::Void => 0,
             model::Type::Array(inner, size) => self.get_element_size(inner) * size,
             model::Type::Pointer(_) => 8,
+            model::Type::FunctionPointer { .. } => 8,
             model::Type::Char => 1,
             model::Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {

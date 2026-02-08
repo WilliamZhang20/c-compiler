@@ -41,9 +41,22 @@ Generates x86-64 assembly with register allocation using graph coloring. Key fun
 
 ### Features
 
-The compiler supports a substantial subset of the C language including basic types like `int`, `char`, and pointers. It handles complex control flow with `if`, `while`, `for`, `do-while`, `break`, and `continue` statements.
+The compiler supports a substantial subset of the C language including:
 
-Rich expression support is included for arithmetic, relational, logical, and bitwise operations. It also supports function definitions, global variables, and array indexing for building structured programs.
+- **Basic types**: `int`, `char`, `void`, and pointers
+- **Function pointers**: Full support for function pointer types, assignment, and indirect calls
+- **Structs**: Full support for struct definitions, field access (`.`), and pointer member access (`->`)
+- **Arrays**: Single and multi-dimensional array indexing
+- **Control flow**: 
+  - `if`, `else` - conditional execution
+  - `while`, `for`, `do-while` - loops
+  - `switch`, `case`, `default` - multi-way branching with fallthrough support
+  - `break`, `continue` - loop control
+- **Expressions**: Arithmetic, relational, logical, and bitwise operations
+- **Functions**: Definitions, declarations, and recursive calls
+- **Global variables**: Initialized and uninitialized globals with proper RIP-relative addressing
+
+The compiler generates position-independent x86-64 assembly compatible with Windows (MinGW) and targets modern Intel/AMD processors.
 
 ## Testing
 
@@ -60,21 +73,25 @@ The compiler includes several production-quality optimizations organized across 
 
 ### IR-Level Optimizations (`optimizer/`)
 
-1. **Strength Reduction**: Converts expensive operations to cheaper equivalents
+1. **Algebraic Simplification**: Applies mathematical identities
+   - Identity operations: `x * 1` → `x`, `x + 0` → `x`, `x - 0` → `x`
+   - Zero operations: `x * 0` → `0`, `x & 0` → `0`, `0 / x` → `0`
+   - Bitwise identities: `x | 0` → `x`, `x ^ 0` → `x`, `x & -1` → `x`
+   - Shift identities: `x << 0` → `x`, `x >> 0` → `x`
+   - Eliminates redundant operations before they reach the backend
+
+2. **Strength Reduction**: Converts expensive operations to cheaper equivalents
    - Multiply by power-of-2 → left shift (e.g., `x * 8` → `x << 3`)
    - Divide by power-of-2 → right shift (e.g., `x / 4` → `x >> 2`)
+   - Reduces instruction latency and improves throughput
    
-2. **Copy Propagation**: Eliminates redundant copy operations
+3. **Copy Propagation**: Eliminates redundant copy operations
    - Replaces uses of copied variables with their original sources
    - Example: `b = a; c = b;` → uses of `c` directly reference `a`
 
-3. **Common Subexpression Elimination (CSE)**: Reuses previously computed values
+4. **Common Subexpression Elimination (CSE)**: Reuses previously computed values
    - Detects identical computations and eliminates redundancy
    - Example: `x = a + b; y = a + b;` → compute once, reuse result
-
-4. **Dead Store Elimination (DSE)**: Removes unused variable assignments
-   - Identifies variables that are never read and removes their allocations
-   - Reduces memory usage and eliminates unnecessary stores
 
 5. **Constant Folding**: Evaluates constant expressions at compile time
    - Arithmetic: `2 + 3` → `5`

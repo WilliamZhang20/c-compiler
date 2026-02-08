@@ -10,6 +10,7 @@ fn is_power_of_two(n: i64) -> bool {
 pub fn optimize(program: IRProgram) -> IRProgram {
     let mut program = program;
     for func in &mut program.functions {
+        algebraic_simplification(func);
         strength_reduce_function(func);
         copy_propagation(func);
         common_subexpression_elimination(func);
@@ -18,6 +19,219 @@ pub fn optimize(program: IRProgram) -> IRProgram {
         optimize_function(func);
     }
     program
+}
+
+// Algebraic simplification: apply algebraic identities to simplify expressions
+// Examples: x*0=0, x*1=x, x+0=x, x-0=x, x&0=0, x|0=x, etc.
+fn algebraic_simplification(func: &mut Function) {
+    for block in &mut func.blocks {
+        let mut new_instructions = Vec::new();
+        
+        for inst in block.instructions.drain(..) {
+            match inst {
+                Instruction::Binary { dest, op, left, right } => {
+                    let mut simplified = false;
+                    
+                    // Check for algebraic identities
+                    match op {
+                        BinaryOp::Mul => {
+                            // x * 0 = 0
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                            // x * 1 = x
+                            else if matches!(right, Operand::Constant(1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // 0 * x = 0
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                            // 1 * x = x
+                            else if matches!(left, Operand::Constant(1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: right.clone(),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::Div => {
+                            // x / 1 = x
+                            if matches!(right, Operand::Constant(1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // 0 / x = 0 (assuming x != 0, which we can't verify at compile time)
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::Mod => {
+                            // x % 1 = 0
+                            if matches!(right, Operand::Constant(1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                            // 0 % x = 0
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::Add => {
+                            // x + 0 = x
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // 0 + x = x
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: right.clone(),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::Sub => {
+                            // x - 0 = x
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // 0 - x = -x (would need unary negate)
+                            // Skip for now
+                        }
+                        BinaryOp::BitwiseAnd => {
+                            // x & 0 = 0
+                            if matches!(right, Operand::Constant(0)) || matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                            // x & -1 = x (all bits set)
+                            else if matches!(right, Operand::Constant(-1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            else if matches!(left, Operand::Constant(-1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: right.clone(),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::BitwiseOr => {
+                            // x | 0 = x
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: right.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // x | -1 = -1 (all bits set)
+                            else if matches!(right, Operand::Constant(-1)) || matches!(left, Operand::Constant(-1)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(-1),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::BitwiseXor => {
+                            // x ^ 0 = x
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: right.clone(),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+                            // x << 0 = x, x >> 0 = x
+                            if matches!(right, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: left.clone(),
+                                });
+                                simplified = true;
+                            }
+                            // 0 << x = 0, 0 >> x = 0
+                            else if matches!(left, Operand::Constant(0)) {
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(0),
+                                });
+                                simplified = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                    
+                    if !simplified {
+                        new_instructions.push(Instruction::Binary { dest, op, left, right });
+                    }
+                }
+                other => new_instructions.push(other),
+            }
+        }
+        
+        block.instructions = new_instructions;
+    }
 }
 
 // Copy propagation: replace uses of copies with their sources
@@ -145,7 +359,7 @@ fn common_subexpression_elimination(func: &mut Function) {
                     // Also check if this instruction's dest should be replaced
                     if var_replacements.contains_key(dest) {
                         // This dest is redundant, convert to a copy
-                        let replacement = var_replacements[dest];
+                        let _replacement = var_replacements[dest];
                         // We'll handle this by marking these as copies
                     }
                 }
@@ -222,103 +436,9 @@ fn common_subexpression_elimination(func: &mut Function) {
     }
 }
 
-// Dead store elimination: remove stores that are never read
-fn dead_store_elimination(func: &mut Function) {
-    use ir::{Terminator};
-    use std::collections::HashSet;
-    
-    // Track which variables are ever loaded or have their addresses taken
-    let mut loaded_vars: HashSet<VarId> = HashSet::new();
-    
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            match inst {
-                Instruction::Load { dest, addr } => {
-                    // The destination is defined, mark it as loaded
-                    loaded_vars.insert(*dest);
-                    // The address is used
-                    if let Operand::Var(v) = addr {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::Binary { dest, left, right, .. } => {
-                    // The destination is defined, keep it
-                    loaded_vars.insert(*dest);
-                    if let Operand::Var(v) = left {
-                        loaded_vars.insert(*v);
-                    }
-                    if let Operand::Var(v) = right {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::Unary { dest, src, .. } => {
-                    loaded_vars.insert(*dest);
-                    if let Operand::Var(v) = src {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::Store { addr, src } => {
-                    // Store addresses are always "used" - don't remove allocas for them
-                    if let Operand::Var(v) = addr {
-                        loaded_vars.insert(*v);
-                    }
-                    if let Operand::Var(v) = src {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::Copy { dest, src } => {
-                    loaded_vars.insert(*dest);
-                    if let Operand::Var(v) = src {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::GetElementPtr { dest, base, index, .. } => {
-                    loaded_vars.insert(*dest);
-                    if let Operand::Var(v) = base {
-                        loaded_vars.insert(*v);
-                    }
-                    if let Operand::Var(v) = index {
-                        loaded_vars.insert(*v);
-                    }
-                }
-                Instruction::Call { dest, args, .. } => {
-                    if let Some(d) = dest {
-                        loaded_vars.insert(*d);
-                    }
-                    for arg in args {
-                        if let Operand::Var(v) = arg {
-                            loaded_vars.insert(*v);
-                        }
-                    }
-                }
-                Instruction::Alloca { dest, .. } => {
-                    // Keep track of alloca destinations
-                    loaded_vars.insert(*dest);
-                }
-                _ => {}
-            }
-        }
-        
-        // Check terminator
-        match &block.terminator {
-            Terminator::Ret(Some(op)) => {
-                if let Operand::Var(v) = op {
-                    loaded_vars.insert(*v);
-                }
-            }
-            Terminator::CondBr { cond, .. } => {
-                if let Operand::Var(v) = cond {
-                    loaded_vars.insert(*v);
-                }
-            }
-            _ => {}
-        }
-    }
-    
-    // For now, don't remove anything - DSE is too aggressive
-    // We'd need proper liveness analysis to do this correctly
-    // Just keep all instructions to avoid breaking programs
-}
+// Note: Dead store elimination removed - was too aggressive.
+// TODO: Reimplement with proper liveness analysis that distinguishes
+// between unused temporaries and meaningful stores.
 
 // Strength reduction: replace expensive operations with cheaper equivalents
 fn strength_reduce_function(func: &mut Function) {
@@ -534,6 +654,12 @@ fn dce_function(func: &mut Function) -> bool {
                         if let Operand::Var(v) = arg { used_vars.insert(*v); }
                     }
                 }
+                Instruction::IndirectCall { func_ptr, args, .. } => {
+                    if let Operand::Var(v) = func_ptr { used_vars.insert(*v); }
+                    for arg in args {
+                        if let Operand::Var(v) = arg { used_vars.insert(*v); }
+                    }
+                }
                 Instruction::Load { addr, .. } => {
                     if let Operand::Var(v) = addr { used_vars.insert(*v); }
                 }
@@ -578,6 +704,7 @@ fn dce_function(func: &mut Function) -> bool {
                     used_vars.contains(dest)
                 }
                 Instruction::Call { .. } |
+                Instruction::IndirectCall { .. } |
                 Instruction::Store { .. } |
                 Instruction::Alloca { .. } => true, // Side effects or essential
             }

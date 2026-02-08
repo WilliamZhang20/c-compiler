@@ -417,6 +417,60 @@ impl<'a> Parser<'a> {
         // Variable Declaration
         if self.check_is_type() {
             let mut r#type = self.parse_type()?;
+            
+            // Check for function pointer: type (*name)(params)
+            if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                // Could be function pointer or just grouped expression
+                // Peek ahead to see if it's (*identifier)
+                let saved_pos = self.pos;
+                self.advance(); // consume (
+                if self.match_token(|t| matches!(t, Token::Star)) {
+                    // It's a function pointer: int (*name)(params)
+                    let name = match self.advance() {
+                        Some(Token::Identifier { value }) => value.clone(),
+                        other => return Err(format!("expected identifier in function pointer declaration, found {:?}", other)),
+                    };
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    
+                    // Now parse parameter types (args)
+                    self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                    let mut param_types = Vec::new();
+                    if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                        loop {
+                            param_types.push(self.parse_type()?);
+                            // Skip parameter names if present
+                            if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+                                self.advance();
+                            }
+                            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    
+                    r#type = Type::FunctionPointer {
+                        return_type: Box::new(r#type),
+                        param_types,
+                    };
+                    
+                    let init = if self.match_token(|t| matches!(t, Token::Equal)) {
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                    return Ok(Stmt::Declaration {
+                        r#type,
+                        name,
+                        init,
+                    });
+                } else {
+                    // Not a function pointer, restore position and continue
+                    self.pos = saved_pos;
+                }
+            }
+            
             let name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
                 other => return Err(format!("expected identifier after type, found {:?}", other)),
@@ -720,11 +774,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-                if let Expr::Variable(name) = expr {
-                    expr = Expr::Call { name, args };
-                } else {
-                    return Err("can only call variables (functions)".to_string());
-                }
+                expr = Expr::Call { func: Box::new(expr), args };
             } else if self.match_token(|t| matches!(t, Token::Dot)) {
                 let member = match self.advance() {
                     Some(Token::Identifier { value }) => value.clone(),
