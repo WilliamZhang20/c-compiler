@@ -43,7 +43,7 @@ Generates x86-64 assembly with register allocation using graph coloring. Key fun
 
 The compiler supports a substantial subset of the C language including:
 
-- **Basic types**: `int`, `char`, `void`, and pointers
+- **Basic types**: `int`, `char`, `void`, `float`, `double`, and pointers
 - **Function pointers**: Full support for function pointer types, assignment, and indirect calls
 - **Structs**: Full support for struct definitions, field access (`.`), and pointer member access (`->`)
 - **Arrays**: Single and multi-dimensional array indexing with automatic decay to pointers

@@ -22,6 +22,10 @@ pub struct Codegen {
     // Float constants
     float_constants: HashMap<String, f64>, // label -> value
     next_float_const: usize,
+    // Variable types (for float vs int differentiation)
+    var_types: HashMap<VarId, Type>,
+    // Function signatures (for call return type inference)
+    func_return_types: HashMap<String, Type>,
 }
 
 impl Codegen {
@@ -35,6 +39,8 @@ impl Codegen {
             enable_regalloc: true, // Enable register allocation by default
             float_constants: HashMap::new(),
             next_float_const: 0,
+            var_types: HashMap::new(),
+            func_return_types: HashMap::new(),
         }
     }
 
@@ -45,6 +51,12 @@ impl Codegen {
         }
         self.float_constants.clear();
         self.next_float_const = 0;
+        
+        // Build function signature map for return type inference in calls
+        self.func_return_types.clear();
+        for func in &prog.functions {
+            self.func_return_types.insert(func.name.clone(), func.return_type.clone());
+        }
         
         let mut output = String::new();
         output.push_str(".intel_syntax noprefix\n");
@@ -144,6 +156,9 @@ impl Codegen {
         let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
         let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
         for (i, (param_type, var)) in func.params.iter().enumerate() {
+            // Record parameter type for later use
+            self.var_types.insert(*var, param_type.clone());
+            
             let dest = self.var_to_op(*var);
             let is_float = matches!(param_type, Type::Float | Type::Double);
             
@@ -248,6 +263,14 @@ impl Codegen {
     }
 
     fn var_to_op(&mut self, var: VarId) -> X86Operand {
+        // Float variables must use stack slots (no XMM register allocation yet)
+        if let Some(var_type) = self.var_types.get(&var) {
+            if matches!(var_type, Type::Float | Type::Double) {
+                let slot = self.get_or_create_slot(var);
+                return X86Operand::FloatMem(X86Reg::Rbp, slot);
+            }
+        }
+        
         // Check if variable has a register allocated
         if let Some(reg) = self.reg_alloc.get(&var) {
             return X86Operand::Reg(reg.to_x86());
@@ -334,6 +357,9 @@ impl Codegen {
             }
             IrInstruction::Phi { .. } => {}
             IrInstruction::Alloca { dest, r#type } => {
+                // Record that Alloca result is a pointer
+                self.var_types.insert(*dest, Type::Pointer(Box::new(r#type.clone())));
+                
                 let size = self.get_type_size(r#type);
                 let aligned_size = ((size + 7) / 8) * 8;  // Align to 8 bytes
                 let ptr_slot = *self.stack_slots.get(dest).expect("alloca dest must have slot");
@@ -532,6 +558,9 @@ impl Codegen {
     }
 
     fn gen_float_binary_op(&mut self, dest: VarId, op: &BinaryOp, left: &Operand, right: &Operand) {
+        // Record that result is a float
+        self.var_types.insert(dest, Type::Float);
+        
         let d_op = self.var_to_op(dest);
         
         // Load left operand into xmm0
@@ -614,6 +643,9 @@ impl Codegen {
     }
 
     fn gen_float_unary_op(&mut self, dest: VarId, op: &UnaryOp, src: &Operand) {
+        // Record that result is a float
+        self.var_types.insert(dest, Type::Float);
+        
         let d_op = self.var_to_op(dest);
         
         // Load source into xmm0
@@ -661,46 +693,77 @@ impl Codegen {
     }
 
     fn gen_load(&mut self, dest: VarId, addr: &Operand, value_type: &model::Type) {
+        // Record the type of the loaded value
+        self.var_types.insert(dest, value_type.clone());
+        
         let d_op = self.var_to_op(dest);
+        let is_float = matches!(value_type, model::Type::Float | model::Type::Double);
         let use_dword = matches!(value_type, model::Type::Int | model::Type::Float);
         
-        match addr {
-            Operand::Global(name) => {
-                 // Load address into a register using RIP-relative LEA, then access through it
-                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-                 if use_dword {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                     // movsx rax, eax to sign-extend 32-bit to 64-bit
-                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-                 } else {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
-                 }
-                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+        if is_float {
+            // Float type uses MOVSS instructions
+            match addr {
+                Operand::Global(name) => {
+                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
+                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                }
+                Operand::Var(var) => {
+                    let a_op = self.var_to_op(*var);
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
+                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                }
+                Operand::Constant(addr_const) => {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
+                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
+                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                }
+                Operand::FloatConstant(_f) => {
+                    // TODO: Handle float constant loads properly
+                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                }
             }
-            Operand::Var(var) => {
-                 let a_op = self.var_to_op(*var);
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                 if use_dword {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-                 } else {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
-                 }
-                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-            }
-            Operand::Constant(addr_const) => {
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
-                 if use_dword {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-                 } else {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
-                 }
-                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-            }
-            Operand::FloatConstant(_f) => {
-                // TODO: Handle float constant loads properly
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Imm(0)));
+        } else {
+            // Integer/pointer types use MOV instructions
+            match addr {
+                Operand::Global(name) => {
+                     // Load address into a register using RIP-relative LEA, then access through it
+                     self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                     if use_dword {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                         // movsx rax, eax to sign-extend 32-bit to 64-bit
+                         self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                     } else {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                     }
+                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+                Operand::Var(var) => {
+                     let a_op = self.var_to_op(*var);
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                     if use_dword {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                         self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                     } else {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                     }
+                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+                Operand::Constant(addr_const) => {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
+                     if use_dword {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                         self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                     } else {
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                     }
+                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                }
+                Operand::FloatConstant(_f) => {
+                    // TODO: Handle float constant loads properly
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Imm(0)));
+                }
             }
         }
     }
@@ -828,7 +891,14 @@ impl Codegen {
         let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
         
         for (i, arg) in args.iter().enumerate() {
-            let is_float = matches!(arg, Operand::FloatConstant(_));
+            // Check if argument is a float (constant or typed variable)
+            let is_float = match arg {
+                Operand::FloatConstant(_) => true,
+                Operand::Var(v) => {
+                    self.var_types.get(v).map_or(false, |t| matches!(t, Type::Float | Type::Double))
+                }
+                _ => false,
+            };
             
             if i < 4 {
                 if is_float {
@@ -858,10 +928,23 @@ impl Codegen {
         self.asm.push(X86Instr::Call(name.to_string()));
         
         if let Some(d) = dest {
+            // Check if function returns a float  by looking up its signature
+            let returns_float = self.func_return_types.get(name)
+                .map_or(false, |ret_type| matches!(ret_type, Type::Float | Type::Double));
+            
+            // Record the type of the dest variable BEFORE calling var_to_op
+            if returns_float {
+                self.var_types.insert(*d, Type::Float);
+            }
+            
             let d_op = self.var_to_op(*d);
-            // TODO: Should check if return type is float and use MOVSS from XMM0
-            // For now, assume integer return
-            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            if returns_float {
+                // Float return value comes in XMM0
+                self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else {
+                // Integer/pointer return value comes in RAX
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
         }
     }
 
