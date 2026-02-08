@@ -58,10 +58,12 @@ pub enum Instruction {
     Load {
         dest: VarId,
         addr: Operand,
+        value_type: Type, // Type of the value being loaded
     },
     Store {
         addr: Operand,
         src: Operand,
+        value_type: Type, // Type of the value being stored
     },
     GetElementPtr {
         dest: VarId,

@@ -130,17 +130,6 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // Check for float literals BEFORE single character symbols
-        // to avoid matching '3.14' as '3', '.', '14'
-        if let Some(caps) = float_regex.captures(current_input) {
-            let float_text = caps.get(0).unwrap().as_str();
-            let float_str = float_text.trim_end_matches(|c| c == 'f' || c == 'F');
-            let value = float_str.parse::<f64>().map_err(|_| format!("Failed to parse float literal: {}", float_text))?;
-            tokens.push(Token::FloatLiteral { value });
-            current_input = &current_input[float_text.len()..];
-            continue;
-        }
-
         // handle single character symbols
         if let Some(c) = current_input.chars().next() {
             let token = match c {
@@ -185,6 +174,14 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             longest_capture = caps.get(0).unwrap().as_str();
             tok_type = Some(TokenType::Identifier);
         }
+        // Check float BEFORE integer to avoid matching "3.14" as "3"
+        if let Some(caps) = float_regex.captures(current_input) {
+            let text = caps.get(0).unwrap().as_str();
+            if text.len() > longest_capture.len() {
+                longest_capture = text;
+                tok_type = Some(TokenType::FloatLiteral);
+            }
+        }
         if let Some(caps) = constant_regex.captures(current_input) {
             let text = caps.get(0).unwrap().as_str();
             if text.len() > longest_capture.len() {
@@ -206,7 +203,6 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 tok_type = Some(TokenType::CharLiteral);
             }
         }
-        // Note: FloatLiteral is handled earlier to avoid conflicting with '.' token
 
         let Some(tt) = tok_type else {
             return Err(format!("Found invalid token: '{}' at \"{}\"...", current_input.chars().next().unwrap(), &current_input[..current_input.len().min(20)]));

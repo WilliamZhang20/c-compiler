@@ -51,6 +51,7 @@ impl Lowerer {
                         self.blocks[bid.0].instructions.push(Instruction::Store {
                             addr: Operand::Var(alloca_var),
                             src: val.clone(),
+                            value_type: r#type.clone(),
                         });
                         
                         let var = match val {

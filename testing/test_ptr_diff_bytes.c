@@ -1,5 +1,5 @@
 // Check the arithmetic value directly
-// EXPECT: 1
+// EXPECT: 2
 int main() {
     int arr[2];
     arr[0] = 10;

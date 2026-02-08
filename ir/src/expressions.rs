@@ -13,9 +13,11 @@ impl Lowerer {
                 if *op == BinaryOp::Assign {
                     let val = self.lower_expr(right)?;
                     let addr = self.lower_to_addr(left)?;
+                    let value_type = self.get_expr_type(left);
                     self.add_instruction(Instruction::Store {
                         addr: Operand::Var(addr),
                         src: val.clone(),
+                        value_type,
                     });
                     return Ok(val);
                 }
@@ -124,6 +126,7 @@ impl Lowerer {
                     self.add_instruction(Instruction::Load {
                         dest,
                         addr: Operand::Var(addr),
+                        value_type: var_type,
                     });
                     Ok(Operand::Var(dest))
                 }
@@ -132,18 +135,22 @@ impl Lowerer {
                 // Global variables or other variables not in allocas
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
+                let value_type = self.get_expr_type(expr);
                 self.add_instruction(Instruction::Load {
                     dest,
                     addr: Operand::Var(addr),
+                    value_type,
                 });
                 Ok(Operand::Var(dest))
             }
             AstExpr::Index { .. } | AstExpr::Member { .. } | AstExpr::PtrMember { .. } | AstExpr::Unary { op: UnaryOp::Deref, .. } => {
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
+                let value_type = self.get_expr_type(expr);
                 self.add_instruction(Instruction::Load {
                     dest,
                     addr: Operand::Var(addr),
+                    value_type,
                 });
                 Ok(Operand::Var(dest))
             }

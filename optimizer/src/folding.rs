@@ -96,16 +96,18 @@ pub fn optimize_function(func: &mut Function) {
                             args: resolved_args,
                         });
                     }
-                    Instruction::Load { dest, addr } => {
+                    Instruction::Load { dest, addr, value_type } => {
                         new_instructions.push(Instruction::Load {
                             dest,
                             addr: resolve_operand(&addr, &constants),
+                            value_type,
                         });
                     }
-                    Instruction::Store { addr, src } => {
+                    Instruction::Store { addr, src, value_type } => {
                         new_instructions.push(Instruction::Store {
                             addr: resolve_operand(&addr, &constants),
                             src: resolve_operand(&src, &constants),
+                            value_type,
                         });
                     }
                     Instruction::GetElementPtr {

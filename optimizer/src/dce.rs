@@ -69,7 +69,7 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
         Instruction::Load { addr, .. } => {
             add_operand_var(addr, used_vars);
         }
-        Instruction::Store { addr, src } => {
+        Instruction::Store { addr, src, .. } => {
             add_operand_var(addr, used_vars);
             add_operand_var(src, used_vars);
         }

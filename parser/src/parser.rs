@@ -203,7 +203,7 @@ impl<'a> Parser<'a> {
         // Must start with a known type
         if !(matches!(
             self.tokens[temp_pos],
-            Token::Int | Token::Void | Token::Char | Token::Struct
+            Token::Int | Token::Void | Token::Char | Token::Struct | Token::Float | Token::Double
         ) || (if let Token::Identifier { value } = &self.tokens[temp_pos] {
             self.typedefs.contains(value)
         } else {

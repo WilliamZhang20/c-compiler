@@ -28,7 +28,7 @@ pub fn copy_propagation(func: &mut Function) {
                 Instruction::Unary { src, .. } => {
                     replace_operand(src, &copies);
                 }
-                Instruction::Store { addr, src } => {
+                Instruction::Store { addr, src, .. } => {
                     replace_operand(addr, &copies);
                     replace_operand(src, &copies);
                 }

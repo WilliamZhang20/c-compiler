@@ -81,7 +81,7 @@ fn replace_in_instruction(inst: &mut Instruction, replacements: &HashMap<VarId, 
         Instruction::Unary { src, .. } => {
             replace_in_operand(src, replacements);
         }
-        Instruction::Store { addr, src } => {
+        Instruction::Store { addr, src, .. } => {
             replace_in_operand(addr, replacements);
             replace_in_operand(src, replacements);
         }

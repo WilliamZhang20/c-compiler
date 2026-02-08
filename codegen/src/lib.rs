@@ -283,11 +283,11 @@ impl Codegen {
                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, buffer_offset)));
                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
-            IrInstruction::Load { dest, addr } => {
-                self.gen_load(*dest, addr);
+            IrInstruction::Load { dest, addr, value_type } => {
+                self.gen_load(*dest, addr, value_type);
             }
-            IrInstruction::Store { addr, src } => {
-                self.gen_store(addr, src);
+            IrInstruction::Store { addr, src, value_type } => {
+                self.gen_store(addr, src, value_type);
             }
             IrInstruction::GetElementPtr { dest, base, index, element_type } => {
                 self.gen_gep(*dest, base, index, element_type);
@@ -482,26 +482,42 @@ impl Codegen {
         // For now, do nothing - this will produce incorrect results but allows compilation
     }
 
-    fn gen_load(&mut self, dest: VarId, addr: &Operand) {
+    fn gen_load(&mut self, dest: VarId, addr: &Operand, value_type: &model::Type) {
         let d_op = self.var_to_op(dest);
+        let use_dword = matches!(value_type, model::Type::Int | model::Type::Float);
+        
         match addr {
             Operand::Global(name) => {
                  // Load address into a register using RIP-relative LEA, then access through it
                  self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                 // movsx rax, eax to sign-extend 32-bit to 64-bit
-                 self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                     // movsx rax, eax to sign-extend 32-bit to 64-bit
+                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 }
                  self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
             Operand::Var(var) => {
                  let a_op = self.var_to_op(*var);
                  self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 }
                  self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
             Operand::Constant(addr_const) => {
                  self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                 }
                  self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
             Operand::FloatConstant(_f) => {
@@ -511,7 +527,9 @@ impl Codegen {
         }
     }
 
-    fn gen_store(&mut self, addr: &Operand, src: &Operand) {
+    fn gen_store(&mut self, addr: &Operand, src: &Operand, value_type: &model::Type) {
+        let use_dword = matches!(value_type, model::Type::Int | model::Type::Float);
+        
         // Special handling for Global sources (function pointers) - need LEA not MOV
         if let Operand::Global(func_name) = src {
             self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::RipRelLabel(func_name.clone())));
@@ -524,16 +542,28 @@ impl Codegen {
             Operand::Global(name) => {
                  // Load address into a register using RIP-relative LEA, then store through it
                  self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-                 self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                 }
             }
             Operand::Var(var) => {
                  let a_op = self.var_to_op(*var);
                  self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                 self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                 }
             }
             Operand::Constant(addr_const) => {
                  self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
-                 self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                 if use_dword {
+                     self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                 } else {
+                     self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                 }
             }
             Operand::FloatConstant(_f) => {
                 // TODO: Handle float constant stores properly
@@ -635,7 +665,7 @@ impl Codegen {
 
     fn get_type_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 8,  // Use 8 bytes for consistency with pointers
+            model::Type::Int => 4,  // 32-bit int
             model::Type::Void => 0,
             model::Type::Float => 4,  // 32-bit float
             model::Type::Double => 8, // 64-bit double
@@ -660,7 +690,7 @@ impl Codegen {
 
     fn get_element_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 8,  // Use 8 bytes for consistency
+            model::Type::Int => 4,  // 32-bit int
             model::Type::Void => 0,
             model::Type::Float => 4,
             model::Type::Double => 8,

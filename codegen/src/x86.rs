@@ -99,7 +99,9 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Or(d, s_op) => s.push_str(&format!("  or {}, {}\n", d.to_string(), s_op.to_string())),
             X86Instr::Not(d) => s.push_str(&format!("  not {}\n", d.to_string())),
             X86Instr::Shl(d, c) => s.push_str(&format!("  shl {}, {}\n", d.to_string(), c.to_string())),
-            X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),            X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\\n", d.to_string(), src.to_string())),        }
+            X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),
+            X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\n", d.to_string(), src.to_string())),
+        }
     }
     s
 }
