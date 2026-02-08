@@ -600,7 +600,7 @@ impl Codegen {
 
     fn get_type_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 8,
+            model::Type::Int => 8,  // Use 8 bytes for consistency with pointers
             model::Type::Void => 0,
             model::Type::Array(inner, size) => self.get_type_size(inner) * size,
             model::Type::Pointer(_) => 8,
@@ -623,7 +623,7 @@ impl Codegen {
 
     fn get_element_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 8,
+            model::Type::Int => 8,  // Use 8 bytes for consistency
             model::Type::Void => 0,
             model::Type::Array(inner, size) => self.get_element_size(inner) * size,
             model::Type::Pointer(_) => 8,

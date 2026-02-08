@@ -167,7 +167,7 @@ impl Lowerer {
     /// Calculate the size of a type in bytes
     pub(crate) fn get_type_size(&self, ty: &Type) -> i64 {
         match ty {
-            Type::Int => 4,
+            Type::Int => 8,  // Use 8 bytes to match codegen and pointer size
             Type::Char => 1,
             Type::Void => 0,
             Type::Pointer(_) => 8,

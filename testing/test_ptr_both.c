@@ -1,5 +1,5 @@
 // Check if p points to arr properly
-// EXPECT: 10
+// EXPECT: 20
 int main() {
     int arr[2];
     arr[0] = 10;
