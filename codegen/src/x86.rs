@@ -6,6 +6,7 @@ pub enum X86Reg {
     R8, R9, R10, R11, R12, R13, R14, R15,
     Eax, Ecx, // 32-bit registers
     Al, // 8-bit rax
+    Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7, // SSE float registers
 }
 
 impl X86Reg {
@@ -17,6 +18,8 @@ impl X86Reg {
             Self::R12 => "r12", Self::R13 => "r13", Self::R14 => "r14", Self::R15 => "r15",
             Self::Eax => "eax", Self::Ecx => "ecx",
             Self::Al => "al",
+            Self::Xmm0 => "xmm0", Self::Xmm1 => "xmm1", Self::Xmm2 => "xmm2", Self::Xmm3 => "xmm3",
+            Self::Xmm4 => "xmm4", Self::Xmm5 => "xmm5", Self::Xmm6 => "xmm6", Self::Xmm7 => "xmm7",
         }
     }
 }
@@ -30,6 +33,7 @@ pub enum X86Operand {
     Label(String),
     GlobalMem(String), // RIP-relative global: label[rip]
     RipRelLabel(String), // For LEA: label[rip]
+    FloatMem(X86Reg, i32), // [reg + offset] for float ops (no PTR directive for SSE)
 }
 
 impl X86Operand {
@@ -42,6 +46,7 @@ impl X86Operand {
             Self::Label(s) => s.clone(), // Just emit the label as-is (for LEA)
             Self::GlobalMem(name) => format!("DWORD PTR {}[rip]", name), // RIP-relative 32-bit int access
             Self::RipRelLabel(name) => format!("{}[rip]", name), // RIP-relative label for LEA
+            Self::FloatMem(r, offset) => format!("DWORD PTR [{}{:+}]", r.to_str(), offset),
         }
     }
 }
@@ -72,6 +77,16 @@ pub enum X86Instr {
     Shl(X86Operand, X86Operand),
     Shr(X86Operand, X86Operand),
     Movsx(X86Operand, X86Operand), // Sign-extend smaller value into larger register
+    // Float instructions
+    Movss(X86Operand, X86Operand), // Move scalar single-precision float
+    Addss(X86Operand, X86Operand), // Add scalar single-precision float
+    Subss(X86Operand, X86Operand), // Subtract scalar single-precision float
+    Mulss(X86Operand, X86Operand), // Multiply scalar single-precision float
+    Divss(X86Operand, X86Operand), // Divide scalar single-precision float
+    Ucomiss(X86Operand, X86Operand), // Compare scalar single-precision float
+    Cvtsi2ss(X86Operand, X86Operand), // Convert int to float
+    Cvttss2si(X86Operand, X86Operand), // Convert float to int (truncate)
+    Xorps(X86Operand, X86Operand), // XOR packed single-precision (for negation)
 }
 
 /// emit_asm converts X86 instructions to AT&T syntax assembly
@@ -101,6 +116,16 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Shl(d, c) => s.push_str(&format!("  shl {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\n", d.to_string(), src.to_string())),
+            // Float instructions
+            X86Instr::Movss(d, src) => s.push_str(&format!("  movss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Addss(d, src) => s.push_str(&format!("  addss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Subss(d, src) => s.push_str(&format!("  subss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Mulss(d, src) => s.push_str(&format!("  mulss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Divss(d, src) => s.push_str(&format!("  divss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Ucomiss(l, r) => s.push_str(&format!("  ucomiss {}, {}\n", l.to_string(), r.to_string())),
+            X86Instr::Cvtsi2ss(d, src) => s.push_str(&format!("  cvtsi2ss {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Cvttss2si(d, src) => s.push_str(&format!("  cvttss2si {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Xorps(d, src) => s.push_str(&format!("  xorps {}, {}\n", d.to_string(), src.to_string())),
         }
     }
     s
