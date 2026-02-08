@@ -150,16 +150,15 @@ impl Codegen {
                 match inst {
                     IrInstruction::Alloca { dest, r#type } => {
                         // Allocas always need stack space
-                        let size = self.get_type_size(r#type) as i32;
-                        // Align to 8 bytes for proper stack access
-                        let aligned_size = ((size + 7) / 8) * 8;
-                        self.next_slot += aligned_size;
-                        let buffer_slot = -self.next_slot;
-                        
-                        // Now allocate slot for the pointer variable itself
+                        // First allocate slot for pointer variable
                         self.next_slot += 8;
                         let ptr_slot = -self.next_slot;
                         self.stack_slots.insert(*dest, ptr_slot);
+                        
+                        // Then allocate buffer space (aligned to 8 bytes)
+                        let size = self.get_type_size(r#type) as i32;
+                        let aligned_size = ((size + 7) / 8) * 8;
+                        self.next_slot += aligned_size;
                     }
                     IrInstruction::Binary { dest, .. } |
                     IrInstruction::Unary { dest, .. } |
@@ -264,8 +263,9 @@ impl Codegen {
             IrInstruction::Phi { .. } => {}
             IrInstruction::Alloca { dest, r#type } => {
                 let size = self.get_type_size(r#type);
+                let aligned_size = ((size + 7) / 8) * 8;  // Align to 8 bytes
                 let ptr_slot = *self.stack_slots.get(dest).expect("alloca dest must have slot");
-                let buffer_offset = ptr_slot - size as i32;
+                let buffer_offset = ptr_slot - aligned_size as i32;
                 let d_op = self.var_to_op(*dest);
                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, buffer_offset)));
                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
