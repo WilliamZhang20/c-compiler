@@ -28,6 +28,10 @@ struct Args {
     /// Keep intermediate files (.i, .s)
     #[arg(long, default_value_t = false)]
     keep_intermediates: bool,
+
+    /// Use safe malloc runtime (detects buffer overflows, use-after-free, etc.)
+    #[arg(long, default_value_t = false)]
+    safe_malloc: bool,
 }
 
 fn main() {
@@ -105,7 +109,7 @@ fn main() {
         return;
     }
 
-    run_linker(&input_file, &asm_path);
+    run_linker(&input_file, &asm_path, args.safe_malloc);
     println!("Compilation successful. Generated executable: {}", input_file.file_stem().unwrap().to_string_lossy());
 
     // Cleanup
@@ -132,12 +136,23 @@ fn preprocess(input_path: &str, input_file: &Path) {
     }
 }
 
-fn run_linker(input_file: &Path, asm_path: &str) {
+fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
     let mut executable_file = input_file.file_stem().unwrap().to_string_lossy().into_owned();
     executable_file.push_str(".exe");
 
+    let mut args = vec![asm_path];
+    
+    // Optionally link with safe malloc runtime
+    if use_safe_malloc {
+        args.push("runtime/malloc.o");
+    }
+    
+    args.push("-o");
+    args.push(&executable_file);
+    args.push("-mconsole");
+
     let exit_code = Command::new("gcc")
-        .args([{&asm_path}, "runtime/malloc.o", "-o", &executable_file, "-mconsole"])
+        .args(&args)
         .status()
         .expect("executable generated sucessfully");
 
