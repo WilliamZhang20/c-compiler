@@ -4,7 +4,12 @@ Some [criticize](https://www.youtube.com/watch?v=jgiMagdjA1s) the usage of mallo
 
 So this directory contains a Windows-Specific custom malloc. Most of it is quite simple since it abstracts most gritty details to the Windows Memory API.
 
-Key Features
+How to Use:
+
+`cargo run --package driver -- test.c --safe-malloc`
+
+Key Features:
+
 1. Buffer Overflow Detection
 - Places "canaries" (magic values 0xABCD1234) before and after allocated blocks
 - Checks on free() if canaries are corrupted (indicating buffer overflow)

@@ -1,3 +1,6 @@
+/*
+TODO: Modularize
+*/
 use model::{BinaryOp, UnaryOp, Type, Program as AstProgram, Function as AstFunction, Stmt as AstStmt, Expr as AstExpr, Block as AstBlock, GlobalVar as AstGlobalVar};
 use std::collections::{HashMap, HashSet};
 
