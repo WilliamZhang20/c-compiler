@@ -19,11 +19,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the entire program (functions, globals, structs)
+    /// Parse the entire program (functions, globals, structs, unions, enums)
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut functions = Vec::new();
         let mut globals = Vec::new();
         let mut structs = Vec::new();
+        let mut unions = Vec::new();
         let mut enums = Vec::new();
 
         while !self.is_at_end() {
@@ -38,12 +39,18 @@ impl<'a> Parser<'a> {
             } else if self.is_function_definition() {
                 functions.push(self.parse_function()?);
             } else if self.check_is_type() {
-                // Could be a global declaration or a struct definition
+                // Could be a global declaration, struct definition, or union definition
                 if self.check(&|t| matches!(t, Token::Struct))
                     && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
                 {
                     // struct definition without variable: struct foo { ... };
                     structs.push(self.parse_struct_definition()?);
+                    self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                } else if self.check(&|t| matches!(t, Token::Union))
+                    && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
+                {
+                    // union definition without variable: union foo { ... };
+                    unions.push(self.parse_union_definition()?);
                     self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
                 } else {
                     globals.push(self.parse_global()?);
@@ -58,6 +65,7 @@ impl<'a> Parser<'a> {
             functions,
             globals,
             structs,
+            unions,
             enums,
         })
     }
@@ -318,6 +326,12 @@ impl<'a> Parser<'a> {
                 | Token::Float
                 | Token::Double
                 | Token::Struct
+                | Token::Union
+                | Token::Enum
+                | Token::Unsigned
+                | Token::Signed
+                | Token::Long
+                | Token::Short
                 | Token::Static
                 | Token::Extern
                 | Token::Inline

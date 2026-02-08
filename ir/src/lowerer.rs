@@ -20,6 +20,7 @@ pub struct Lowerer {
     // Stack of (continue_target, break_target) for nested loops
     pub(crate) loop_context: Vec<(BlockId, BlockId)>,
     pub(crate) struct_defs: HashMap<String, model::StructDef>,
+    pub(crate) union_defs: HashMap<String, model::UnionDef>,
     pub(crate) enum_constants: HashMap<String, i64>, // enum constant name => value
     pub(crate) typedefs: HashMap<String, Type>,
     pub(crate) current_switch_cases: Vec<(i64, BlockId)>, // (value, block)
@@ -46,6 +47,7 @@ impl Lowerer {
             function_names: HashSet::new(),
             loop_context: Vec::new(),
             struct_defs: HashMap::new(),
+            union_defs: HashMap::new(),
             enum_constants: HashMap::new(),
             typedefs: HashMap::new(),
             current_switch_cases: Vec::new(),
@@ -132,6 +134,16 @@ impl Lowerer {
                         }
                         Type::Int
                     }
+                    Type::Union(name) => {
+                        if let Some(u_def) = self.union_defs.get(&name) {
+                            for (f_ty, f_name) in &u_def.fields {
+                                if f_name == member {
+                                    return f_ty.clone();
+                                }
+                            }
+                        }
+                        Type::Int
+                    }
                     _ => Type::Int,
                 }
             }
@@ -139,16 +151,29 @@ impl Lowerer {
                 let ty = self.get_expr_type(expr);
                 match ty {
                     Type::Pointer(inner) => {
-                        if let Type::Struct(name) = *inner {
-                            if let Some(s_def) = self.struct_defs.get(&name) {
-                                for (f_ty, f_name) in &s_def.fields {
-                                    if f_name == member {
-                                        return f_ty.clone();
+                        match *inner {
+                            Type::Struct(name) => {
+                                if let Some(s_def) = self.struct_defs.get(&name) {
+                                    for (f_ty, f_name) in &s_def.fields {
+                                        if f_name == member {
+                                            return f_ty.clone();
+                                        }
                                     }
                                 }
+                                Type::Int
                             }
+                            Type::Union(name) => {
+                                if let Some(u_def) = self.union_defs.get(&name) {
+                                    for (f_ty, f_name) in &u_def.fields {
+                                        if f_name == member {
+                                            return f_ty.clone();
+                                        }
+                                    }
+                                }
+                                Type::Int
+                            }
+                            _ => Type::Int,
                         }
-                        Type::Int
                     }
                     _ => Type::Int,
                 }
@@ -170,8 +195,11 @@ impl Lowerer {
     /// Calculate the size of a type in bytes
     pub(crate) fn get_type_size(&self, ty: &Type) -> i64 {
         match ty {
-            Type::Int => 4,  // 32-bit int
-            Type::Char => 1,
+            Type::Int | Type::UnsignedInt => 4,  // 32-bit int
+            Type::Char | Type::UnsignedChar => 1,
+            Type::Short | Type::UnsignedShort => 2,
+            Type::Long | Type::UnsignedLong => 8,  // 64-bit on x64
+            Type::LongLong | Type::UnsignedLongLong => 8,
             Type::Float => 4,  // 32-bit float
             Type::Double => 8, // 64-bit double
             Type::Void => 0,
@@ -190,6 +218,21 @@ impl Lowerer {
                     4 // fallback or error
                 }
             }
+            Type::Union(name) => {
+                if let Some(u_def) = self.union_defs.get(name) {
+                    // Union size is the largest field
+                    let mut max_size = 0;
+                    for (f_ty, _) in &u_def.fields {
+                        let field_size = self.get_type_size(f_ty);
+                        if field_size > max_size {
+                            max_size = field_size;
+                        }
+                    }
+                    max_size
+                } else {
+                    4 // fallback
+                }
+            }
             Type::Typedef(name) => {
                 if let Some(real_ty) = self.typedefs.get(name) {
                     self.get_type_size(real_ty)
@@ -205,15 +248,24 @@ impl Lowerer {
         matches!(ty, Type::Float | Type::Double)
     }
 
-    /// Get the byte offset and type of a struct member
-    pub(crate) fn get_member_offset(&self, struct_name: &str, member_name: &str) -> (i64, Type) {
-        if let Some(s_def) = self.struct_defs.get(struct_name) {
+    /// Get the byte offset and type of a struct/union member
+    pub(crate) fn get_member_offset(&self, struct_or_union_name: &str, member_name: &str) -> (i64, Type) {
+        // Check if it's a struct
+        if let Some(s_def) = self.struct_defs.get(struct_or_union_name) {
             let mut offset = 0;
             for (f_ty, f_name) in &s_def.fields {
                 if f_name == member_name {
                     return (offset, f_ty.clone());
                 }
                 offset += self.get_type_size(f_ty);
+            }
+        }
+        // Check if it's a union (all fields at offset 0)
+        if let Some(u_def) = self.union_defs.get(struct_or_union_name) {
+            for (f_ty, f_name) in &u_def.fields {
+                if f_name == member_name {
+                    return (0, f_ty.clone());  // All union fields start at offset 0
+                }
             }
         }
         (0, Type::Int)
@@ -224,10 +276,15 @@ impl Lowerer {
         self.global_vars.clear();
         self.function_names.clear();
         self.struct_defs.clear();
+        self.union_defs.clear();
         self.enum_constants.clear();
         
         for s_def in &ast.structs {
             self.struct_defs.insert(s_def.name.clone(), s_def.clone());
+        }
+        
+        for u_def in &ast.unions {
+            self.union_defs.insert(u_def.name.clone(), u_def.clone());
         }
         
         // Register all enum constants
@@ -255,6 +312,7 @@ impl Lowerer {
             global_strings: self.global_strings.clone(),
             globals: ast.globals.clone(),
             structs: ast.structs.clone(),
+            unions: ast.unions.clone(),
         })
     }
 

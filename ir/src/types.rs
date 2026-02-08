@@ -121,4 +121,5 @@ pub struct IRProgram {
     pub global_strings: Vec<(String, String)>, // (label, content)
     pub globals: Vec<AstGlobalVar>,
     pub structs: Vec<model::StructDef>,
+    pub unions: Vec<model::UnionDef>,
 }

@@ -5,6 +5,7 @@ pub struct SemanticAnalyzer {
     global_scope: HashMap<String, Type>,
     scopes: Vec<HashMap<String, Type>>,
     structs: HashMap<String, model::StructDef>,
+    unions: HashMap<String, model::UnionDef>,
     enum_constants: HashMap<String, i64>, // enum constant name => value
     loop_depth: usize,
     in_switch: bool,
@@ -16,6 +17,7 @@ impl SemanticAnalyzer {
             global_scope: HashMap::new(),
             scopes: Vec::new(),
             structs: HashMap::new(),
+            unions: HashMap::new(),
             enum_constants: HashMap::new(),
             loop_depth: 0,
             in_switch: false,
@@ -25,10 +27,15 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, program: &Program) -> Result<(), String> {
         self.global_scope.clear();
         self.structs.clear();
+        self.unions.clear();
         self.enum_constants.clear();
         
         for s_def in &program.structs {
             self.structs.insert(s_def.name.clone(), s_def.clone());
+        }
+        
+        for u_def in &program.unions {
+            self.unions.insert(u_def.name.clone(), u_def.clone());
         }
         
         // Register all enum constants

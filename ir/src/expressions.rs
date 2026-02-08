@@ -282,13 +282,14 @@ impl Lowerer {
             }
             AstExpr::Member { expr, member } => {
                 let base_addr = self.lower_to_addr(expr)?;
-                // Get the struct type from the expression
+                // Get the struct/union type from the expression
                 let expr_type = self.get_expr_type(expr);
-                let struct_name = match &expr_type {
+                let type_name = match &expr_type {
                     Type::Struct(name) => name.clone(),
-                    _ => return Err(format!("Member access on non-struct type {:?}", expr_type)),
+                    Type::Union(name) => name.clone(),
+                    _ => return Err(format!("Member access on non-struct/union type {:?}", expr_type)),
                 };
-                let (offset, _) = self.get_member_offset(&struct_name, member); 
+                let (offset, _) = self.get_member_offset(&type_name, member); 
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,
@@ -304,18 +305,19 @@ impl Lowerer {
                     Operand::Var(v) => v,
                     _ => return Err("-> operand must be in a variable".to_string()),
                 };
-                // Get the struct type from the pointer
+                // Get the struct/union type from the pointer
                 let expr_type = self.get_expr_type(expr);
-                let struct_name = match &expr_type {
+                let type_name = match &expr_type {
                     Type::Pointer(inner) => {
                         match &**inner {
                             Type::Struct(name) => name.clone(),
-                            _ => return Err(format!("Pointer member access on non-struct pointer {:?}", expr_type)),
+                            Type::Union(name) => name.clone(),
+                            _ => return Err(format!("Pointer member access on non-struct/union pointer {:?}", expr_type)),
                         }
                     }
                     _ => return Err(format!("-> operator on non-pointer type {:?}", expr_type)),
                 };
-                let (offset, _) = self.get_member_offset(&struct_name, member);
+                let (offset, _) = self.get_member_offset(&type_name, member);
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,

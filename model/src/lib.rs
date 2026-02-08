@@ -36,6 +36,11 @@ pub enum Token {
     Switch,
     Case,
     Default,
+    Unsigned,
+    Signed,
+    Long,
+    Short,
+    Union,
     Hash, // #
     Ellipsis, // ...
     Colon, // :
@@ -73,13 +78,22 @@ pub enum Token {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Type {
     Int,
-    Void,
-    Array(Box<Type>, usize),
-    Pointer(Box<Type>),
+    UnsignedInt,
     Char,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Void,
     Float,
     Double,
+    Array(Box<Type>, usize),
+    Pointer(Box<Type>),
     Struct(String),
+    Union(String),
     Typedef(String),
     FunctionPointer {
         return_type: Box<Type>,
@@ -92,11 +106,18 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub globals: Vec<GlobalVar>,
     pub structs: Vec<StructDef>,
+    pub unions: Vec<UnionDef>,
     pub enums: Vec<EnumDef>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<(Type, String)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct UnionDef {
     pub name: String,
     pub fields: Vec<(Type, String)>,
 }

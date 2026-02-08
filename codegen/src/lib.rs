@@ -16,6 +16,7 @@ pub struct Codegen {
     next_slot: i32,
     asm: Vec<X86Instr>,
     structs: HashMap<String, model::StructDef>,
+    unions: HashMap<String, model::UnionDef>,
     // Register allocation
     reg_alloc: HashMap<VarId, PhysicalReg>,
     enable_regalloc: bool,
@@ -35,6 +36,7 @@ impl Codegen {
             next_slot: 0,
             asm: Vec::new(),
             structs: HashMap::new(),
+            unions: HashMap::new(),
             reg_alloc: HashMap::new(),
             enable_regalloc: true, // Enable register allocation by default
             float_constants: HashMap::new(),
@@ -46,8 +48,12 @@ impl Codegen {
 
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
         self.structs.clear();
+        self.unions.clear();
         for s_def in &prog.structs {
             self.structs.insert(s_def.name.clone(), s_def.clone());
+        }
+        for u_def in &prog.unions {
+            self.unions.insert(u_def.name.clone(), u_def.clone());
         }
         self.float_constants.clear();
         self.next_float_const = 0;
@@ -984,14 +990,17 @@ impl Codegen {
 
     fn get_type_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 4,  // 32-bit int
+            model::Type::Int | model::Type::UnsignedInt => 4,  // 32-bit int
+            model::Type::Char | model::Type::UnsignedChar => 1,
+            model::Type::Short | model::Type::UnsignedShort => 2,
+            model::Type::Long | model::Type::UnsignedLong => 8,
+            model::Type::LongLong | model::Type::UnsignedLongLong => 8,
             model::Type::Void => 0,
             model::Type::Float => 4,  // 32-bit float
             model::Type::Double => 8, // 64-bit double
             model::Type::Array(inner, size) => self.get_type_size(inner) * size,
             model::Type::Pointer(_) => 8,
             model::Type::FunctionPointer { .. } => 8,
-            model::Type::Char => 1,
             model::Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {
                     let mut size = 0;
@@ -1003,20 +1012,37 @@ impl Codegen {
                     8
                 }
             }
+            model::Type::Union(name) => {
+                if let Some(u_def) = self.unions.get(name) {
+                    let mut max_size = 0;
+                    for (f_ty, _) in &u_def.fields {
+                        let field_size = self.get_type_size(f_ty);
+                        if field_size > max_size {
+                            max_size = field_size;
+                        }
+                    }
+                    max_size
+                } else {
+                    8
+                }
+            }
             model::Type::Typedef(_) => 8,
         }
     }
 
     fn get_element_size(&self, r#type: &model::Type) -> usize {
         match r#type {
-            model::Type::Int => 4,  // 32-bit int
+            model::Type::Int | model::Type::UnsignedInt => 4,  // 32-bit int
+            model::Type::Char | model::Type::UnsignedChar => 1,
+            model::Type::Short | model::Type::UnsignedShort => 2,
+            model::Type::Long | model::Type::UnsignedLong => 8,
+            model::Type::LongLong | model::Type::UnsignedLongLong => 8,
             model::Type::Void => 0,
             model::Type::Float => 4,
             model::Type::Double => 8,
             model::Type::Array(inner, size) => self.get_element_size(inner) * size,
             model::Type::Pointer(_) => 8,
             model::Type::FunctionPointer { .. } => 8,
-            model::Type::Char => 1,
             model::Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {
                     let mut size = 0;
@@ -1024,6 +1050,20 @@ impl Codegen {
                         size += self.get_element_size(f_ty);
                     }
                     size
+                } else {
+                    8
+                }
+            }
+            model::Type::Union(name) => {
+                if let Some(u_def) = self.unions.get(name) {
+                    let mut max_size = 0;
+                    for (f_ty, _) in &u_def.fields {
+                        let field_size = self.get_element_size(f_ty);
+                        if field_size > max_size {
+                            max_size = field_size;
+                        }
+                    }
+                    max_size
                 } else {
                     8
                 }
@@ -1073,7 +1113,12 @@ impl Codegen {
                 let c_op = self.operand_to_op(cond);
                 let current_bid = self.get_current_block_id();
                 
-                self.asm.push(X86Instr::Cmp(c_op, X86Operand::Imm(0)));
+                // Use TEST instead of CMP for comparing with 0 (more efficient)
+                if let X86Operand::Reg(reg) = &c_op {
+                    self.asm.push(X86Instr::Test(X86Operand::Reg(reg.clone()), X86Operand::Reg(reg.clone())));
+                } else {
+                    self.asm.push(X86Instr::Cmp(c_op, X86Operand::Imm(0)));
+                }
                 self.asm.push(X86Instr::Jcc("ne".to_string(), format!("temp_then_{}_{}", func_name, then_block.0)));
                 
                 self.resolve_phis(*else_block, current_bid, func);

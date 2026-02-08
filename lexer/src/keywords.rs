@@ -1,0 +1,40 @@
+use model::Token;
+
+/// Maps an identifier string to a keyword token, or returns None if not a keyword
+pub fn keyword_or_identifier(value: &str) -> Token {
+    match value {
+        "int" => Token::Int,
+        "void" => Token::Void,
+        "return" => Token::Return,
+        "if" => Token::If,
+        "else" => Token::Else,
+        "while" => Token::While,
+        "for" => Token::For,
+        "do" => Token::Do,
+        "break" => Token::Break,
+        "continue" => Token::Continue,
+        "switch" => Token::Switch,
+        "case" => Token::Case,
+        "default" => Token::Default,
+        "static" => Token::Static,
+        "extern" => Token::Extern,
+        "inline" => Token::Inline,
+        "const" => Token::Const,
+        "typedef" => Token::Typedef,
+        "struct" => Token::Struct,
+        "char" => Token::Char,
+        "enum" => Token::Enum,
+        "float" => Token::Float,
+        "double" => Token::Double,
+        "unsigned" => Token::Unsigned,
+        "signed" => Token::Signed,
+        "long" => Token::Long,
+        "short" => Token::Short,
+        "union" => Token::Union,
+        "__attribute__" => Token::Attribute,
+        "__extension__" => Token::Extension,
+        "restrict" => Token::Restrict,
+        "sizeof" => Token::SizeOf,
+        _ => Token::Identifier { value: value.to_string() },
+    }
+}

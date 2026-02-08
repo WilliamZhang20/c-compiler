@@ -147,7 +147,6 @@ name = "lexer"
 version = "0.1.0"
 dependencies = [
  "model",
- "regex-lite",
 ]
 
 [[package]]
@@ -193,12 +192,6 @@ checksum = "1885c039570dc00dcb4ff087a89e185fd56bae234ddc7f056a945bf36467248d"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "regex-lite"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d942b98df5e658f56f20d592c7f868833fe38115e65c33003d8cd224b0155da"
 
 [[package]]
 name = "semantic"
