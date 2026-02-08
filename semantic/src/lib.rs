@@ -207,6 +207,7 @@ impl SemanticAnalyzer {
                 self.analyze_expr(expr)?;
             }
             Expr::Constant(_) => {}
+            Expr::FloatConstant(_) => {}
             Expr::StringLiteral(_) => {}
             Expr::Index { array, index } => {
                 self.analyze_expr(array)?;

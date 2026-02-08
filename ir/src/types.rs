@@ -12,6 +12,7 @@ pub struct BlockId(pub usize);
 #[derive(Debug, Clone)]
 pub enum Operand {
     Constant(i64),
+    FloatConstant(f64),
     Var(VarId),
     Global(String),
 }
@@ -25,7 +26,18 @@ pub enum Instruction {
         left: Operand,
         right: Operand,
     },
+    FloatBinary {
+        dest: VarId,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+    },
     Unary {
+        dest: VarId,
+        op: UnaryOp,
+        src: Operand,
+    },
+    FloatUnary {
         dest: VarId,
         op: UnaryOp,
         src: Operand,

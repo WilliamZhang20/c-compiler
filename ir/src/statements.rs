@@ -55,7 +55,7 @@ impl Lowerer {
                         
                         let var = match val {
                             Operand::Var(v) => v,
-                            Operand::Constant(_) | Operand::Global(_) => {
+                            Operand::Constant(_) | Operand::FloatConstant(_) | Operand::Global(_) => {
                                 let v = self.new_var();
                                 self.blocks[bid.0].instructions.push(Instruction::Copy {
                                     dest: v,

@@ -45,6 +45,8 @@ impl<'a> TypeParser for Parser<'a> {
                 Some(Token::Int) => Type::Int,
                 Some(Token::Void) => Type::Void,
                 Some(Token::Char) => Type::Char,
+                Some(Token::Float) => Type::Float,
+                Some(Token::Double) => Type::Double,
                 Some(Token::Struct) => self.parse_struct_type()?,
                 other => return Err(format!("expected type specifier, found {:?}", other)),
             }

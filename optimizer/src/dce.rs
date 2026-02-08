@@ -42,7 +42,14 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
             add_operand_var(left, used_vars);
             add_operand_var(right, used_vars);
         }
+        Instruction::FloatBinary { left, right, .. } => {
+            add_operand_var(left, used_vars);
+            add_operand_var(right, used_vars);
+        }
         Instruction::Unary { src, .. } => {
+            add_operand_var(src, used_vars);
+        }
+        Instruction::FloatUnary { src, .. } => {
             add_operand_var(src, used_vars);
         }
         Instruction::Copy { src, .. } => {
@@ -101,7 +108,9 @@ fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
     match inst {
         // Pure computations - only keep if result is used
         Instruction::Binary { dest, .. }
+        | Instruction::FloatBinary { dest, .. }
         | Instruction::Unary { dest, .. }
+        | Instruction::FloatUnary { dest, .. }
         | Instruction::Copy { dest, .. }
         | Instruction::Load { dest, .. }
         | Instruction::GetElementPtr { dest, .. }

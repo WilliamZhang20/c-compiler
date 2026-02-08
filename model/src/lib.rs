@@ -2,6 +2,7 @@
 pub enum Token {
     Identifier { value: String },
     Constant { value: i64 },
+    FloatLiteral { value: f64 },
     StringLiteral { value: String },
     OpenParenthesis,
     CloseParenthesis,
@@ -30,6 +31,8 @@ pub enum Token {
     Struct,
     Char,
     Enum,
+    Float,
+    Double,
     Switch,
     Case,
     Default,
@@ -74,6 +77,8 @@ pub enum Type {
     Array(Box<Type>, usize),
     Pointer(Box<Type>),
     Char,
+    Float,
+    Double,
     Struct(String),
     Typedef(String),
     FunctionPointer {
@@ -174,6 +179,7 @@ pub enum Expr {
     },
     Variable(String),
     Constant(i64),
+    FloatConstant(f64),
     StringLiteral(String),
     Index {
         array: Box<Expr>,

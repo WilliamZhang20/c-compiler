@@ -85,6 +85,7 @@ impl Lowerer {
     pub(crate) fn get_expr_type(&self, expr: &AstExpr) -> Type {
         match expr {
             AstExpr::Constant(_) => Type::Int,
+            AstExpr::FloatConstant(_) => Type::Double,  // Default float literals to double
             AstExpr::Variable(name) => {
                 if let Some(ty) = self.symbol_table.get(name) {
                     ty.clone()
@@ -171,6 +172,8 @@ impl Lowerer {
         match ty {
             Type::Int => 8,  // Use 8 bytes to match codegen and pointer size
             Type::Char => 1,
+            Type::Float => 4,  // 32-bit float
+            Type::Double => 8, // 64-bit double
             Type::Void => 0,
             Type::Pointer(_) => 8,
             Type::FunctionPointer { .. } => 8, // Function pointers are 8 bytes
@@ -195,6 +198,11 @@ impl Lowerer {
                 }
             }
         }
+    }
+
+    /// Check if a type is a floating-point type
+    pub(crate) fn is_float_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Float | Type::Double)
     }
 
     /// Get the byte offset and type of a struct member

@@ -315,6 +315,8 @@ impl<'a> Parser<'a> {
                 Token::Int
                 | Token::Void
                 | Token::Char
+                | Token::Float
+                | Token::Double
                 | Token::Struct
                 | Token::Static
                 | Token::Extern

@@ -8,6 +8,7 @@ impl Lowerer {
     pub(crate) fn lower_expr(&mut self, expr: &AstExpr) -> Result<Operand, String> {
         match expr {
             AstExpr::Constant(c) => Ok(Operand::Constant(*c)),
+            AstExpr::FloatConstant(f) => Ok(Operand::FloatConstant(*f)),
             AstExpr::Binary { left, op, right } => {
                 if *op == BinaryOp::Assign {
                     let val = self.lower_expr(right)?;
@@ -26,8 +27,8 @@ impl Lowerer {
 
                 // Handle pointer arithmetic
                 if *op == BinaryOp::Add || *op == BinaryOp::Sub {
-                    if let Type::Pointer(inner) = l_ty {
-                        let size = self.get_type_size(&inner);
+                    if let Type::Pointer(ref inner) = l_ty {
+                        let size = self.get_type_size(inner);
                         if size > 1 {
                             let scaled_r = self.new_var();
                             self.add_instruction(Instruction::Binary {
@@ -38,8 +39,8 @@ impl Lowerer {
                             });
                             r_val = Operand::Var(scaled_r);
                         }
-                    } else if let Type::Array(inner, _) = l_ty {
-                        let size = self.get_type_size(&inner);
+                    } else if let Type::Array(ref inner, _) = l_ty {
+                        let size = self.get_type_size(inner);
                         if size > 1 {
                              let scaled_r = self.new_var();
                              self.add_instruction(Instruction::Binary {
@@ -52,8 +53,8 @@ impl Lowerer {
                         }
                     } else if *op == BinaryOp::Add {
                         // Handle right side being a pointer (ptr + int -> int + ptr)
-                        if let Type::Pointer(inner) = r_ty {
-                            let size = self.get_type_size(&inner);
+                        if let Type::Pointer(ref inner) = r_ty {
+                            let size = self.get_type_size(inner);
                              if size > 1 {
                                 let scaled_l = self.new_var();
                                 self.add_instruction(Instruction::Binary {
@@ -69,12 +70,22 @@ impl Lowerer {
                 }
 
                 let dest = self.new_var();
-                self.add_instruction(Instruction::Binary {
-                    dest,
-                    op: op.clone(),
-                    left: l_val,
-                    right: r_val,
-                });
+                // Check if this is a floating-point operation
+                if self.is_float_type(&l_ty) || self.is_float_type(&r_ty) {
+                    self.add_instruction(Instruction::FloatBinary {
+                        dest,
+                        op: op.clone(),
+                        left: l_val,
+                        right: r_val,
+                    });
+                } else {
+                    self.add_instruction(Instruction::Binary {
+                        dest,
+                        op: op.clone(),
+                        left: l_val,
+                        right: r_val,
+                    });
+                }
                 Ok(Operand::Var(dest))
             }
             AstExpr::Unary { op, expr: inner } if *op == UnaryOp::AddrOf => {
@@ -139,11 +150,20 @@ impl Lowerer {
             AstExpr::Unary { op, expr } => {
                 let val = self.lower_expr(expr)?;
                 let dest = self.new_var();
-                self.add_instruction(Instruction::Unary {
-                    dest,
-                    op: op.clone(),
-                    src: val,
-                });
+                let expr_ty = self.get_expr_type(expr);
+                if self.is_float_type(&expr_ty) {
+                    self.add_instruction(Instruction::FloatUnary {
+                        dest,
+                        op: op.clone(),
+                        src: val,
+                    });
+                } else {
+                    self.add_instruction(Instruction::Unary {
+                        dest,
+                        op: op.clone(),
+                        src: val,
+                    });
+                }
                 Ok(Operand::Var(dest))
             }
             AstExpr::StringLiteral(s) => {

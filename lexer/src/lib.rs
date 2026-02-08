@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 enum TokenType {
     Identifier,
     Constant,
+    FloatLiteral,
     StringLiteral,
     CharLiteral,
 }
@@ -41,7 +42,12 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     let char_regex = CHAR_REGEX.get_or_init(|| {
         Regex::new(r"^'(\\.|[^'])'").expect("Failed to compile char regex")
     });
-
+    static FLOAT_REGEX: OnceLock<Regex> = OnceLock::new();
+    let float_regex = FLOAT_REGEX.get_or_init(|| {
+        // Match float literals: digits.digits, .digits, or digits with exponent
+        // Avoid matching "1." alone (which could be array[1].member)
+        Regex::new(r"^([0-9]+\.[0-9]+|[0-9]*\.[0-9]+|[0-9]+[eE][+-]?[0-9]+)[fF]?").expect("Failed to compile float regex")
+    });
     while !current_input.is_empty() {
         current_input = current_input.trim_start();
         if current_input.is_empty() {
@@ -124,6 +130,17 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
+        // Check for float literals BEFORE single character symbols
+        // to avoid matching '3.14' as '3', '.', '14'
+        if let Some(caps) = float_regex.captures(current_input) {
+            let float_text = caps.get(0).unwrap().as_str();
+            let float_str = float_text.trim_end_matches(|c| c == 'f' || c == 'F');
+            let value = float_str.parse::<f64>().map_err(|_| format!("Failed to parse float literal: {}", float_text))?;
+            tokens.push(Token::FloatLiteral { value });
+            current_input = &current_input[float_text.len()..];
+            continue;
+        }
+
         // handle single character symbols
         if let Some(c) = current_input.chars().next() {
             let token = match c {
@@ -189,6 +206,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 tok_type = Some(TokenType::CharLiteral);
             }
         }
+        // Note: FloatLiteral is handled earlier to avoid conflicting with '.' token
 
         let Some(tt) = tok_type else {
             return Err(format!("Found invalid token: '{}' at \"{}\"...", current_input.chars().next().unwrap(), &current_input[..current_input.len().min(20)]));
@@ -219,6 +237,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     "struct" => Token::Struct,
                     "char" => Token::Char,
                     "enum" => Token::Enum,
+                    "float" => Token::Float,
+                    "double" => Token::Double,
                     "__attribute__" => Token::Attribute,
                     "__extension__" => Token::Extension,
                     "restrict" => Token::Restrict,
@@ -259,6 +279,12 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     content.chars().next().unwrap() as i64
                 };
                 Token::Constant { value }
+            }
+            TokenType::FloatLiteral => {
+                // Parse float literal, removing optional 'f' or 'F' suffix
+                let float_str = longest_capture.trim_end_matches(|c| c == 'f' || c == 'F');
+                let value = float_str.parse::<f64>().map_err(|_| format!("Failed to parse float literal: {}", longest_capture))?;
+                Token::FloatLiteral { value }
             }
             TokenType::StringLiteral => {
                 let value = longest_capture[1..longest_capture.len()-1].to_string();

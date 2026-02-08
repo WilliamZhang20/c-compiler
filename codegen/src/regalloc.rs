@@ -101,7 +101,9 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
             // Record defs (skip alloca vars)
             let def_var = match inst {
                 IrInstruction::Binary { dest, .. } |
+                IrInstruction::FloatBinary { dest, .. } |
                 IrInstruction::Unary { dest, .. } |
+                IrInstruction::FloatUnary { dest, .. } |
                 IrInstruction::Phi { dest, .. } |
                 IrInstruction::Copy { dest, .. } |
                 IrInstruction::Load { dest, .. } |
@@ -160,7 +162,14 @@ where F: FnMut(VarId) {
             if let Operand::Var(v) = left { f(*v); }
             if let Operand::Var(v) = right { f(*v); }
         }
+        IrInstruction::FloatBinary { left, right, .. } => {
+            if let Operand::Var(v) = left { f(*v); }
+            if let Operand::Var(v) = right { f(*v); }
+        }
         IrInstruction::Unary { src, .. } => {
+            if let Operand::Var(v) = src { f(*v); }
+        }
+        IrInstruction::FloatUnary { src, .. } => {
             if let Operand::Var(v) = src { f(*v); }
         }
         IrInstruction::Copy { src, .. } => {
