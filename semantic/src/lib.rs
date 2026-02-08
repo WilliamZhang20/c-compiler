@@ -5,6 +5,7 @@ pub struct SemanticAnalyzer {
     global_scope: HashMap<String, Type>,
     scopes: Vec<HashMap<String, Type>>,
     structs: HashMap<String, model::StructDef>,
+    enum_constants: HashMap<String, i64>, // enum constant name => value
     loop_depth: usize,
     in_switch: bool,
 }
@@ -15,6 +16,7 @@ impl SemanticAnalyzer {
             global_scope: HashMap::new(),
             scopes: Vec::new(),
             structs: HashMap::new(),
+            enum_constants: HashMap::new(),
             loop_depth: 0,
             in_switch: false,
         }
@@ -23,9 +25,22 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, program: &Program) -> Result<(), String> {
         self.global_scope.clear();
         self.structs.clear();
+        self.enum_constants.clear();
+        
         for s_def in &program.structs {
             self.structs.insert(s_def.name.clone(), s_def.clone());
         }
+        
+        // Register all enum constants
+        for enum_def in &program.enums {
+            for (const_name, const_value) in &enum_def.constants {
+                if self.enum_constants.contains_key(const_name) {
+                    return Err(format!("Redeclaration of enum constant {}", const_name));
+                }
+                self.enum_constants.insert(const_name.clone(), *const_value);
+            }
+        }
+        
         for global in &program.globals {
             if self.global_scope.contains_key(&global.name) {
                 return Err(format!("Redeclaration of global variable {}", global.name));
@@ -179,7 +194,8 @@ impl SemanticAnalyzer {
     fn analyze_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
             Expr::Variable(name) => {
-                if self.lookup_symbol(name).is_none() {
+                // Check if it's a variable or an enum constant
+                if self.lookup_symbol(name).is_none() && !self.enum_constants.contains_key(name) {
                     return Err(format!("Undeclared variable {}", name));
                 }
             }

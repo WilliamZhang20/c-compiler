@@ -24,10 +24,17 @@ impl<'a> Parser<'a> {
         let mut functions = Vec::new();
         let mut globals = Vec::new();
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
 
         while !self.is_at_end() {
             if self.match_token(|t| matches!(t, Token::Typedef)) {
                 self.parse_typedef()?;
+            } else if self.check(&|t| matches!(t, Token::Enum))
+                && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
+            {
+                // enum definition: enum Color { ... };
+                enums.push(self.parse_enum_definition()?);
+                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
             } else if self.is_function_definition() {
                 functions.push(self.parse_function()?);
             } else if self.check_is_type() {
@@ -51,6 +58,7 @@ impl<'a> Parser<'a> {
             functions,
             globals,
             structs,
+            enums,
         })
     }
 

@@ -5,6 +5,7 @@ use crate::parser::Parser;
 pub(crate) trait TypeParser {
     fn parse_type(&mut self) -> Result<Type, String>;
     fn parse_struct_definition(&mut self) -> Result<model::StructDef, String>;
+    fn parse_enum_definition(&mut self) -> Result<model::EnumDef, String>;
 }
 
 impl<'a> TypeParser for Parser<'a> {
@@ -91,6 +92,52 @@ impl<'a> TypeParser for Parser<'a> {
 
         self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
         Ok(model::StructDef { name, fields })
+    }
+
+    fn parse_enum_definition(&mut self) -> Result<model::EnumDef, String> {
+        self.expect(|t| matches!(t, Token::Enum), "enum")?;
+        let name = match self.advance() {
+            Some(Token::Identifier { value }) => value.clone(),
+            other => return Err(format!("expected enum name identifier, found {:?}", other)),
+        };
+        self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
+
+        let mut constants = Vec::new();
+        let mut next_value = 0_i64;
+
+        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+            let const_name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected enum constant name, found {:?}", other)),
+            };
+
+            let value = if self.match_token(|t| matches!(t, Token::Equal)) {
+                // Explicit value: RED = 10 or ERROR = -1
+                let is_negative = self.match_token(|t| matches!(t, Token::Minus));
+                match self.advance() {
+                    Some(Token::Constant { value }) => {
+                        let actual_value = if is_negative { -value } else { *value };
+                        next_value = actual_value;
+                        actual_value
+                    }
+                    other => return Err(format!("expected constant value, found {:?}", other)),
+                }
+            } else {
+                // Auto-increment: GREEN (implicit = 0, 1, 2, ...)
+                next_value
+            };
+
+            constants.push((const_name, value));
+            next_value += 1;
+
+            // Allow trailing comma
+            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                break;
+            }
+        }
+
+        self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
+        Ok(model::EnumDef { name, constants })
     }
 }
 

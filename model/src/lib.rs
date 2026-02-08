@@ -29,6 +29,7 @@ pub enum Token {
     Typedef,
     Struct,
     Char,
+    Enum,
     Switch,
     Case,
     Default,
@@ -86,12 +87,19 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub globals: Vec<GlobalVar>,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(Type, String)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumDef {
+    pub name: String,
+    pub constants: Vec<(String, i64)>, // name => value
 }
 
 #[derive(Debug, PartialEq, Clone)]

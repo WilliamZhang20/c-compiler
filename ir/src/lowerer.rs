@@ -20,6 +20,7 @@ pub struct Lowerer {
     // Stack of (continue_target, break_target) for nested loops
     pub(crate) loop_context: Vec<(BlockId, BlockId)>,
     pub(crate) struct_defs: HashMap<String, model::StructDef>,
+    pub(crate) enum_constants: HashMap<String, i64>, // enum constant name => value
     pub(crate) typedefs: HashMap<String, Type>,
     pub(crate) current_switch_cases: Vec<(i64, BlockId)>, // (value, block)
     pub(crate) current_default: Option<BlockId>,
@@ -45,6 +46,7 @@ impl Lowerer {
             function_names: HashSet::new(),
             loop_context: Vec::new(),
             struct_defs: HashMap::new(),
+            enum_constants: HashMap::new(),
             typedefs: HashMap::new(),
             current_switch_cases: Vec::new(),
             current_default: None,
@@ -214,9 +216,19 @@ impl Lowerer {
         self.global_vars.clear();
         self.function_names.clear();
         self.struct_defs.clear();
+        self.enum_constants.clear();
+        
         for s_def in &ast.structs {
             self.struct_defs.insert(s_def.name.clone(), s_def.clone());
         }
+        
+        // Register all enum constants
+        for enum_def in &ast.enums {
+            for (const_name, const_value) in &enum_def.constants {
+                self.enum_constants.insert(const_name.clone(), *const_value);
+            }
+        }
+        
         for g in &ast.globals {
             self.global_vars.insert(g.name.clone());
         }

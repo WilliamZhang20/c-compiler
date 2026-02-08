@@ -81,6 +81,11 @@ impl Lowerer {
                 let addr = self.lower_to_addr(inner)?;
                 Ok(Operand::Var(addr))
             }
+            AstExpr::Variable(name) if self.enum_constants.contains_key(name) => {
+                // Enum constant: return the integer value
+                let value = self.enum_constants[name];
+                Ok(Operand::Constant(value))
+            }
             AstExpr::Variable(name) if self.is_local(name) && !self.variable_allocas.contains_key(name) => {
                 let bid = self.current_block.ok_or("Variable access outside block")?;
                 Ok(Operand::Var(self.read_variable(name, bid)))

@@ -218,6 +218,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     "typedef" => Token::Typedef,
                     "struct" => Token::Struct,
                     "char" => Token::Char,
+                    "enum" => Token::Enum,
                     "__attribute__" => Token::Attribute,
                     "__extension__" => Token::Extension,
                     "restrict" => Token::Restrict,
