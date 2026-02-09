@@ -14,6 +14,15 @@ impl Lowerer {
 
     /// Lower an AST statement to IR
     pub(crate) fn lower_stmt(&mut self, stmt: &AstStmt) -> Result<(), String> {
+        // If we don't have a current block, create an unreachable one for dead code
+        // This happens after goto, return, break, continue, etc.
+        if self.current_block.is_none() && !matches!(stmt, AstStmt::Label(_) | AstStmt::Case(_) | AstStmt::Default) {
+            // Create a dead code block
+            let dead_block = self.new_block();
+            self.seal_block(dead_block);
+            self.current_block = Some(dead_block);
+        }
+        
         match stmt {
             AstStmt::Return(expr) => {
                 let val = if let Some(e) = expr {
@@ -330,6 +339,54 @@ impl Lowerer {
                 self.current_default = Some(default_block);
                 self.seal_block(default_block);
                 self.current_block = Some(default_block);
+            }
+            AstStmt::Label(name) => {
+                // Create a new block for the label
+                let label_block = self.new_block();
+                
+                // Jump from current block to label block (if current block exists)
+                if let Some(bid) = self.current_block {
+                    // Only add branch if the current block doesn't already have a terminator
+                    if matches!(self.blocks[bid.0].terminator, Terminator::Unreachable) {
+                        self.blocks[bid.0].terminator = Terminator::Br(label_block);
+                    }
+                }
+                
+                // Register the label
+                self.labels.insert(name.clone(), label_block);
+                self.seal_block(label_block);
+                self.current_block = Some(label_block);
+                
+                // Resolve any pending gotos to this label
+                let mut i = 0;
+                while i < self.pending_gotos.len() {
+                    if self.pending_gotos[i].0 == *name {
+                        let goto_block = self.pending_gotos[i].1;
+                        self.blocks[goto_block.0].terminator = Terminator::Br(label_block);
+                        self.pending_gotos.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            AstStmt::Goto(label) => {
+                let bid = self.current_block.ok_or("Goto outside of block")?;
+                
+                // Check if label already exists (backward goto)
+                if let Some(&label_block) = self.labels.get(label) {
+                    self.blocks[bid.0].terminator = Terminator::Br(label_block);
+                } else {
+                    // Forward goto - store for later resolution
+                    self.pending_gotos.push((label.clone(), bid));
+                    // Temporary terminator, will be fixed when label is found
+                    self.blocks[bid.0].terminator = Terminator::Unreachable;
+                }
+                self.current_block = None;  // Dead code after goto
+            }
+            AstStmt::InlineAsm { .. } => {
+                // For now, inline assembly is passed through to codegen
+                // We don't need to do anything at IR level
+                // The codegen stage will handle it
             }
         }
         Ok(())

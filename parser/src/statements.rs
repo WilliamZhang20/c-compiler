@@ -38,6 +38,21 @@ impl<'a> StatementParser for Parser<'a> {
             return Ok(Stmt::Continue);
         }
 
+        // Goto statement
+        if self.match_token(|t| matches!(t, Token::Goto)) {
+            let label = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected label name after 'goto', found {:?}", other)),
+            };
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(Stmt::Goto(label));
+        }
+
+        // Inline assembly
+        if self.match_token(|t| matches!(t, Token::Asm)) {
+            return self.parse_inline_asm();
+        }
+
         // Control flow statements
         if self.match_token(|t| matches!(t, Token::If)) {
             return self.parse_if_stmt();
@@ -77,6 +92,25 @@ impl<'a> StatementParser for Parser<'a> {
         // Variable declaration
         if self.check_is_type() {
             return self.parse_declaration();
+        }
+
+        // Check for label (identifier followed by colon)
+        // We need to lookahead to distinguish from expression statements
+        if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+            let saved_pos = self.pos;
+            let label_name = if let Some(Token::Identifier { value }) = self.advance() {
+                value.clone()
+            } else {
+                String::new()
+            };
+            
+            if !label_name.is_empty() && self.check(&|t| matches!(t, Token::Colon)) {
+                // It's a label
+                self.advance(); // consume colon
+                return Ok(Stmt::Label(label_name));
+            }
+            // Not a label, restore position
+            self.pos = saved_pos;
         }
 
         // Expression statement
@@ -275,6 +309,92 @@ impl<'a> Parser<'a> {
             qualifiers,
             name,
             init,
+        })
+    }
+
+    fn parse_inline_asm(&mut self) -> Result<Stmt, String> {
+        // asm [volatile] ( "assembly template" : outputs : inputs : clobbers );
+        let is_volatile = self.match_token(|t| matches!(t, Token::Volatile));
+        
+        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+        
+        // Parse assembly template string
+        let template = match self.advance() {
+            Some(Token::StringLiteral { value }) => value.clone(),
+            other => return Err(format!("expected string literal for asm template, found {:?}", other)),
+        };
+        
+        // Check for operands and clobbers
+        let mut outputs = Vec::new();
+        let mut inputs = Vec::new();
+        let mut clobbers = Vec::new();
+        
+        // Parse outputs (if present)
+        if self.match_token(|t| matches!(t, Token::Colon)) {
+            if !self.check(&|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
+                loop {
+                    let constraint = match self.advance() {
+                        Some(Token::StringLiteral { value }) => value.clone(),
+                        other => return Err(format!("expected constraint string, found {:?}", other)),
+                    };
+                    self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                    let expr = self.parse_expr()?;
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    outputs.push(model::AsmOperand { constraint, expr });
+                    
+                    if !self.match_token(|t| matches!(t, Token::Comma)) {
+                        break;
+                    }
+                }
+            }
+            
+            // Parse inputs (if present)
+            if self.match_token(|t| matches!(t, Token::Colon)) {
+                if !self.check(&|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
+                    loop {
+                        let constraint = match self.advance() {
+                            Some(Token::StringLiteral { value }) => value.clone(),
+                            other => return Err(format!("expected constraint string, found {:?}", other)),
+                        };
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let expr = self.parse_expr()?;
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        inputs.push(model::AsmOperand { constraint, expr });
+                        
+                        if !self.match_token(|t| matches!(t, Token::Comma)) {
+                            break;
+                        }
+                    }
+                }
+                
+                // Parse clobbers (if present)
+                if self.match_token(|t| matches!(t, Token::Colon)) {
+                    if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                        loop {
+                            let clobber = match self.advance() {
+                                Some(Token::StringLiteral { value }) => value.clone(),
+                                other => return Err(format!("expected clobber string, found {:?}", other)),
+                            };
+                            clobbers.push(clobber);
+                            
+                            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        
+        Ok(Stmt::InlineAsm {
+            template,
+            outputs,
+            inputs,
+            clobbers,
+            is_volatile,
         })
     }
 }

@@ -23,9 +23,11 @@ pub enum Token {
     Do,
     Break,
     Continue,
+    Goto,
     Static,
     Extern,
     Inline,
+    Asm,
     Const,
     Volatile,
     Typedef,
@@ -215,6 +217,21 @@ pub enum Stmt {
     },
     Case(Expr),
     Default,
+    Goto(String),  // label name
+    Label(String), // label name
+    InlineAsm {
+        template: String,     // assembly template
+        outputs: Vec<AsmOperand>,
+        inputs: Vec<AsmOperand>,
+        clobbers: Vec<String>,
+        is_volatile: bool,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct AsmOperand {
+    pub constraint: String,  // "=r", "r", "m", etc.
+    pub expr: Expr,          // variable or expression
 }
 
 #[derive(Debug, PartialEq, Clone)]

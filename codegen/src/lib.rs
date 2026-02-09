@@ -137,6 +137,9 @@ impl Codegen {
         output.push_str(".globl main\n\n");
         
         for func in &prog.functions {
+            // Emit .globl directive for all functions (for linking)
+            output.push_str(&format!(".globl {}\n", func.name));
+            
             self.gen_function(func);
             
             // Apply peephole optimizations

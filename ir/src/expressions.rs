@@ -187,8 +187,9 @@ impl Lowerer {
                 let dest = self.new_var();
                 
                 // Check if it's a direct call (function name) or indirect call (function pointer variable)
+                // If it's a Variable that's not a local, assume it's a function (could be external/forward-declared)
                 let is_direct_call = if let AstExpr::Variable(name) = func.as_ref() {
-                    self.is_function(name)
+                    !self.is_local(name)  // Not a local variable means it's a function
                 } else {
                     false
                 };

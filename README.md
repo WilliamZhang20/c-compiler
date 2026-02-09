@@ -88,28 +88,23 @@ To fully compile the Linux kernel, the following features are prioritized:
 - Token pasting (`##`) and stringification (`#`)
 - `__VA_ARGS__` support
 
-### Section 2: Assembly Integration
-- Inline assembly (`asm volatile`)
-- Assembly constraints and clobbers
-- Global register variables
-
-### Section 3: Advanced Linkage
+### Section 2: Advanced Linkage
 - `extern "C"` linkage (if C++ interop needed)
 - Weak symbols (`__attribute__((weak))`)
 - Symbol versioning and aliases
 
-### Section 4: GNU Extensions
+### Section 3: GNU Extensions
 - Statement expressions (`({ ... })`)
 - `typeof` operator
 - Compound literals
 - Designated initializers for arrays/structs
 
-### Section 5: Type System Edge Cases
+### Section 4: Type System Edge Cases
 - Type qualifiers on function parameters
 - Complex array declarators
 - Function pointer syntax edge cases
 
-### Section 6: Floating-Point Robustness
+### Section 5: Floating-Point Robustness
 - Proper NaN/Inf handling
 - Floating-point precision directives
 - SSE/AVX vector operations (for kernel SIMD)

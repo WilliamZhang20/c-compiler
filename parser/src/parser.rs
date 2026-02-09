@@ -38,6 +38,10 @@ impl<'a> Parser<'a> {
                 self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
             } else if self.is_function_definition() {
                 functions.push(self.parse_function()?);
+            } else if self.is_function_declaration() {
+                // Function prototype/declaration - just skip it
+                // The actual definition will come from another file or later
+                self.skip_function_declaration()?;
             } else if self.check_is_type() {
                 // Could be a global declaration, struct definition, or union definition
                 if self.check(&|t| matches!(t, Token::Struct)) && self.is_struct_definition() {
@@ -324,6 +328,116 @@ impl<'a> Parser<'a> {
             temp_pos += 1;
         }
         false
+    }
+
+    /// Check if this is a function declaration (prototype) with semicolon
+    fn is_function_declaration(&self) -> bool {
+        let mut temp_pos = self.pos;
+
+        // Skip modifiers
+        while temp_pos < self.tokens.len() {
+            let tok = &self.tokens[temp_pos];
+            if matches!(
+                tok,
+                Token::Static
+                    | Token::Extern
+                    | Token::Inline
+                    | Token::Attribute
+                    | Token::Extension
+                    | Token::Const
+                    | Token::Volatile
+                    | Token::Restrict
+            ) {
+                temp_pos += 1;
+                if temp_pos < self.tokens.len()
+                    && matches!(self.tokens[temp_pos], Token::OpenParenthesis)
+                {
+                    temp_pos = self.skip_parentheses_from(temp_pos);
+                }
+            } else {
+                break;
+            }
+        }
+
+        if temp_pos >= self.tokens.len() {
+            return false;
+        }
+
+        // Must start with a known type
+        if !(matches!(
+            self.tokens[temp_pos],
+            Token::Int | Token::Void | Token::Char | Token::Struct | Token::Float | Token::Double | Token::Long | Token::Short | Token::Unsigned | Token::Signed
+        ) || (if let Token::Identifier { value } = &self.tokens[temp_pos] {
+            self.typedefs.contains(value)
+        } else {
+            false
+        })) {
+            return false;
+        }
+
+        if matches!(self.tokens[temp_pos], Token::Struct) {
+            temp_pos += 1;
+            if temp_pos < self.tokens.len()
+                && matches!(self.tokens[temp_pos], Token::Identifier { .. })
+            {
+                temp_pos += 1;
+            }
+        } else {
+            temp_pos += 1;
+        }
+
+        // Followed by identifier or star (for pointers)
+        while temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Star) {
+            temp_pos += 1;
+        }
+
+        if temp_pos >= self.tokens.len() {
+            return false;
+        }
+        if !matches!(self.tokens[temp_pos], Token::Identifier { .. }) {
+            return false;
+        }
+        temp_pos += 1;
+
+        // Followed by '('
+        if temp_pos >= self.tokens.len()
+            || !matches!(self.tokens[temp_pos], Token::OpenParenthesis)
+        {
+            return false;
+        }
+
+        // Search for ';' (declaration) but NOT '{' (definition)
+        let mut paren_depth = 0;
+        while temp_pos < self.tokens.len() {
+            match &self.tokens[temp_pos] {
+                Token::OpenParenthesis => paren_depth += 1,
+                Token::CloseParenthesis => paren_depth -= 1,
+                Token::OpenBrace if paren_depth == 0 => return false,
+                Token::Semicolon if paren_depth == 0 => return true,
+                _ => {}
+            }
+            temp_pos += 1;
+        }
+        false
+    }
+
+    /// Skip a function declaration (prototype)
+    fn skip_function_declaration(&mut self) -> Result<(), String> {
+        // Skip everything until semicolon at depth 0
+        let mut paren_depth = 0;
+        while !self.is_at_end() {
+            match self.peek() {
+                Some(Token::OpenParenthesis) => paren_depth += 1,
+                Some(Token::CloseParenthesis) => paren_depth -= 1,
+                Some(Token::Semicolon) if paren_depth == 0 => {
+                    self.advance(); // consume semicolon
+                    return Ok(());
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+        Err("Unexpected end of file in function declaration".to_string())
     }
 
     fn skip_parentheses_from(&self, start_pos: usize) -> usize {

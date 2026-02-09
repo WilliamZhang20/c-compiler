@@ -26,6 +26,9 @@ pub struct Lowerer {
     pub(crate) current_switch_cases: Vec<(i64, BlockId)>, // (value, block)
     pub(crate) current_default: Option<BlockId>,
     pub(crate) break_targets: Vec<BlockId>,
+    // For goto/label support
+    pub(crate) labels: HashMap<String, BlockId>,  // label name => block
+    pub(crate) pending_gotos: Vec<(String, BlockId)>, // (label, goto_block) for forward gotos
 }
 
 impl Lowerer {
@@ -53,6 +56,8 @@ impl Lowerer {
             current_switch_cases: Vec::new(),
             current_default: None,
             break_targets: Vec::new(),
+            labels: HashMap::new(),
+            pending_gotos: Vec::new(),
         }
     }
 
@@ -409,6 +414,8 @@ impl Lowerer {
         self.incomplete_phis.clear();
         self.sealed_blocks.clear();
         self.variable_allocas.clear();
+        self.labels.clear();
+        self.pending_gotos.clear();
 
         let entry_id = self.new_block();
         self.current_block = Some(entry_id);
@@ -423,6 +430,12 @@ impl Lowerer {
         }
 
         self.lower_block(&f.body)?;
+        
+        // Check for unresolved gotos
+        if !self.pending_gotos.is_empty() {
+            let labels: Vec<String> = self.pending_gotos.iter().map(|(l, _)| l.clone()).collect();
+            return Err(format!("Undefined labels: {:?}", labels));
+        }
         
         // Ensure the last block has a return if it's void or just hanging
         if let Some(bid) = self.current_block {

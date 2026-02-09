@@ -224,6 +224,22 @@ impl SemanticAnalyzer {
                     return Err("'default' label not within a switch statement".to_string());
                 }
             }
+            Stmt::Goto(_label) => {
+                // Label references will be validated by IR lowerer
+                // We just need to accept goto statements here
+            }
+            Stmt::Label(_name) => {
+                // Labels are always valid, IR lowerer will track them
+            }
+            Stmt::InlineAsm { outputs, inputs, .. } => {
+                // Validate that output and input expressions are valid
+                for operand in outputs {
+                    self.analyze_expr(&operand.expr)?;
+                }
+                for operand in inputs {
+                    self.analyze_expr(&operand.expr)?;
+                }
+            }
         }
         Ok(())
     }
@@ -260,7 +276,11 @@ impl SemanticAnalyzer {
                 self.analyze_expr(index)?;
             }
             Expr::Call { func, args } => {
-                self.analyze_expr(func)?;
+                // For direct function calls (Variable), allow undeclared functions
+                // to support separate compilation
+                if !matches!(**func, Expr::Variable(_)) {
+                    self.analyze_expr(func)?;
+                }
                 for arg in args {
                     self.analyze_expr(arg)?;
                 }
