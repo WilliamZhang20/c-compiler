@@ -9,7 +9,7 @@ pub struct InstructionGenerator;
 impl InstructionGenerator {
     pub fn gen_binary_op(
         asm: &mut Vec<X86Instr>,
-        dest: VarId,
+        _dest: VarId,
         op: &BinaryOp,
         l_op: X86Operand,
         r_op: X86Operand,
@@ -185,6 +185,7 @@ impl InstructionGenerator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn gen_float_binary_op(
         asm: &mut Vec<X86Instr>,
         var_types: &mut HashMap<VarId, Type>,
@@ -271,6 +272,7 @@ impl InstructionGenerator {
         asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
     }
 
+    #[allow(dead_code)]
     pub fn gen_float_unary_op(
         asm: &mut Vec<X86Instr>,
         var_types: &mut HashMap<VarId, Type>,

@@ -18,7 +18,6 @@ impl<'a> TypeParser for Parser<'a> {
 
     fn parse_type_with_qualifiers(&mut self) -> Result<(Type, TypeQualifiers), String> {
         let mut qualifiers = TypeQualifiers::default();
-        let mut is_inline = false; // Track inline separately for functions
 
         // Parse storage class specifiers and type qualifiers
         loop {
@@ -28,7 +27,6 @@ impl<'a> TypeParser for Parser<'a> {
                     self.advance();
                 }
                 Some(Token::Inline) => {
-                    is_inline = true;
                     self.advance();
                 }
                 Some(Token::Const) => {

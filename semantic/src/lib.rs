@@ -1,4 +1,4 @@
-use model::{Program, Function, Stmt, Expr, Type, TypeQualifiers, BinaryOp};
+use model::{Program, Function, Stmt, Expr, Type, BinaryOp};
 use std::collections::HashMap;
 
 pub struct SemanticAnalyzer {

@@ -462,7 +462,7 @@ impl Codegen {
     }
 
     fn gen_float_binary_op(&mut self, dest: VarId, op: &BinaryOp, left: &Operand, right: &Operand) {
-        let d_op = self.var_to_op(dest);
+        let _d_op = self.var_to_op(dest);
         
         // Load left operand into xmm0
         match left {
@@ -896,7 +896,7 @@ impl Codegen {
             // For memory operands, check if we need to dereference
             // Alloca variables are stored as pointers in memory, so we load and deref
             let operand_str = match &output_op {
-                X86Operand::Mem(reg, offset) => {
+                X86Operand::Mem(_reg, _offset) => {
                     // This might be a pointer to the actual value
                     // Load it into rax and use dereferenced form
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), output_op.clone()));

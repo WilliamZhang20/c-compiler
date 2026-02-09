@@ -237,6 +237,7 @@ fn matches_reg(operand: &X86Operand, reg: &X86Reg) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn same_memory_location(op1: &X86Operand, op2: &X86Operand) -> bool {
     match (op1, op2) {
         (X86Operand::Mem(r1, off1), X86Operand::Mem(r2, off2)) => {
@@ -255,6 +256,7 @@ fn same_memory_location(op1: &X86Operand, op2: &X86Operand) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn writes_to_register(inst: &X86Instr, reg: &X86Reg) -> bool {
     match inst {
         X86Instr::Mov(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
