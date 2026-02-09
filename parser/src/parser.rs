@@ -40,15 +40,11 @@ impl<'a> Parser<'a> {
                 functions.push(self.parse_function()?);
             } else if self.check_is_type() {
                 // Could be a global declaration, struct definition, or union definition
-                if self.check(&|t| matches!(t, Token::Struct))
-                    && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
-                {
+                if self.check(&|t| matches!(t, Token::Struct)) && self.is_struct_definition() {
                     // struct definition without variable: struct foo { ... };
                     structs.push(self.parse_struct_definition()?);
                     self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
-                } else if self.check(&|t| matches!(t, Token::Union))
-                    && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
-                {
+                } else if self.check(&|t| matches!(t, Token::Union)) && self.is_union_definition() {
                     // union definition without variable: union foo { ... };
                     unions.push(self.parse_union_definition()?);
                     self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
@@ -87,7 +83,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> Result<Function, String> {
-        // Track inline before parsing type
+        // Track inline and attributes before parsing type
         let saved_pos = self.pos;
         let mut is_inline = false;
         
@@ -114,7 +110,15 @@ impl<'a> Parser<'a> {
         // Reset position
         self.pos = saved_pos;
         
+        // Parse attributes before function
+        let mut attributes = self.parse_attributes()?;
+        
         let return_type = self.parse_type()?;
+        
+        // Parse attributes after return type but before function name
+        let mut more_attributes = self.parse_attributes()?;
+        attributes.append(&mut more_attributes);
+        
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => {
@@ -128,6 +132,10 @@ impl<'a> Parser<'a> {
         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
         let params = self.parse_function_params()?;
         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        
+        // Parse attributes after function declaration (e.g., void foo() __attribute__((noreturn)))
+        let mut post_attributes = self.parse_attributes()?;
+        attributes.append(&mut post_attributes);
 
         let body_block = self.parse_block()?;
 
@@ -137,6 +145,7 @@ impl<'a> Parser<'a> {
             params,
             body: body_block,
             is_inline,
+            attributes,
         })
     }
 
@@ -172,7 +181,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_global(&mut self) -> Result<GlobalVar, String> {
+        // Parse attributes before the type
+        let mut attributes = self.parse_attributes()?;
+        
         let (mut r#type, qualifiers) = self.parse_type_with_qualifiers()?;
+        
+        // Parse attributes after the type but before the identifier
+        let mut more_attributes = self.parse_attributes()?;
+        attributes.append(&mut more_attributes);
+        
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected identifier after type, found {:?}", other)),
@@ -200,6 +217,7 @@ impl<'a> Parser<'a> {
             qualifiers,
             name,
             init,
+            attributes,
         })
     }
 
@@ -266,6 +284,18 @@ impl<'a> Parser<'a> {
             temp_pos += 1;
         }
 
+        // Skip attributes between type and function name
+        while temp_pos < self.tokens.len() {
+            if matches!(self.tokens[temp_pos], Token::Attribute | Token::Extension) {
+                temp_pos += 1;
+                if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+                    temp_pos = self.skip_parentheses_from(temp_pos);
+                }
+            } else {
+                break;
+            }
+        }
+
         if temp_pos >= self.tokens.len() {
             return false;
         }
@@ -308,6 +338,57 @@ impl<'a> Parser<'a> {
             pos += 1;
         }
         pos
+    }
+    
+    /// Check if current position is a struct definition (not just a declaration)
+    /// Handles attributes like: struct __attribute__((packed)) Foo { ... };
+    fn is_struct_definition(&self) -> bool {
+        let mut temp_pos = self.pos + 1; // Skip 'struct'
+        
+        // Skip attributes
+        while temp_pos < self.tokens.len() {
+            if matches!(self.tokens[temp_pos], Token::Attribute | Token::Extension) {
+                temp_pos += 1;
+                if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+                    temp_pos = self.skip_parentheses_from(temp_pos);
+                }
+            } else {
+                break;
+            }
+        }
+        
+        // Skip struct name
+        if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Identifier { .. }) {
+            temp_pos += 1;
+        }
+        
+        // Check for '{'
+        temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenBrace)
+    }
+    
+    /// Check if current position is a union definition (not just a declaration)
+    fn is_union_definition(&self) -> bool {
+        let mut temp_pos = self.pos + 1; // Skip 'union'
+        
+        // Skip attributes
+        while temp_pos < self.tokens.len() {
+            if matches!(self.tokens[temp_pos], Token::Attribute | Token::Extension) {
+                temp_pos += 1;
+                if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+                    temp_pos = self.skip_parentheses_from(temp_pos);
+                }
+            } else {
+                break;
+            }
+        }
+        
+        // Skip union name
+        if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::Identifier { .. }) {
+            temp_pos += 1;
+        }
+        
+        // Check for '{'
+        temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenBrace)
     }
 
     fn skip_top_level_item(&mut self) -> Result<(), String> {
@@ -439,5 +520,99 @@ impl<'a> Parser<'a> {
         } else {
             Err(format!("expected {expected}, found {:?}", self.peek()))
         }
+    }
+
+    /// Parse __attribute__((...)) syntax and return a list of attributes
+    pub(crate) fn parse_attributes(&mut self) -> Result<Vec<model::Attribute>, String> {
+        use model::Attribute;
+        let mut attributes = Vec::new();
+
+        while self.match_token(|t| matches!(t, Token::Attribute | Token::Extension)) {
+            // Expect (( after __attribute__
+            if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                continue; // Just skip if no parentheses
+            }
+            if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                return Err("expected '(' after '__attribute__(('".to_string());
+            }
+
+            // Parse attributes inside, comma-separated
+            loop {
+                if self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                    break;
+                }
+
+                // Parse individual attribute
+                match self.peek() {
+                    Some(Token::Identifier { value }) if value == "packed" => {
+                        self.advance();
+                        attributes.push(Attribute::Packed);
+                    }
+                    Some(Token::Identifier { value }) if value == "aligned" => {
+                        self.advance();
+
+                        // Parse aligned(N)
+                        if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                            match self.advance() {
+                                Some(Token::Constant { value }) => {
+                                    attributes.push(Attribute::Aligned(*value as usize));
+                                }
+                                other => {
+                                    return Err(format!(
+                                        "expected alignment constant, found {:?}",
+                                        other
+                                    ));
+                                }
+                            }
+                            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        }
+                    }
+                    Some(Token::Identifier { value }) if value == "section" => {
+                        self.advance();
+
+                        // Parse section("name")
+                        if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                            match self.advance() {
+                                Some(Token::StringLiteral { value }) => {
+                                    attributes.push(Attribute::Section(value.clone()));
+                                }
+                                other => {
+                                    return Err(format!(
+                                        "expected section name string, found {:?}",
+                                        other
+                                    ));
+                                }
+                            }
+                            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        }
+                    }
+                    Some(Token::Identifier { value }) if value == "noreturn" => {
+                        self.advance();
+                        attributes.push(Attribute::NoReturn);
+                    }
+                    Some(Token::Identifier { value }) if value == "always_inline" => {
+                        self.advance();
+                        attributes.push(Attribute::AlwaysInline);
+                    }
+                    _ => {
+                        // Skip unknown attributes
+                        self.advance();
+                        if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                            self.skip_parentheses()?;
+                        }
+                    }
+                }
+
+                if !self.match_token(|t| matches!(t, Token::Comma)) {
+                    break;
+                }
+            }
+
+            // Expect )) - both closing parens
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        }
+
+        Ok(attributes)
     }
 }

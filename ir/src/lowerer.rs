@@ -126,9 +126,9 @@ impl Lowerer {
                 match ty {
                     Type::Struct(name) => {
                         if let Some(s_def) = self.struct_defs.get(&name) {
-                            for (f_ty, f_name) in &s_def.fields {
-                                if f_name == member {
-                                    return f_ty.clone();
+                            for field in &s_def.fields {
+                                if &field.name == member {
+                                    return field.field_type.clone();
                                 }
                             }
                         }
@@ -136,9 +136,9 @@ impl Lowerer {
                     }
                     Type::Union(name) => {
                         if let Some(u_def) = self.union_defs.get(&name) {
-                            for (f_ty, f_name) in &u_def.fields {
-                                if f_name == member {
-                                    return f_ty.clone();
+                                    for field in &u_def.fields {
+                                if &field.name == member {
+                                    return field.field_type.clone();
                                 }
                             }
                         }
@@ -154,9 +154,9 @@ impl Lowerer {
                         match *inner {
                             Type::Struct(name) => {
                                 if let Some(s_def) = self.struct_defs.get(&name) {
-                                    for (f_ty, f_name) in &s_def.fields {
-                                        if f_name == member {
-                                            return f_ty.clone();
+                                    for field in &s_def.fields {
+                                        if &field.name == member {
+                                            return field.field_type.clone();
                                         }
                                     }
                                 }
@@ -164,9 +164,9 @@ impl Lowerer {
                             }
                             Type::Union(name) => {
                                 if let Some(u_def) = self.union_defs.get(&name) {
-                                    for (f_ty, f_name) in &u_def.fields {
-                                        if f_name == member {
-                                            return f_ty.clone();
+                                    for field in &u_def.fields {
+                                        if &field.name == member {
+                                            return field.field_type.clone();
                                         }
                                     }
                                 }
@@ -208,11 +208,28 @@ impl Lowerer {
             Type::Array(base, size) => self.get_type_size(base) * (*size as i64),
             Type::Struct(name) => {
                 if let Some(s_def) = self.struct_defs.get(name) {
+                    let is_packed = s_def.attributes.iter().any(|attr| matches!(attr, model::Attribute::Packed));
                     let mut size = 0;
-                    for (f_ty, _) in &s_def.fields {
-                        // Very simple alignment: next available byte
-                        size += self.get_type_size(f_ty);
+                    
+                    for field in &s_def.fields {
+                        let field_size = self.get_type_size(&field.field_type);
+                        
+                        // Align field if not packed
+                        if !is_packed {
+                            let alignment = self.get_alignment(&field.field_type);
+                            // Align current size to field alignment
+                            size = ((size + alignment - 1) / alignment) * alignment;
+                        }
+                        
+                        size += field_size;
                     }
+                    
+                    // Add padding to make struct size a multiple of its alignment
+                    if !is_packed {
+                        let struct_alignment = self.get_alignment(ty);
+                        size = ((size + struct_alignment - 1) / struct_alignment) * struct_alignment;
+                    }
+                    
                     size
                 } else {
                     4 // fallback or error
@@ -222,8 +239,8 @@ impl Lowerer {
                 if let Some(u_def) = self.union_defs.get(name) {
                     // Union size is the largest field
                     let mut max_size = 0;
-                    for (f_ty, _) in &u_def.fields {
-                        let field_size = self.get_type_size(f_ty);
+                    for field in &u_def.fields {
+                        let field_size = self.get_type_size(&field.field_type);
                         if field_size > max_size {
                             max_size = field_size;
                         }
@@ -243,6 +260,62 @@ impl Lowerer {
         }
     }
 
+    /// Get the natural alignment of a type in bytes
+    pub(crate) fn get_alignment(&self, ty: &Type) -> i64 {
+        match ty {
+            Type::Char | Type::UnsignedChar => 1,
+            Type::Short | Type::UnsignedShort => 2,
+            Type::Int | Type::UnsignedInt => 4,
+            Type::Long | Type::UnsignedLong => 8,
+            Type::LongLong | Type::UnsignedLongLong => 8,
+            Type::Float => 4,
+            Type::Double => 8,
+            Type::Pointer(_) => 8,
+            Type::FunctionPointer { .. } => 8,
+            Type::Array(base, _) => self.get_alignment(base),
+            Type::Struct(name) => {
+                if let Some(s_def) = self.struct_defs.get(name) {
+                    let is_packed = s_def.attributes.iter().any(|attr| matches!(attr, model::Attribute::Packed));
+                    if is_packed {
+                        return 1; // Packed structs have alignment 1
+                    }
+                    let mut max_alignment = 1;
+                    for field in &s_def.fields {
+                        let field_align = self.get_alignment(&field.field_type);
+                        if field_align > max_alignment {
+                            max_alignment = field_align;
+                        }
+                    }
+                    max_alignment
+                } else {
+                    4
+                }
+            }
+            Type::Union(name) => {
+                if let Some(u_def) = self.union_defs.get(name) {
+                    let mut max_alignment = 1;
+                    for field in &u_def.fields {
+                        let field_align = self.get_alignment(&field.field_type);
+                        if field_align > max_alignment {
+                            max_alignment = field_align;
+                        }
+                    }
+                    max_alignment
+                } else {
+                    4
+                }
+            }
+            Type::Typedef(name) => {
+                if let Some(real_ty) = self.typedefs.get(name) {
+                    self.get_alignment(real_ty)
+                } else {
+                    4
+                }
+            }
+            Type::Void => 1,
+        }
+    }
+
     /// Check if a type is a floating-point type
     pub(crate) fn is_float_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Float | Type::Double)
@@ -252,19 +325,28 @@ impl Lowerer {
     pub(crate) fn get_member_offset(&self, struct_or_union_name: &str, member_name: &str) -> (i64, Type) {
         // Check if it's a struct
         if let Some(s_def) = self.struct_defs.get(struct_or_union_name) {
+            let is_packed = s_def.attributes.iter().any(|attr| matches!(attr, model::Attribute::Packed));
             let mut offset = 0;
-            for (f_ty, f_name) in &s_def.fields {
-                if f_name == member_name {
-                    return (offset, f_ty.clone());
+            
+            for field in &s_def.fields {
+                // Align the offset if not packed
+                if !is_packed {
+                    let alignment = self.get_alignment(&field.field_type);
+                    // Round up to next aligned boundary
+                    offset = ((offset + alignment - 1) / alignment) * alignment;
                 }
-                offset += self.get_type_size(f_ty);
+                
+                if &field.name == member_name {
+                    return (offset, field.field_type.clone());
+                }
+                offset += self.get_type_size(&field.field_type);
             }
         }
         // Check if it's a union (all fields at offset 0)
-        if let Some(u_def) = self.union_defs.get(struct_or_union_name) {
-            for (f_ty, f_name) in &u_def.fields {
-                if f_name == member_name {
-                    return (0, f_ty.clone());  // All union fields start at offset 0
+        if let Some (u_def) = self.union_defs.get(struct_or_union_name) {
+            for field in &u_def.fields {
+                if &field.name == member_name {
+                    return (0, field.field_type.clone());  // All union fields start at offset 0
                 }
             }
         }

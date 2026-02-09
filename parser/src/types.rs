@@ -230,6 +230,10 @@ impl<'a> TypeParser for Parser<'a> {
 
     fn parse_struct_definition(&mut self) -> Result<model::StructDef, String> {
         self.expect(|t| matches!(t, Token::Struct), "struct")?;
+        
+        // Parse attributes before struct name (e.g., struct __attribute__((packed)) foo)
+        let mut attributes = self.parse_attributes()?;
+        
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected struct name identifier, found {:?}", other)),
@@ -256,12 +260,31 @@ impl<'a> TypeParser for Parser<'a> {
                 ty
             };
 
-            fields.push((final_ty, field_name));
+            // Check for bit field syntax (: width)
+            let bit_width = if self.match_token(|t| matches!(t, Token::Colon)) {
+                match self.advance() {
+                    Some(Token::Constant { value }) => Some(*value as usize),
+                    other => return Err(format!("expected bit width constant, found {:?}", other)),
+                }
+            } else {
+                None
+            };
+
+            fields.push(model::StructField {
+                field_type: final_ty,
+                name: field_name,
+                bit_width,
+            });
             self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
         }
 
         self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
-        Ok(model::StructDef { name, fields })
+        
+        // Parse attributes after struct body (e.g., struct foo { ... } __attribute__((packed)))
+        let mut more_attributes = self.parse_attributes()?;
+        attributes.append(&mut more_attributes);
+        
+        Ok(model::StructDef { name, fields, attributes })
     }
 
     fn parse_union_definition(&mut self) -> Result<model::UnionDef, String> {
@@ -292,7 +315,11 @@ impl<'a> TypeParser for Parser<'a> {
                 ty
             };
 
-            fields.push((final_ty, field_name));
+            fields.push(model::StructField {
+                field_type: final_ty,
+                name: field_name,
+                bit_width: None, // Unions don't support bit fields
+            });
             self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
         }
 
@@ -349,6 +376,9 @@ impl<'a> TypeParser for Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_struct_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
+        // Skip attributes before struct name
+        let _ = self.parse_attributes()?;
+        
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected struct tag, found {:?}", other)),
@@ -357,6 +387,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_union_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
+        // Skip attributes before union name
+        let _ = self.parse_attributes()?;
+        
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected union tag, found {:?}", other)),

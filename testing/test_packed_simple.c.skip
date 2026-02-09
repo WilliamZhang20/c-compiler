@@ -1,0 +1,14 @@
+// EXPECT: 16
+// Simple test for packed struct field access
+
+struct __attribute__((packed)) Data {
+    char a;
+    int b;
+};
+
+int main() {
+    struct Data d;
+    d.a = 1;
+    d.b = 15;
+    return d.a + d.b;
+}

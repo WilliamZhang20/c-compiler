@@ -84,6 +84,15 @@ pub struct TypeQualifiers {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum Attribute {
+    Packed,
+    Aligned(usize),
+    Section(String),
+    NoReturn,
+    AlwaysInline,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Type {
     Int,
     UnsignedInt,
@@ -119,15 +128,23 @@ pub struct Program {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct StructField {
+    pub field_type: Type,
+    pub name: String,
+    pub bit_width: Option<usize>, // Some(n) for bit fields
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct StructDef {
     pub name: String,
-    pub fields: Vec<(Type, String)>,
+    pub fields: Vec<StructField>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct UnionDef {
     pub name: String,
-    pub fields: Vec<(Type, String)>,
+    pub fields: Vec<StructField>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -142,6 +159,7 @@ pub struct GlobalVar {
     pub qualifiers: TypeQualifiers,
     pub name: String,
     pub init: Option<Expr>,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -151,6 +169,7 @@ pub struct Function {
     pub params: Vec<(Type, String)>,
     pub body: Block,
     pub is_inline: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

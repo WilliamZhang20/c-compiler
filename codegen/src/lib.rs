@@ -84,8 +84,28 @@ impl Codegen {
         if !prog.globals.is_empty() {
              if prog.global_strings.is_empty() { output.push_str(".data\n"); }
              for g in &prog.globals {
+                 // Handle section attribute
+                 let mut in_custom_section = false;
+                 for attr in &g.attributes {
+                     if let model::Attribute::Section(section_name) = attr {
+                         output.push_str(&format!(".section {}\n", section_name));
+                         in_custom_section = true;
+                         break;
+                     }
+                 }
+                 
                  output.push_str(&format!(".globl {}\n", g.name));
-                 output.push_str(&format!(".align 4\n"));  // Ensure 4-byte alignment for ints
+                 
+                 // Handle aligned attribute (default to 4-byte alignment otherwise)
+                 let mut alignment = 4;
+                 for attr in &g.attributes {
+                     if let model::Attribute::Aligned(n) = attr {
+                         alignment = *n;
+                         break;
+                     }
+                 }
+                 output.push_str(&format!(".align {}\n", alignment));
+                 
                  if let Some(init) = &g.init {
                      // Initialized - use .quad for all for simplicity
                      match &g.r#type {
@@ -104,6 +124,11 @@ impl Codegen {
                  } else {
                      // Uninitialized
                      output.push_str(&format!("{}: .long 0\n", g.name));
+                 }
+                 
+                 // Switch back to .data section if we were in a custom section
+                 if in_custom_section {
+                     output.push_str(".data\n");
                  }
              }
         }

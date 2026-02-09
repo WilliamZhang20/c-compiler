@@ -83,45 +83,33 @@ Individual test files are located in the `testing/` directory. Each test file us
 
 To fully compile the Linux kernel, the following features are prioritized:
 
-### Section 1: Attributes and Pragmas
-- `__attribute__((packed))` for byte-aligned structs  
-- `__attribute__((aligned(N)))` for explicit alignment
-- `__attribute__((section("name")))` for custom ELF sections
-- `__attribute__((noreturn))`, `__attribute__((always_inline))`
-- `#pragma pack` directives
-
-### Section 2: Advanced Pointer Features
-- Pointer-to-member syntax and semantics
-- Complex pointer casts and type punning
-- Bit fields in structs (`unsigned field : 3;`)
-
-### Section 3: Preprocessor Enhancements  
+### Section 1: Preprocessor Enhancements  
 - Variadic macros (`#define DEBUG(fmt, ...)`)
 - Token pasting (`##`) and stringification (`#`)
 - `__VA_ARGS__` support
 
-### Section 4: Assembly Integration
+### Section 2: Assembly Integration
 - Inline assembly (`asm volatile`)
 - Assembly constraints and clobbers
 - Global register variables
 
-### Section 5: Advanced Linkage
+### Section 3: Advanced Linkage
 - `extern "C"` linkage (if C++ interop needed)
 - Weak symbols (`__attribute__((weak))`)
 - Symbol versioning and aliases
 
-### Section 6: GNU Extensions
+### Section 4: GNU Extensions
 - Statement expressions (`({ ... })`)
 - `typeof` operator
 - Compound literals
 - Designated initializers for arrays/structs
 
-### Section 7: Type System Edge Cases
+### Section 5: Type System Edge Cases
 - Type qualifiers on function parameters
 - Complex array declarators
 - Function pointer syntax edge cases
 
-### Section 8: Floating-Point Robustness
+### Section 6: Floating-Point Robustness
 - Proper NaN/Inf handling
 - Floating-point precision directives
 - SSE/AVX vector operations (for kernel SIMD)
