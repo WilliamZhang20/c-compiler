@@ -110,6 +110,10 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
                 IrInstruction::Call { dest, .. } => *dest,
                 IrInstruction::IndirectCall { dest, .. } => *dest,
+                IrInstruction::InlineAsm { outputs, .. } => {
+                    // InlineAsm can define multiple outputs, handle first one for now
+                    outputs.first().copied()
+                }
                 IrInstruction::Alloca { .. } | IrInstruction::Store { .. } => None,
             };
             
@@ -200,6 +204,11 @@ where F: FnMut(VarId) {
         IrInstruction::Phi { preds, .. } => {
             for (_, v) in preds {
                 f(*v);
+            }
+        }
+        IrInstruction::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                if let Operand::Var(v) = input { f(*v); }
             }
         }
         IrInstruction::Alloca { .. } => {}

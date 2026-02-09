@@ -18,7 +18,27 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_assignment(&mut self) -> Result<Expr, String> {
         let left = self.parse_logical_or()?;
 
-        if self.match_token(|t| matches!(t, Token::Equal)) {
+        if self.check(&|t| matches!(t, Token::Equal 
+            | Token::PlusEqual | Token::MinusEqual | Token::StarEqual | Token::SlashEqual 
+            | Token::PercentEqual | Token::AndEqual | Token::OrEqual | Token::XorEqual 
+            | Token::LessLessEqual | Token::GreaterGreaterEqual)) 
+        {
+            let token = self.advance().unwrap().clone();
+            let op = match token {
+                Token::Equal => BinaryOp::Assign,
+                Token::PlusEqual => BinaryOp::AddAssign,
+                Token::MinusEqual => BinaryOp::SubAssign,
+                Token::StarEqual => BinaryOp::MulAssign,
+                Token::SlashEqual => BinaryOp::DivAssign,
+                Token::PercentEqual => BinaryOp::ModAssign,
+                Token::AndEqual => BinaryOp::BitwiseAndAssign,
+                Token::OrEqual => BinaryOp::BitwiseOrAssign,
+                Token::XorEqual => BinaryOp::BitwiseXorAssign,
+                Token::LessLessEqual => BinaryOp::ShiftLeftAssign,
+                Token::GreaterGreaterEqual => BinaryOp::ShiftRightAssign,
+                _ => unreachable!(),
+            };
+
             match left {
                 Expr::Variable(_)
                 | Expr::Index { .. }
@@ -31,7 +51,7 @@ impl<'a> Parser<'a> {
                     let right = self.parse_assignment()?;
                     Ok(Expr::Binary {
                         left: Box::new(left),
-                        op: BinaryOp::Assign,
+                        op,
                         right: Box::new(right),
                     })
                 }

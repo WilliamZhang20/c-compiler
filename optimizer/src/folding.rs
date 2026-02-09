@@ -204,6 +204,7 @@ pub fn fold_binary(op: BinaryOp, l: i64, r: i64) -> Option<i64> {
         BinaryOp::ShiftLeft => Some(l << r),
         BinaryOp::ShiftRight => Some(l >> r),
         BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::Assign => None,
+        _ => None,
     }
 }
 

@@ -1,6 +1,8 @@
 mod keywords;
 mod literals;
 mod state_machine;
+#[cfg(test)]
+mod repro_bug;
 
 use model::Token;
 use state_machine::StateMachineLexer;

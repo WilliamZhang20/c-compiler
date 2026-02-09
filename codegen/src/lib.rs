@@ -277,6 +277,14 @@ impl Codegen {
                             }
                         }
                     }
+                    IrInstruction::InlineAsm { outputs, .. } => {
+                        // Allocate stack slots for outputs without registers
+                        for var in outputs {
+                            if !self.reg_alloc.contains_key(var) {
+                                self.get_or_create_slot(*var);
+                            }
+                        }
+                    }
                     IrInstruction::Store { .. } => {}
                 }
             }
@@ -421,6 +429,9 @@ impl Codegen {
             IrInstruction::IndirectCall { dest, func_ptr, args } => {
                 self.gen_indirect_call(dest, func_ptr, args);
             }
+            IrInstruction::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
+                self.gen_inline_asm(template, outputs, inputs, clobbers, *is_volatile);
+            }
         }
     }
 
@@ -451,9 +462,6 @@ impl Codegen {
     }
 
     fn gen_float_binary_op(&mut self, dest: VarId, op: &BinaryOp, left: &Operand, right: &Operand) {
-        // Record that result is a float
-        self.var_types.insert(dest, Type::Float);
-        
         let d_op = self.var_to_op(dest);
         
         // Load left operand into xmm0
@@ -493,18 +501,23 @@ impl Codegen {
         // Perform operation
         match op {
             BinaryOp::Add => {
+                self.var_types.insert(dest, Type::Float);
                 self.asm.push(X86Instr::Addss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
             }
             BinaryOp::Sub => {
+                self.var_types.insert(dest, Type::Float);
                 self.asm.push(X86Instr::Subss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
             }
             BinaryOp::Mul => {
+                self.var_types.insert(dest, Type::Float);
                 self.asm.push(X86Instr::Mulss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
             }
             BinaryOp::Div => {
+                self.var_types.insert(dest, Type::Float);
                 self.asm.push(X86Instr::Divss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
             }
             BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual | BinaryOp::EqualEqual | BinaryOp::NotEqual => {
+                self.var_types.insert(dest, Type::Int);
                 // Float comparison: ucomiss sets flags
                 self.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
                 
@@ -520,17 +533,38 @@ impl Codegen {
                 };
                 self.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
                 self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                return; // Don't store XMM result for comparisons
+                
+                // Since result is Int, d_op will be QWORD PTR (unless mapped to Reg), so Mov Rax is valid.
+                // Re-get d_op because var_types changed? 
+                // var_to_op uses var_types. If we just inserted Int, it will return Mem (64-bit) instead of FloatMem (32-bit).
+                // But we called var_to_op AT THE START of the function!
+                // So d_op holds the OLD value (likely FloatMem because we inserted Float at the top in previous version, or nothing if not seen).
+                // Wait, previously `self.var_types.insert(dest, Type::Float)` was at line 466. 
+                // So `d_op` (line 468) used that. 
+                // Now I removed it. `d_op` might be computed without type info -> defaults to Mem (64-bit).
+                // Or if it was seen before? It's SSA, so it's new.
+                // So d_op should be Mem.
+                // BUT, I should recompute d_op or move var_to_op call.
+                
+                let dest_op = self.var_to_op(dest); 
+                self.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+                return; 
             }
             _ => {
                 // Unsupported float operation - just store 0
+                self.var_types.insert(dest, Type::Float);
                 self.asm.push(X86Instr::Xorps(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
             }
         }
         
-        // Store result from xmm0 to destination
-        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+        // Store result from xmm0 to destination (for arithmetic ops)
+        // d_op calculated earlier might be wrong if we didn't insert type?
+        // If undefined, defaults to Mem.
+        // For float ops, we want FloatMem.
+        // So we should re-calculate d_op or insert type earlier.
+        
+        let dest_op = self.var_to_op(dest);
+        self.asm.push(X86Instr::Movss(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
     }
 
     fn gen_float_unary_op(&mut self, dest: VarId, op: &UnaryOp,src: &Operand) {
@@ -842,6 +876,71 @@ impl Codegen {
             let d_op = self.var_to_op(*d);
             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
         }
+    }
+
+    fn gen_inline_asm(&mut self, template: &str, outputs: &[VarId], inputs: &[Operand], _clobbers: &[String], _is_volatile: bool) {
+        // For basic inline assembly support, we just emit the template as raw assembly
+        // More advanced constraint handling would require parsing the template and
+        // substituting %0, %1, etc. with actual operands
+        
+        // Convert AT&T syntax placeholders (%0, %1) to actual operands
+        let mut asm_code = template.to_string();
+        
+        // Replace output placeholders
+        // For outputs that map to alloca variables (stored as pointers),
+        // we need to load the pointer first and use dereferenced form
+        for (i, output_var) in outputs.iter().enumerate() {
+            let placeholder = format!("%{}", i);
+            let output_op = self.var_to_op(*output_var);
+            
+            // For memory operands, check if we need to dereference
+            // Alloca variables are stored as pointers in memory, so we load and deref
+            let operand_str = match &output_op {
+                X86Operand::Mem(reg, offset) => {
+                    // This might be a pointer to the actual value
+                    // Load it into rax and use dereferenced form
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), output_op.clone()));
+                    format!("DWORD PTR [rax]")
+                }
+                X86Operand::DwordMem(reg, offset) => {
+                    if *offset == 0 {
+                        format!("DWORD PTR [{}]", reg.to_str())
+                    } else {
+                        format!("DWORD PTR [{}{}]", reg.to_str(), 
+                            if *offset > 0 { format!("+{}", offset) } else { offset.to_string() })
+                    }
+                }
+                X86Operand::Reg(r) => r.to_str().to_string(),
+                _ => "rax".to_string(), // Fallback
+            };
+            
+            asm_code = asm_code.replace(&placeholder, &operand_str);
+        }
+        
+        // Replace input placeholders (they come after outputs)
+        for (i, input_op) in inputs.iter().enumerate() {
+            let placeholder = format!("%{}", outputs.len() + i);
+            let input_x86_op = self.operand_to_op(input_op);
+            
+            let operand_str = match &input_x86_op {
+                X86Operand::Imm(val) => val.to_string(),
+                X86Operand::Reg(r) => r.to_str().to_string(),
+                X86Operand::Mem(reg, offset) => {
+                    if *offset == 0 {
+                        format!("DWORD PTR [{}]", reg.to_str())
+                    } else {
+                        format!("DWORD PTR [{}{}]", reg.to_str(), 
+                            if *offset > 0 { format!("+{}", offset) } else { offset.to_string() })
+                    }
+                }
+                _ => "0".to_string(),
+            };
+            
+            asm_code = asm_code.replace(&placeholder, &operand_str);
+        }
+        
+        // Emit as raw assembly
+        self.asm.push(X86Instr::Raw(asm_code));
     }
 
     fn get_type_size(&self, r#type: &model::Type) -> usize {

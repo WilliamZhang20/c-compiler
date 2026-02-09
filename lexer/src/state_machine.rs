@@ -61,6 +61,7 @@ impl<'a> StateMachineLexer<'a> {
             '\'' => self.lex_char(),
             // Numbers
             '0'..='9' => self.lex_number(),
+            '.' if self.peek(1).map_or(false, |c| c.is_ascii_digit()) => self.lex_number(),
             // Identifiers and keywords
             'a'..='z' | 'A'..='Z' | '_' => self.lex_identifier(),
             // Operators and punctuation
@@ -330,11 +331,29 @@ impl<'a> StateMachineLexer<'a> {
             ('<', Some('<')) => Some(Token::LessLess),
             ('>', Some('>')) => Some(Token::GreaterGreater),
             ('-', Some('>')) => Some(Token::Arrow),
+            // Compound assignments
+            ('+', Some('=')) => Some(Token::PlusEqual),
+            ('-', Some('=')) => Some(Token::MinusEqual),
+            ('*', Some('=')) => Some(Token::StarEqual),
+            ('/', Some('=')) => Some(Token::SlashEqual),
+            ('%', Some('=')) => Some(Token::PercentEqual),
+            ('&', Some('=')) => Some(Token::AndEqual),
+            ('|', Some('=')) => Some(Token::OrEqual),
+            ('^', Some('=')) => Some(Token::XorEqual),
             _ => None,
         };
 
         if let Some(token) = two_char_token {
             self.pos += 2;
+            
+            // Special check for <<= and >>= (3 chars)
+            if matches!(token, Token::LessLess | Token::GreaterGreater) {
+                if let Some('=') = self.peek(0) {
+                     self.pos += 1;
+                     return Ok(Some(if matches!(token, Token::LessLess) { Token::LessLessEqual } else { Token::GreaterGreaterEqual }));
+                }
+            }
+            
             return Ok(Some(token));
         }
 

@@ -21,6 +21,102 @@ impl Lowerer {
                     });
                     return Ok(val);
                 }
+
+                // Handle compound assignments
+                if matches!(op, BinaryOp::AddAssign | BinaryOp::SubAssign 
+                    | BinaryOp::MulAssign | BinaryOp::DivAssign | BinaryOp::ModAssign 
+                    | BinaryOp::BitwiseAndAssign | BinaryOp::BitwiseOrAssign 
+                    | BinaryOp::BitwiseXorAssign | BinaryOp::ShiftLeftAssign 
+                    | BinaryOp::ShiftRightAssign) 
+                {
+                    // 1. Get address of LHS
+                    let addr = self.lower_to_addr(left)?;
+                    
+                    // 2. Load current value of LHS
+                    let lhs_type = self.get_expr_type(left);
+                    let curr_val_var = self.new_var();
+                    self.add_instruction(Instruction::Load {
+                        dest: curr_val_var,
+                        addr: Operand::Var(addr),
+                        value_type: lhs_type.clone(),
+                    });
+                    
+                    // 3. Evaluate RHS
+                    let rhs_val = self.lower_expr(right)?;
+                    
+                    // 4. Perform operation
+                    let binary_op = match op {
+                        BinaryOp::AddAssign => BinaryOp::Add,
+                        BinaryOp::SubAssign => BinaryOp::Sub,
+                        BinaryOp::MulAssign => BinaryOp::Mul,
+                        BinaryOp::DivAssign => BinaryOp::Div,
+                        BinaryOp::ModAssign => BinaryOp::Mod,
+                        BinaryOp::BitwiseAndAssign => BinaryOp::BitwiseAnd,
+                        BinaryOp::BitwiseOrAssign => BinaryOp::BitwiseOr,
+                        BinaryOp::BitwiseXorAssign => BinaryOp::BitwiseXor,
+                        BinaryOp::ShiftLeftAssign => BinaryOp::ShiftLeft,
+                        BinaryOp::ShiftRightAssign => BinaryOp::ShiftRight,
+                        _ => unreachable!(),
+                    };
+                    
+                    // Handle pointer arithmetic for += and -=
+                    let result_var = if (matches!(binary_op, BinaryOp::Add | BinaryOp::Sub)) 
+                        && (matches!(lhs_type, Type::Pointer(_) | Type::Array(..))) 
+                    {
+                        // Pointer arithmetic: scale the RHS
+                        let inner_type = match &lhs_type {
+                            Type::Pointer(inner) => inner,
+                            Type::Array(inner, _) => inner,
+                            _ => unreachable!(),
+                        };
+                        let size = self.get_type_size(inner_type);
+                        
+                        let scaled_rhs_var = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: scaled_rhs_var,
+                            op: BinaryOp::Mul,
+                            left: rhs_val,
+                            right: Operand::Constant(size),
+                        });
+                        
+                        let res = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: res,
+                            op: binary_op,
+                            left: Operand::Var(curr_val_var),
+                            right: Operand::Var(scaled_rhs_var),
+                        });
+                        res
+                    } else if self.is_float_type(&lhs_type) {
+                        let res = self.new_var();
+                        self.add_instruction(Instruction::FloatBinary {
+                            dest: res,
+                            op: binary_op,
+                            left: Operand::Var(curr_val_var),
+                            right: rhs_val,
+                        });
+                        res
+                    } else {
+                        let res = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: res,
+                            op: binary_op,
+                            left: Operand::Var(curr_val_var),
+                            right: rhs_val,
+                        });
+                        res
+                    };
+                    
+                    // 5. Store result back to LHS
+                    self.add_instruction(Instruction::Store {
+                        addr: Operand::Var(addr),
+                        src: Operand::Var(result_var),
+                        value_type: lhs_type,
+                    });
+                    
+                    return Ok(Operand::Var(result_var));
+                }
+
                 let l_ty = self.get_expr_type(left);
                 let r_ty = self.get_expr_type(right);
 

@@ -257,7 +257,12 @@ impl SemanticAnalyzer {
                 self.analyze_expr(right)?;
                 
                 // Check for assignment to const variable
-                if matches!(op, BinaryOp::Assign) {
+                if matches!(op, BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign 
+                    | BinaryOp::MulAssign | BinaryOp::DivAssign | BinaryOp::ModAssign 
+                    | BinaryOp::BitwiseAndAssign | BinaryOp::BitwiseOrAssign 
+                    | BinaryOp::BitwiseXorAssign | BinaryOp::ShiftLeftAssign 
+                    | BinaryOp::ShiftRightAssign) 
+                {
                     if let Expr::Variable(name) = left.as_ref() {
                         if self.const_vars.get(name) == Some(&true) {
                             return Err(format!("Cannot assign to const variable '{}'", name));

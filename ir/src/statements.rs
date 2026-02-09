@@ -383,10 +383,38 @@ impl Lowerer {
                 }
                 self.current_block = None;  // Dead code after goto
             }
-            AstStmt::InlineAsm { .. } => {
-                // For now, inline assembly is passed through to codegen
-                // We don't need to do anything at IR level
-                // The codegen stage will handle it
+            AstStmt::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
+                // Lower inline assembly to IR
+                let bid = self.current_block.ok_or("Inline assembly outside of block")?;
+                
+                // Map output expressions to VarIds
+                let mut output_vars = Vec::new();
+                for output in outputs {
+                    // Output should be an lvalue (variable)
+                    if let AstExpr::Variable(name) = &output.expr {
+                        if let Some(&alloca_var) = self.variable_allocas.get(name) {
+                            output_vars.push(alloca_var);
+                        } else {
+                            return Err(format!("Output variable {} not found for inline asm", name));
+                        }
+                    } else {
+                        return Err("Inline assembly output must be a variable".to_string());
+                    }
+                }
+                
+                // Lower input expressions to operands
+                let mut input_ops = Vec::new();
+                for input in inputs {
+                    input_ops.push(self.lower_expr(&input.expr)?);
+                }
+                
+                self.blocks[bid.0].instructions.push(Instruction::InlineAsm {
+                    template: template.clone(),
+                    outputs: output_vars,
+                    inputs: input_ops,
+                    clobbers: clobbers.clone(),
+                    is_volatile: *is_volatile,
+                });
             }
         }
         Ok(())

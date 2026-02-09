@@ -34,6 +34,7 @@ pub fn keyword_or_identifier(value: &str) -> Token {
         "short" => Token::Short,
         "union" => Token::Union,
         "asm" => Token::Asm,
+        "__asm" => Token::Asm,
         "__asm__" => Token::Asm,
         "__attribute__" => Token::Attribute,
         "__extension__" => Token::Extension,

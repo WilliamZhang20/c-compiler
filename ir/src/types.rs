@@ -81,6 +81,13 @@ pub enum Instruction {
         func_ptr: Operand,
         args: Vec<Operand>,
     },
+    InlineAsm {
+        template: String,
+        outputs: Vec<VarId>,     // Output variables
+        inputs: Vec<Operand>,    // Input operands
+        clobbers: Vec<String>,   // Clobbered registers
+        is_volatile: bool,
+    },
 }
 
 /// Control flow terminators for basic blocks

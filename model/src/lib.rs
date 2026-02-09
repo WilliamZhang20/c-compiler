@@ -76,6 +76,18 @@ pub enum Token {
     Pipe,
     Caret,
     Arrow, // ->
+    
+    // Compound Assignment
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+    AndEqual,
+    OrEqual,
+    XorEqual,
+    LessLessEqual,
+    GreaterGreaterEqual,
 }
 
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -291,6 +303,18 @@ pub enum BinaryOp {
     ShiftLeft,
     ShiftRight,
     Assign,
+    
+    // Compound Assignment
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    BitwiseAndAssign,
+    BitwiseOrAssign,
+    BitwiseXorAssign,
+    ShiftLeftAssign,
+    ShiftRightAssign,
 }
 
 #[derive(Debug, PartialEq, Clone)]

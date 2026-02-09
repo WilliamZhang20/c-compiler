@@ -82,6 +82,11 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
                 used_vars.insert(*v);
             }
         }
+        Instruction::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                add_operand_var(input, used_vars);
+            }
+        }
         Instruction::Alloca { .. } => {}
     }
 }
@@ -120,6 +125,7 @@ fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
         Instruction::Call { .. }
         | Instruction::IndirectCall { .. }
         | Instruction::Store { .. }
+        | Instruction::InlineAsm { .. }
         | Instruction::Alloca { .. } => true,
     }
 }

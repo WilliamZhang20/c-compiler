@@ -88,6 +88,7 @@ pub enum X86Instr {
     Cvtsi2ss(X86Operand, X86Operand), // Convert int to float
     Cvttss2si(X86Operand, X86Operand), // Convert float to int (truncate)
     Xorps(X86Operand, X86Operand), // XOR packed single-precision (for negation)
+    Raw(String), // Raw assembly string (for inline asm)
 }
 
 /// emit_asm converts X86 instructions to AT&T syntax assembly
@@ -128,6 +129,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Cvtsi2ss(d, src) => s.push_str(&format!("  cvtsi2ss {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Cvttss2si(d, src) => s.push_str(&format!("  cvttss2si {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Xorps(d, src) => s.push_str(&format!("  xorps {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Raw(asm_str) => s.push_str(&format!("  {}\n", asm_str)),
         }
     }
     s
