@@ -184,7 +184,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_declaration(&mut self) -> Result<Stmt, String> {
-        let mut r#type = self.parse_type()?;
+        let (mut r#type, qualifiers) = self.parse_type_with_qualifiers()?;
 
         // Check for function pointer: type (*name)(params)
         if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
@@ -238,6 +238,7 @@ impl<'a> Parser<'a> {
 
                 return Ok(Stmt::Declaration {
                     r#type,
+                    qualifiers: qualifiers.clone(),
                     name,
                     init,
                 });
@@ -271,6 +272,7 @@ impl<'a> Parser<'a> {
 
         Ok(Stmt::Declaration {
             r#type,
+            qualifiers,
             name,
             init,
         })

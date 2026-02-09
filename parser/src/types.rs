@@ -1,9 +1,10 @@
-use model::{Token, Type};
+use model::{Token, Type, TypeQualifiers};
 use crate::parser::Parser;
 
 /// Type parsing functionality
 pub(crate) trait TypeParser {
     fn parse_type(&mut self) -> Result<Type, String>;
+    fn parse_type_with_qualifiers(&mut self) -> Result<(Type, TypeQualifiers), String>;
     fn parse_struct_definition(&mut self) -> Result<model::StructDef, String>;
     fn parse_union_definition(&mut self) -> Result<model::UnionDef, String>;
     fn parse_enum_definition(&mut self) -> Result<model::EnumDef, String>;
@@ -11,25 +12,44 @@ pub(crate) trait TypeParser {
 
 impl<'a> TypeParser for Parser<'a> {
     fn parse_type(&mut self) -> Result<Type, String> {
-        // Skip modifiers like static, extern, const, etc.
+        let (ty, _qualifiers) = self.parse_type_with_qualifiers()?;
+        Ok(ty)
+    }
+
+    fn parse_type_with_qualifiers(&mut self) -> Result<(Type, TypeQualifiers), String> {
+        let mut qualifiers = TypeQualifiers::default();
+        let mut is_inline = false; // Track inline separately for functions
+
+        // Parse storage class specifiers and type qualifiers
         loop {
-            if self.match_token(|t| {
-                matches!(
-                    t,
-                    Token::Static
-                        | Token::Extern
-                        | Token::Inline
-                        | Token::Const
-                        | Token::Restrict
-                        | Token::Attribute
-                        | Token::Extension
-                )
-            }) {
-                if let Some(Token::Attribute | Token::Extension) = self.previous() {
-                    self.skip_parentheses()?;
+            let token = self.peek();
+            match token {
+                Some(Token::Static | Token::Extern) => {
+                    self.advance();
                 }
-            } else {
-                break;
+                Some(Token::Inline) => {
+                    is_inline = true;
+                    self.advance();
+                }
+                Some(Token::Const) => {
+                    qualifiers.is_const = true;
+                    self.advance();
+                }
+                Some(Token::Volatile) => {
+                    qualifiers.is_volatile = true;
+                    self.advance();
+                }
+                Some(Token::Restrict) => {
+                    qualifiers.is_restrict = true;
+                    self.advance();
+                }
+                Some(Token::Attribute | Token::Extension) => {
+                    self.advance();
+                    if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                        self.skip_parentheses()?;
+                    }
+                }
+                _ => break,
             }
         }
 
@@ -118,21 +138,24 @@ impl<'a> TypeParser for Parser<'a> {
                         return Err("Cannot modify struct type".to_string());
                     }
                     self.advance();
-                    return self.parse_struct_type();
+                    let (struct_type, _) = self.parse_struct_type()?;
+                    return Ok((struct_type, qualifiers));
                 }
                 Some(Token::Union) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
                         return Err("Cannot modify union type".to_string());
                     }
                     self.advance();
-                    return self.parse_union_type();
+                    let (union_type, _) = self.parse_union_type()?;
+                    return Ok((union_type, qualifiers));
                 }
                 Some(Token::Enum) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
                         return Err("Cannot modify enum type".to_string());
                     }
                     self.advance();
-                    return self.parse_enum_type();
+                    let (enum_type, _) = self.parse_enum_type()?;
+                    return Ok((enum_type, qualifiers));
                 }
                 Some(Token::Identifier { value }) if self.typedefs.contains(value) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
@@ -194,10 +217,15 @@ impl<'a> TypeParser for Parser<'a> {
 
         // Handle pointer types
         while self.match_token(|t| matches!(t, Token::Star)) {
+            // Skip qualifiers after * (e.g., int * restrict p)
+            while self.match_token(|t| matches!(t, Token::Const | Token::Volatile | Token::Restrict)) {
+                // Qualifiers after * apply to the pointer itself
+                // For now, we just skip them (not tracked per-pointer-level)
+            }
             final_type = Type::Pointer(Box::new(final_type));
         }
 
-        Ok(final_type)
+        Ok((final_type, qualifiers))
     }
 
     fn parse_struct_definition(&mut self) -> Result<model::StructDef, String> {
@@ -320,31 +348,31 @@ impl<'a> TypeParser for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_struct_type(&mut self) -> Result<Type, String> {
+    fn parse_struct_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected struct tag, found {:?}", other)),
         };
-        Ok(Type::Struct(name))
+        Ok((Type::Struct(name), TypeQualifiers::default()))
     }
 
-    fn parse_union_type(&mut self) -> Result<Type, String> {
+    fn parse_union_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected union tag, found {:?}", other)),
         };
-        Ok(Type::Union(name))
+        Ok((Type::Union(name), TypeQualifiers::default()))
     }
 
-    fn parse_enum_type(&mut self) -> Result<Type, String> {
+    fn parse_enum_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
         // For "enum Name", just treat as int (C standard behavior)
         if let Some(Token::Identifier { .. }) = self.peek() {
             self.advance();
         }
-        Ok(Type::Int)
+        Ok((Type::Int, TypeQualifiers::default()))
     }
 
-    fn skip_parentheses(&mut self) -> Result<(), String> {
+    pub(crate) fn skip_parentheses(&mut self) -> Result<(), String> {
         if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
             return Ok(());
         }

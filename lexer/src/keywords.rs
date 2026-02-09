@@ -20,6 +20,7 @@ pub fn keyword_or_identifier(value: &str) -> Token {
         "extern" => Token::Extern,
         "inline" => Token::Inline,
         "const" => Token::Const,
+        "volatile" => Token::Volatile,
         "typedef" => Token::Typedef,
         "struct" => Token::Struct,
         "char" => Token::Char,

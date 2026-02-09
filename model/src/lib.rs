@@ -27,6 +27,7 @@ pub enum Token {
     Extern,
     Inline,
     Const,
+    Volatile,
     Typedef,
     Struct,
     Char,
@@ -73,6 +74,13 @@ pub enum Token {
     Pipe,
     Caret,
     Arrow, // ->
+}
+
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct TypeQualifiers {
+    pub is_const: bool,
+    pub is_volatile: bool,
+    pub is_restrict: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -131,6 +139,7 @@ pub struct EnumDef {
 #[derive(Debug, PartialEq, Clone)]
 pub struct GlobalVar {
     pub r#type: Type,
+    pub qualifiers: TypeQualifiers,
     pub name: String,
     pub init: Option<Expr>,
 }
@@ -141,6 +150,7 @@ pub struct Function {
     pub name: String,
     pub params: Vec<(Type, String)>,
     pub body: Block,
+    pub is_inline: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -174,6 +184,7 @@ pub enum Stmt {
     Block(Block),
     Declaration {
         r#type: Type,
+        qualifiers: TypeQualifiers,
         name: String,
         init: Option<Expr>,
     },

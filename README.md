@@ -50,7 +50,7 @@ The compiler supports a substantial subset of the C language including:
   - Complex type specifiers: `unsigned long long`, `signed short`, etc.
 - **Function pointers**: Full support for function pointer types, assignment, and indirect calls
 - **Structs**: Full support for struct definitions, field access (`.`), and pointer member access (`->`)
-- **NEW - Union types**: Full support for union definitions with overlapping memory layout where all fields share the same offset
+- **Union types**: Full support for union definitions with overlapping memory layout where all fields share the same offset
 - **Arrays**: Single and multi-dimensional array indexing with automatic decay to pointers
 - **Pointer arithmetic**: Full support including:
   - Array decay to pointers (e.g., `int *p = arr`)
@@ -83,51 +83,45 @@ Individual test files are located in the `testing/` directory. Each test file us
 
 To fully compile the Linux kernel, the following features are prioritized:
 
-### Section 1: Storage Qualifiers and Type Modifiers
-- `volatile` (currently parsed but not enforced) - prevents aggressive optimization
-- `const` (currently parsed but not enforced) - enables read-only data placement
-- `restrict` keyword for pointer aliasing hints
-- `inline` functions with proper linkage semantics
-
-### Section 2: Attributes and Pragmas
+### Section 1: Attributes and Pragmas
 - `__attribute__((packed))` for byte-aligned structs  
 - `__attribute__((aligned(N)))` for explicit alignment
 - `__attribute__((section("name")))` for custom ELF sections
 - `__attribute__((noreturn))`, `__attribute__((always_inline))`
 - `#pragma pack` directives
 
-### Section 3: Advanced Pointer Features
+### Section 2: Advanced Pointer Features
 - Pointer-to-member syntax and semantics
 - Complex pointer casts and type punning
 - Bit fields in structs (`unsigned field : 3;`)
 
-### Section 4: Preprocessor Enhancements  
+### Section 3: Preprocessor Enhancements  
 - Variadic macros (`#define DEBUG(fmt, ...)`)
 - Token pasting (`##`) and stringification (`#`)
 - `__VA_ARGS__` support
 
-### Section 5: Assembly Integration
+### Section 4: Assembly Integration
 - Inline assembly (`asm volatile`)
 - Assembly constraints and clobbers
 - Global register variables
 
-### Section 6: Advanced Linkage
+### Section 5: Advanced Linkage
 - `extern "C"` linkage (if C++ interop needed)
 - Weak symbols (`__attribute__((weak))`)
 - Symbol versioning and aliases
 
-### Section 7: GNU Extensions
+### Section 6: GNU Extensions
 - Statement expressions (`({ ... })`)
 - `typeof` operator
 - Compound literals
 - Designated initializers for arrays/structs
 
-### Section 8: Type System Edge Cases
+### Section 7: Type System Edge Cases
 - Type qualifiers on function parameters
 - Complex array declarators
 - Function pointer syntax edge cases
 
-### Section 9: Floating-Point Robustness
+### Section 8: Floating-Point Robustness
 - Proper NaN/Inf handling
 - Floating-point precision directives
 - SSE/AVX vector operations (for kernel SIMD)
@@ -204,3 +198,23 @@ Benchmark results comparing our compiler against GCC (lower time is better, spee
 **Our compiler beats or ties GCC -O0 on 4 out of 5 benchmarks**, achieving superior performance to GCC's unoptimized output and even beating GCC -O2 on several tests! The key optimizations enabling this performance are algebraic simplification, strength reduction, copy propagation, common subexpression elimination, and constant folding at the IR level, combined with smart register allocation and peephole optimization in the backend.
 
 Run benchmarks with `.\benchmarks\run_benchmarks.ps1`. Note that benchmark times may vary by ±5-10% between runs due to system factors (CPU thermal throttling, OS scheduling, cache state).
+## Recent Additions
+
+### Storage Qualifiers and Type Modifiers
+The compiler now supports key C language qualifiers and storage class specifiers:
+
+-  **`volatile`** - Fully implemented. Parsed, tracked throughout compilation, and prevents aggressive optimization of volatile global variables. Essential for memory-mapped I/O and hardware interaction.
+  
+-  **`const`** - Fully implemented. Parsed, tracked, and enforced by semantic analyzer. Attempting to assign to a const variable produces a compilation error. Supports both local and global const variables.
+
+-  **`restrict`** - Keyword support implemented. Parsed and validated (compiler ensures `restrict` is only applied to pointer types). Provides aliasing hints to the compiler for optimization.
+
+-  **`inline`** - Function attribute implemented. The `inline` keyword is parsed and tracked on functions with proper semantics. Functions marked inline have their attribute preserved throughout compilation.
+
+All features include comprehensive test coverage in the `testing/` directory:
+- `test_const.c`, `test_const_global.c` - const variable testing
+- `test_volatile.c`, `test_volatile_global.c` - volatile variable testing  
+- `test_restrict_pointer.c` - restrict qualifier on pointers
+- `test_inline_function.c` - inline function testing
+- `test_const_volatile.c` - combined qualifiers
+- `test_qualifiers_comprehensive.c`, `test_qualifiers_simple.c` - integration tests

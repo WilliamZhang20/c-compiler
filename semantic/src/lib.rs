@@ -1,9 +1,11 @@
-use model::{Program, Function, Stmt, Expr, Type};
+use model::{Program, Function, Stmt, Expr, Type, TypeQualifiers, BinaryOp};
 use std::collections::HashMap;
 
 pub struct SemanticAnalyzer {
     global_scope: HashMap<String, Type>,
     scopes: Vec<HashMap<String, Type>>,
+    const_vars: HashMap<String, bool>, // Track const-qualified variables
+    volatile_vars: HashMap<String, bool>, // Track volatile-qualified variables  
     structs: HashMap<String, model::StructDef>,
     unions: HashMap<String, model::UnionDef>,
     enum_constants: HashMap<String, i64>, // enum constant name => value
@@ -16,6 +18,8 @@ impl SemanticAnalyzer {
         Self {
             global_scope: HashMap::new(),
             scopes: Vec::new(),
+            const_vars: HashMap::new(),
+            volatile_vars: HashMap::new(),
             structs: HashMap::new(),
             unions: HashMap::new(),
             enum_constants: HashMap::new(),
@@ -26,6 +30,8 @@ impl SemanticAnalyzer {
 
     pub fn analyze(&mut self, program: &Program) -> Result<(), String> {
         self.global_scope.clear();
+        self.const_vars.clear();
+        self.volatile_vars.clear();
         self.structs.clear();
         self.unions.clear();
         self.enum_constants.clear();
@@ -52,7 +58,19 @@ impl SemanticAnalyzer {
             if self.global_scope.contains_key(&global.name) {
                 return Err(format!("Redeclaration of global variable {}", global.name));
             }
+            
+            // Validate restrict on pointers only
+            if global.qualifiers.is_restrict && !matches!(global.r#type, Type::Pointer(_)) {
+                return Err(format!("'restrict' can only be applied to pointer types"));
+            }
+            
             self.global_scope.insert(global.name.clone(), global.r#type.clone());
+            if global.qualifiers.is_const {
+                self.const_vars.insert(global.name.clone(), true);
+            }
+            if global.qualifiers.is_volatile {
+                self.volatile_vars.insert(global.name.clone(), true);
+            }
         }
         
         // Add function names as function pointers to global scope
@@ -112,8 +130,20 @@ impl SemanticAnalyzer {
 
     fn analyze_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Declaration { r#type, name, init } => {
+            Stmt::Declaration { r#type, qualifiers, name, init } => {
+                // Validate restrict on pointers only
+                if qualifiers.is_restrict && !matches!(r#type, Type::Pointer(_)) {
+                    return Err(format!("'restrict' can only be applied to pointer types"));
+                }
+                
                 self.add_symbol(name.clone(), r#type.clone());
+                if qualifiers.is_const {
+                    self.const_vars.insert(name.clone(), true);
+                }
+                if qualifiers.is_volatile {
+                    self.volatile_vars.insert(name.clone(), true);
+                }
+                
                 if let Some(expr) = init {
                     self.analyze_expr(expr)?;
                 }
@@ -206,9 +236,18 @@ impl SemanticAnalyzer {
                     return Err(format!("Undeclared variable {}", name));
                 }
             }
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary { left, op, right } => {
                 self.analyze_expr(left)?;
                 self.analyze_expr(right)?;
+                
+                // Check for assignment to const variable
+                if matches!(op, BinaryOp::Assign) {
+                    if let Expr::Variable(name) = left.as_ref() {
+                        if self.const_vars.get(name) == Some(&true) {
+                            return Err(format!("Cannot assign to const variable '{}'", name));
+                        }
+                    }
+                }
             }
             Expr::Unary { expr, .. } => {
                 self.analyze_expr(expr)?;

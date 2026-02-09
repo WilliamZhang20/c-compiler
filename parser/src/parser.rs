@@ -87,6 +87,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> Result<Function, String> {
+        // Track inline before parsing type
+        let saved_pos = self.pos;
+        let mut is_inline = false;
+        
+        // Scan for inline keyword
+        while self.pos < self.tokens.len() {
+            match self.peek() {
+                Some(Token::Inline) => {
+                    is_inline = true;
+                    break;
+                }
+                Some(Token::Static | Token::Extern | Token::Const | Token::Volatile | Token::Restrict) => {
+                    self.pos += 1;
+                }
+                Some(Token::Attribute | Token::Extension) => {
+                    self.pos += 1;
+                    if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                        let _ = self.skip_parentheses();
+                    }
+                }
+                _ => break,
+            }
+        }
+        
+        // Reset position
+        self.pos = saved_pos;
+        
         let return_type = self.parse_type()?;
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
@@ -109,6 +136,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             body: body_block,
+            is_inline,
         })
     }
 
@@ -144,7 +172,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_global(&mut self) -> Result<GlobalVar, String> {
-        let mut r#type = self.parse_type()?;
+        let (mut r#type, qualifiers) = self.parse_type_with_qualifiers()?;
         let name = match self.advance() {
             Some(Token::Identifier { value }) => value.clone(),
             other => return Err(format!("expected identifier after type, found {:?}", other)),
@@ -169,6 +197,7 @@ impl<'a> Parser<'a> {
 
         Ok(GlobalVar {
             r#type,
+            qualifiers,
             name,
             init,
         })
@@ -189,6 +218,7 @@ impl<'a> Parser<'a> {
                     | Token::Attribute
                     | Token::Extension
                     | Token::Const
+                    | Token::Volatile
                     | Token::Restrict
                     | Token::Hash
             ) {
@@ -336,6 +366,7 @@ impl<'a> Parser<'a> {
                 | Token::Extern
                 | Token::Inline
                 | Token::Const
+                | Token::Volatile
                 | Token::Restrict
                 | Token::Attribute
                 | Token::Extension,

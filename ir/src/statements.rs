@@ -25,7 +25,7 @@ impl Lowerer {
                 self.blocks[bid.0].terminator = Terminator::Ret(val);
                 self.current_block = None; // Dead code after return
             }
-            AstStmt::Declaration { r#type, name, init } => {
+            AstStmt::Declaration { r#type, qualifiers: _, name, init } => {
                 self.symbol_table.insert(name.clone(), r#type.clone());
                 let bid = self.current_block.ok_or("Declaration outside of block")?;
                 

@@ -26,6 +26,7 @@ use propagation::copy_propagation;
 use cse::common_subexpression_elimination;
 use folding::optimize_function;
 use load_forwarding::load_forwarding;
+use std::collections::HashSet;
 
 /// Main optimization entry point
 ///
@@ -44,6 +45,13 @@ use load_forwarding::load_forwarding;
 /// # Returns
 /// * Optimized IR program with improved code quality and performance
 pub fn optimize(mut program: IRProgram) -> IRProgram {
+    // Collect volatile globals to prevent aggressive optimization
+    let volatile_globals: HashSet<String> = program.globals
+        .iter()
+        .filter(|g| g.qualifiers.is_volatile)
+        .map(|g| g.name.clone())
+        .collect();
+    
     for func in &mut program.functions {
         algebraic_simplification(func);
         strength_reduce_function(func);
