@@ -811,8 +811,13 @@ impl Codegen {
                     let label = self.operand_to_op(arg);
                     self.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
                 } else {
-                    let val = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
+                    // Special handling for Global operands (string literals, function pointers)
+                    if let Operand::Global(name) = arg {
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(param_regs[i].clone()), X86Operand::RipRelLabel(name.clone())));
+                    } else {
+                        let val = self.operand_to_op(arg);
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
+                    }
                 }
             } else {
                 let offset = 32 + (i - 4) * 8;
@@ -821,8 +826,13 @@ impl Codegen {
                     self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
                     self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
                 } else {
-                    let val = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                    // Special handling for Global operands
+                    if let Operand::Global(name) = arg {
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                    } else {
+                        let val = self.operand_to_op(arg);
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                    }
                     self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
                 }
             }
@@ -938,6 +948,10 @@ impl Codegen {
             
             asm_code = asm_code.replace(&placeholder, &operand_str);
         }
+        
+        // Convert GCC inline assembly escape syntax {$} to nothing for Intel syntax
+        // In Intel syntax, immediates don't use $ prefix (unlike AT&T syntax)
+        asm_code = asm_code.replace("{$}", "");
         
         // Emit as raw assembly
         self.asm.push(X86Instr::Raw(asm_code));

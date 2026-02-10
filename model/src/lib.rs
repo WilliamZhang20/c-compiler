@@ -76,6 +76,8 @@ pub enum Token {
     Pipe,
     Caret,
     Arrow, // ->
+    PlusPlus,   // ++
+    MinusMinus, // --
     
     // Compound Assignment
     PlusEqual,

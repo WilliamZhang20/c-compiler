@@ -72,4 +72,14 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn debug_tokens() {
+        let src = std::fs::read_to_string("../hello_world.i").unwrap();
+        let tokens = crate::lex(&src).unwrap();
+        let pos: usize = 921;
+        for i in (pos.saturating_sub(10))..(pos + 10).min(tokens.len()) {
+            println!("{}: {:?}", i, tokens[i]);
+        }
+    }
 }

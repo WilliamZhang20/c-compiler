@@ -12,4 +12,9 @@
 # to version control.
 *.i
 *.s
+
+# Ignore all executables…
 *.exe
+
+# …except this one
+!release.exe
