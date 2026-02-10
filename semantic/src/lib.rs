@@ -273,6 +273,16 @@ impl SemanticAnalyzer {
             Expr::Unary { expr, .. } => {
                 self.analyze_expr(expr)?;
             }
+            Expr::PostfixIncrement(expr) | Expr::PostfixDecrement(expr) 
+            | Expr::PrefixIncrement(expr) | Expr::PrefixDecrement(expr) => {
+                self.analyze_expr(expr)?;
+                // Check for increment/decrement of const variable
+                if let Expr::Variable(name) = expr.as_ref() {
+                    if self.const_vars.get(name) == Some(&true) {
+                        return Err(format!("Cannot modify const variable '{}'", name));
+                    }
+                }
+            }
             Expr::Constant(_) => {}
             Expr::FloatConstant(_) => {}
             Expr::StringLiteral(_) => {}

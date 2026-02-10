@@ -269,6 +269,14 @@ impl<'a> Parser<'a> {
                 op,
                 expr: Box::new(expr),
             })
+        } else if self.match_token(|t| matches!(t, Token::PlusPlus)) {
+            // Prefix increment
+            let expr = self.parse_unary()?;
+            Ok(Expr::PrefixIncrement(Box::new(expr)))
+        } else if self.match_token(|t| matches!(t, Token::MinusMinus)) {
+            // Prefix decrement
+            let expr = self.parse_unary()?;
+            Ok(Expr::PrefixDecrement(Box::new(expr)))
         } else if self.match_token(|t| matches!(t, Token::SizeOf)) {
             self.parse_sizeof()
         } else if self.check(&|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1)
@@ -352,6 +360,12 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     member,
                 };
+            } else if self.match_token(|t| matches!(t, Token::PlusPlus)) {
+                // Postfix increment
+                expr = Expr::PostfixIncrement(Box::new(expr));
+            } else if self.match_token(|t| matches!(t, Token::MinusMinus)) {
+                // Postfix decrement
+                expr = Expr::PostfixDecrement(Box::new(expr));
             } else {
                 break;
             }

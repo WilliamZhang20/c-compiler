@@ -13,6 +13,10 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 ## Overview
 
+### How to Run
+
+The most exciting part. Currently only works on Windows, Linux compatability is coming soon. Run `release.exe` and point to any C file. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP.
+
 ### Architecture
 
 The compiler is built in Rust using a multi-stage pipeline. It orchestrates preprocessing via GCC, followed by custom lexing, parsing, and semantic analysis to ensure code validity.
@@ -78,36 +82,6 @@ cargo test
 ```
 
 Individual test files are located in the `testing/` directory. Each test file uses a `// EXPECT: <exit_code>` annotation to specify the expected program exit code.
-
-## Linux Kernel Compatibility Roadmap
-
-To fully compile the Linux kernel, the following features are prioritized:
-
-### Section 1: Preprocessor Enhancements  
-- Variadic macros (`#define DEBUG(fmt, ...)`)
-- Token pasting (`##`) and stringification (`#`)
-- `__VA_ARGS__` support
-
-### Section 2: Advanced Linkage
-- `extern "C"` linkage (if C++ interop needed)
-- Weak symbols (`__attribute__((weak))`)
-- Symbol versioning and aliases
-
-### Section 3: GNU Extensions
-- Statement expressions (`({ ... })`)
-- `typeof` operator
-- Compound literals
-- Designated initializers for arrays/structs
-
-### Section 4: Type System Edge Cases
-- Type qualifiers on function parameters
-- Complex array declarators
-- Function pointer syntax edge cases
-
-### Section 5: Floating-Point Robustness
-- Proper NaN/Inf handling
-- Floating-point precision directives
-- SSE/AVX vector operations (for kernel SIMD)
 
 ## Optimizations
 

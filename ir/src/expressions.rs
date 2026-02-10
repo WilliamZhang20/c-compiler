@@ -249,8 +249,214 @@ impl Lowerer {
                     value_type,
                 });
                 Ok(Operand::Var(dest))
+            }            AstExpr::PostfixIncrement(expr) => {
+                // For postfix: return old value, but modify the variable
+                // 1. Get the address
+                let addr = self.lower_to_addr(expr)?;
+                // 2. Load old value
+                let old_val_var = self.new_var();
+                let expr_type = self.get_expr_type(expr);
+                self.add_instruction(Instruction::Load {
+                    dest: old_val_var,
+                    addr: Operand::Var(addr),
+                    value_type: expr_type.clone(),
+                });
+                // 3. Compute new value (old + 1)
+                let new_val_var = self.new_var();
+                let op = BinaryOp::Add;
+                
+                // Handle pointer arithmetic
+                let increment = if matches!(expr_type, Type::Pointer(_) | Type::Array(..)) {
+                    let inner_type = match &expr_type {
+                        Type::Pointer(inner) => inner,
+                        Type::Array(inner, _) => inner,
+                        _ => unreachable!(),
+                    };
+                    self.get_type_size(inner_type)
+                } else {
+                    1
+                };
+                
+                if self.is_float_type(&expr_type) {
+                    self.add_instruction(Instruction::FloatBinary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::FloatConstant(1.0),
+                    });
+                } else {
+                    self.add_instruction(Instruction::Binary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::Constant(increment),
+                    });
+                }
+                // 4. Store new value back
+                self.add_instruction(Instruction::Store {
+                    addr: Operand::Var(addr),
+                    src: Operand::Var(new_val_var),
+                    value_type: expr_type,
+                });
+                // 5. Return old value
+                Ok(Operand::Var(old_val_var))
             }
-            AstExpr::Unary { op, expr } => {
+            AstExpr::PostfixDecrement(expr) => {
+                // For postfix: return old value, but modify the variable
+                // 1. Get the address
+                let addr = self.lower_to_addr(expr)?;
+                // 2. Load old value
+                let old_val_var = self.new_var();
+                let expr_type = self.get_expr_type(expr);
+                self.add_instruction(Instruction::Load {
+                    dest: old_val_var,
+                    addr: Operand::Var(addr),
+                    value_type: expr_type.clone(),
+                });
+                // 3. Compute new value (old - 1)
+                let new_val_var = self.new_var();
+                let op = BinaryOp::Sub;
+                
+                // Handle pointer arithmetic
+                let increment = if matches!(expr_type, Type::Pointer(_) | Type::Array(..)) {
+                    let inner_type = match &expr_type {
+                        Type::Pointer(inner) => inner,
+                        Type::Array(inner, _) => inner,
+                        _ => unreachable!(),
+                    };
+                    self.get_type_size(inner_type)
+                } else {
+                    1
+                };
+                
+                if self.is_float_type(&expr_type) {
+                    self.add_instruction(Instruction::FloatBinary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::FloatConstant(1.0),
+                    });
+                } else {
+                    self.add_instruction(Instruction::Binary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::Constant(increment),
+                    });
+                }
+                // 4. Store new value back
+                self.add_instruction(Instruction::Store {
+                    addr: Operand::Var(addr),
+                    src: Operand::Var(new_val_var),
+                    value_type: expr_type,
+                });
+                // 5. Return old value
+                Ok(Operand::Var(old_val_var))
+            }
+            AstExpr::PrefixIncrement(expr) => {
+                // For prefix: return new value after modification
+                // 1. Get the address
+                let addr = self.lower_to_addr(expr)?;
+                // 2. Load old value
+                let old_val_var = self.new_var();
+                let expr_type = self.get_expr_type(expr);
+                self.add_instruction(Instruction::Load {
+                    dest: old_val_var,
+                    addr: Operand::Var(addr),
+                    value_type: expr_type.clone(),
+                });
+                // 3. Compute new value (old + 1)
+                let new_val_var = self.new_var();
+                let op = BinaryOp::Add;
+                
+                // Handle pointer arithmetic
+                let increment = if matches!(expr_type, Type::Pointer(_) | Type::Array(..)) {
+                    let inner_type = match &expr_type {
+                        Type::Pointer(inner) => inner,
+                        Type::Array(inner, _) => inner,
+                        _ => unreachable!(),
+                    };
+                    self.get_type_size(inner_type)
+                } else {
+                    1
+                };
+                
+                if self.is_float_type(&expr_type) {
+                    self.add_instruction(Instruction::FloatBinary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::FloatConstant(1.0),
+                    });
+                } else {
+                    self.add_instruction(Instruction::Binary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::Constant(increment),
+                    });
+                }
+                // 4. Store new value back
+                self.add_instruction(Instruction::Store {
+                    addr: Operand::Var(addr),
+                    src: Operand::Var(new_val_var),
+                    value_type: expr_type,
+                });
+                // 5. Return new value
+                Ok(Operand::Var(new_val_var))
+            }
+            AstExpr::PrefixDecrement(expr) => {
+                // For prefix: return new value after modification
+                // 1. Get the address
+                let addr = self.lower_to_addr(expr)?;
+                // 2. Load old value
+                let old_val_var = self.new_var();
+                let expr_type = self.get_expr_type(expr);
+                self.add_instruction(Instruction::Load {
+                    dest: old_val_var,
+                    addr: Operand::Var(addr),
+                    value_type: expr_type.clone(),
+                });
+                // 3. Compute new value (old - 1)
+                let new_val_var = self.new_var();
+                let op = BinaryOp::Sub;
+                
+                // Handle pointer arithmetic
+                let increment = if matches!(expr_type, Type::Pointer(_) | Type::Array(..)) {
+                    let inner_type = match &expr_type {
+                        Type::Pointer(inner) => inner,
+                        Type::Array(inner, _) => inner,
+                        _ => unreachable!(),
+                    };
+                    self.get_type_size(inner_type)
+                } else {
+                    1
+                };
+                
+                if self.is_float_type(&expr_type) {
+                    self.add_instruction(Instruction::FloatBinary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::FloatConstant(1.0),
+                    });
+                } else {
+                    self.add_instruction(Instruction::Binary {
+                        dest: new_val_var,
+                        op,
+                        left: Operand::Var(old_val_var),
+                        right: Operand::Constant(increment),
+                    });
+                }
+                // 4. Store new value back
+                self.add_instruction(Instruction::Store {
+                    addr: Operand::Var(addr),
+                    src: Operand::Var(new_val_var),
+                    value_type: expr_type,
+                });
+                // 5. Return new value
+                Ok(Operand::Var(new_val_var))
+            }            AstExpr::Unary { op, expr } => {
                 let val = self.lower_expr(expr)?;
                 let dest = self.new_var();
                 let expr_ty = self.get_expr_type(expr);

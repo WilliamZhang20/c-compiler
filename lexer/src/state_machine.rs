@@ -331,6 +331,8 @@ impl<'a> StateMachineLexer<'a> {
             ('<', Some('<')) => Some(Token::LessLess),
             ('>', Some('>')) => Some(Token::GreaterGreater),
             ('-', Some('>')) => Some(Token::Arrow),
+            ('+', Some('+')) => Some(Token::PlusPlus),
+            ('-', Some('-')) => Some(Token::MinusMinus),
             // Compound assignments
             ('+', Some('=')) => Some(Token::PlusEqual),
             ('-', Some('=')) => Some(Token::MinusEqual),

@@ -125,6 +125,10 @@ impl Lowerer {
                     _ => self.get_expr_type(expr),
                 }
             }
+            AstExpr::PostfixIncrement(expr) | AstExpr::PostfixDecrement(expr) 
+            | AstExpr::PrefixIncrement(expr) | AstExpr::PrefixDecrement(expr) => {
+                self.get_expr_type(expr)
+            }
             AstExpr::Cast(ty, _) => ty.clone(),
             AstExpr::Member { expr, member } => {
                 let ty = self.get_expr_type(expr);
