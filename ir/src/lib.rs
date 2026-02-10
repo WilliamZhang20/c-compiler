@@ -6,10 +6,12 @@ mod lowerer;
 mod ssa;
 mod expressions;
 mod statements;
+mod mem2reg;
 
 // Public exports
 pub use types::{VarId, BlockId, Operand, Instruction, Terminator, BasicBlock, Function, IRProgram};
 pub use lowerer::Lowerer;
+pub use mem2reg::mem2reg;
 
 #[cfg(test)]
 mod tests {

@@ -31,13 +31,14 @@ use folding::optimize_function;
 /// Main optimization entry point
 ///
 /// Runs a series of optimization passes on each function in the program:
-/// 1. Algebraic simplification - apply mathematical identities
-/// 2. Strength reduction - replace expensive ops with cheaper ones
-/// 3. Copy propagation - forward copy values
-/// 4. Load forwarding - eliminate redundant memory loads
-/// 5. Common subexpression elimination - remove redundant calculations
-/// 6. Constant folding - evaluate constant expressions at compile time
-/// 7. Dead code elimination - remove unused computations (integrated in folding)
+/// 1. Mem2reg - promote memory allocations to SSA registers
+/// 2. Algebraic simplification - apply mathematical identities
+/// 3. Strength reduction - replace expensive ops with cheaper ones
+/// 4. Copy propagation - forward copy values
+/// 5. Load forwarding - eliminate redundant memory loads
+/// 6. Common subexpression elimination - remove redundant calculations
+/// 7. Constant folding - evaluate constant expressions at compile time
+/// 8. Dead code elimination - remove unused computations (integrated in folding)
 ///
 /// # Arguments
 /// * `program` - The IR program to optimize
@@ -56,6 +57,7 @@ pub fn optimize(mut program: IRProgram) -> IRProgram {
     */
     
     for func in &mut program.functions {
+        // ir::mem2reg(func);  // TODO: Fix mem2reg - currently breaks code generation
         algebraic_simplification(func);
         strength_reduce_function(func);
         copy_propagation(func);

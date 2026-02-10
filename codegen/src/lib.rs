@@ -31,6 +31,8 @@ pub struct Codegen {
     var_types: HashMap<VarId, Type>,
     // Function signatures (for call return type inference)
     func_return_types: HashMap<String, Type>,
+    // Alloca variables -> direct stack buffer offset (for direct memory access)
+    alloca_buffers: HashMap<VarId, i32>,
 }
 
 impl Codegen {
@@ -47,6 +49,7 @@ impl Codegen {
             next_float_const: 0,
             var_types: HashMap::new(),
             func_return_types: HashMap::new(),
+            alloca_buffers: HashMap::new(),
         }
     }
 
@@ -149,6 +152,7 @@ impl Codegen {
             self.asm.clear();
             self.stack_slots.clear();
             self.reg_alloc.clear();
+            self.alloca_buffers.clear();
             self.next_slot = 0;
         }
         
@@ -239,16 +243,13 @@ impl Codegen {
             for inst in &block.instructions {
                 match inst {
                     IrInstruction::Alloca { dest, r#type } => {
-                        // Allocas always need stack space
-                        // First allocate slot for pointer variable
-                        self.next_slot += 8;
-                        let ptr_slot = -self.next_slot;
-                        self.stack_slots.insert(*dest, ptr_slot);
-                        
-                        // Then allocate buffer space (aligned to 8 bytes)
+                        // Allocate buffer space directly on stack (aligned to 8 bytes)
                         let size = self.get_type_size(r#type) as i32;
                         let aligned_size = ((size + 7) / 8) * 8;
                         self.next_slot += aligned_size;
+                        let buffer_offset = -self.next_slot;
+                        // Track this as an alloca for direct memory access
+                        self.alloca_buffers.insert(*dest, buffer_offset);
                     }
                     IrInstruction::Binary { dest, .. } |
                     IrInstruction::FloatBinary { dest, .. } |
@@ -405,14 +406,7 @@ impl Codegen {
             IrInstruction::Alloca { dest, r#type } => {
                 // Record that Alloca result is a pointer
                 self.var_types.insert(*dest, Type::Pointer(Box::new(r#type.clone())));
-                
-                let size = self.get_type_size(r#type);
-                let aligned_size = ((size + 7) / 8) * 8;  // Align to 8 bytes
-                let ptr_slot = *self.stack_slots.get(dest).expect("alloca dest must have slot");
-                let buffer_offset = ptr_slot - aligned_size as i32;
-                let d_op = self.var_to_op(*dest);
-                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, buffer_offset)));
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                // No code generation needed - buffer offset already tracked in alloca_buffers
             }
             IrInstruction::Load { dest, addr, value_type } => {
                 self.gen_load(*dest, addr, value_type);
@@ -631,10 +625,16 @@ impl Codegen {
                     self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                 }
                 Operand::Var(var) => {
-                    let a_op = self.var_to_op(*var);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
-                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    // Check if this is an alloca - use direct memory access
+                    if let Some(buffer_offset) = self.alloca_buffers.get(var) {
+                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset)));
+                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    } else {
+                        let a_op = self.var_to_op(*var);
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
+                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    }
                 }
                 Operand::Constant(addr_const) => {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
@@ -658,15 +658,26 @@ impl Codegen {
                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 }
                 Operand::Var(var) => {
-                    let a_op = self.var_to_op(*var);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                    if use_dword {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                        self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                    // Check if this is an alloca - use direct memory access
+                    if let Some(buffer_offset) = self.alloca_buffers.get(var) {
+                        if use_dword {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rbp, *buffer_offset)));
+                            self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                        } else {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
+                        }
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                     } else {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                        let a_op = self.var_to_op(*var);
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                        if use_dword {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
+                            self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                        } else {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
+                        }
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                     }
-                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 }
                 Operand::Constant(addr_const) => {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*addr_const)));
@@ -696,9 +707,14 @@ impl Codegen {
             
             match addr {
                 Operand::Var(var) => {
-                    let a_op = self.var_to_op(*var);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                    self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
+                    // Check if this is an alloca - use direct memory access
+                    if let Some(buffer_offset) = self.alloca_buffers.get(var) {
+                        self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset), X86Operand::Reg(X86Reg::Xmm0)));
+                    } else {
+                        let a_op = self.var_to_op(*var);
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                        self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
+                    }
                 }
                 Operand::Global(name) => {
                     self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
@@ -740,14 +756,25 @@ impl Codegen {
                 }
             }
             Operand::Var(var) => {
-                let a_op = self.var_to_op(*var);
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
-                if is_float {
-                    self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
-                } else if use_dword {
-                    self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                // Check if this is an alloca - use direct memory access
+                if let Some(buffer_offset) = self.alloca_buffers.get(var) {
+                    if is_float {
+                        self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset), X86Operand::Reg(X86Reg::Xmm0)));
+                    } else if use_dword {
+                        self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rbp, *buffer_offset), X86Operand::Reg(X86Reg::Ecx)));
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, *buffer_offset), X86Operand::Reg(X86Reg::Rcx)));
+                    }
                 } else {
-                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                    let a_op = self.var_to_op(*var);
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), a_op));
+                    if is_float {
+                        self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
+                    } else if use_dword {
+                        self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
+                    }
                 }
             }
             Operand::Constant(addr_const) => {
