@@ -372,6 +372,7 @@ impl<'a> StateMachineLexer<'a> {
             ']' => Token::CloseBracket,
             '#' => Token::Hash,
             ':' => Token::Colon,
+            '?' => Token::Question,
             '.' => Token::Dot,
             '&' => Token::Ampersand,
             '~' => Token::Tilde,

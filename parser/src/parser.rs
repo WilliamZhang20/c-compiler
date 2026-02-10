@@ -48,13 +48,10 @@ impl<'a> Parser<'a> {
                 // enum definition: enum Color { ... };
                 enums.push(self.parse_enum_definition()?);
                 self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
-            } else if self.is_extern_inline_function() {
-                // Skip extern inline functions (GNU inline semantics)
-                // These should not emit standalone definitions
+            } else if self.is_inline_function() {
+                // Skip ALL inline functions - they're already in system libraries
+                // This includes static inline, extern inline, and plain inline
                 self.skip_extern_inline_function()?;
-            } else if self.is_static_inline_function() {
-                // Skip static inline functions - they should only be compiled if used
-                self.skip_extern_inline_function()?; // Same skipping logic
             } else if self.is_function_definition() {
                 functions.push(self.parse_function()?);
             } else if self.is_function_declaration() {
@@ -102,6 +99,52 @@ impl<'a> Parser<'a> {
         if self.check(&|t| matches!(t, Token::OpenBrace)) {
             // Skip the inline definition body
             self.skip_block_internal()?;
+        }
+        
+        // Check for function pointer typedef: typedef int (*name)(params);
+        // After parsing the base type (e.g., "int"), the next token should be
+        // '(' marking the start of the function pointer declarator.
+        if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+            // This is a function pointer typedef
+            self.advance(); // consume '('
+            
+            // Skip attributes if present (e.g., __attribute__((__cdecl__)))
+            while self.match_token(|t| matches!(t, Token::Attribute)) {
+                if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                    self.skip_parentheses()?;
+                }
+            }
+            
+            // Expect '*' for pointer
+            self.expect(|t| matches!(t, Token::Star), "'*'")?;
+            
+            // Get the typedef name
+            let name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => {
+                    return Err(format!(
+                        "expected identifier for function pointer typedef name, found {:?}",
+                        other
+                    ))
+                }
+            };
+            self.typedefs.insert(name);
+            
+            // Expect ')' to close the pointer declaration
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            
+            // Expect '(' for parameters
+            self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+            
+            // Skip parameters - just consume until we find matching ')'
+            self.skip_parentheses_content()?;
+            
+            // Expect ')'
+            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+            
+            // Expect ';'
+            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            return Ok(());
         }
         
         // Parse typedef aliases (can be multiple, comma-separated)
@@ -397,6 +440,37 @@ impl<'a> Parser<'a> {
             temp_pos += 1;
         }
         false
+    }
+
+    /// Check if this is ANY inline function definition
+    /// All inline functions should be skipped - they're provided by system libraries
+    fn is_inline_function(&self) -> bool {
+        let mut temp_pos = self.pos;
+        let mut has_inline = false;
+
+        // Scan modifiers
+        while temp_pos < self.tokens.len() {
+            let tok = &self.tokens[temp_pos];
+            match tok {
+                Token::Inline => {
+                    has_inline = true;
+                    temp_pos += 1;
+                }
+                Token::Static | Token::Extern | Token::Const | Token::Volatile | Token::Restrict | Token::Extension => {
+                    temp_pos += 1;
+                }
+                Token::Attribute => {
+                    temp_pos += 1;
+                    if temp_pos < self.tokens.len() && matches!(self.tokens[temp_pos], Token::OpenParenthesis) {
+                        temp_pos = self.skip_parentheses_from(temp_pos);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Must have inline and be a function definition (with body)
+        has_inline && self.is_function_definition()
     }
 
     /// Check if this is an extern inline function definition (GNU inline semantics)
@@ -837,6 +911,30 @@ impl<'a> Parser<'a> {
                 Some(Token::OpenBrace) => depth += 1,
                 Some(Token::CloseBrace) => depth -= 1,
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_parentheses_content(&mut self) -> Result<(), String> {
+        // Skip content until we find matching close parenthesis
+        // (assumes opening parenthesis already consumed)
+        let mut depth = 1;
+        while depth > 0 && !self.is_at_end() {
+            match self.peek() {
+                Some(Token::OpenParenthesis) => {
+                    depth += 1;
+                    self.advance();
+                }
+                Some(Token::CloseParenthesis) => {
+                    depth -= 1;
+                    if depth > 0 {
+                        self.advance();
+                    }
+                }
+                _ => {
+                    self.advance();
+                }
             }
         }
         Ok(())

@@ -16,7 +16,7 @@ impl<'a> ExpressionParser for Parser<'a> {
 impl<'a> Parser<'a> {
     // Assignment (lowest precedence)
     pub(crate) fn parse_assignment(&mut self) -> Result<Expr, String> {
-        let left = self.parse_logical_or()?;
+        let left = self.parse_conditional()?;
 
         if self.check(&|t| matches!(t, Token::Equal 
             | Token::PlusEqual | Token::MinusEqual | Token::StarEqual | Token::SlashEqual 
@@ -59,6 +59,24 @@ impl<'a> Parser<'a> {
             }
         } else {
             Ok(left)
+        }
+    }
+
+    // Conditional/Ternary (? :) operator
+    pub(crate) fn parse_conditional(&mut self) -> Result<Expr, String> {
+        let condition = self.parse_logical_or()?;
+
+        if self.match_token(|t| matches!(t, Token::Question)) {
+            let then_expr = self.parse_expr()?;
+            self.expect(|t| matches!(t, Token::Colon), "':' in conditional expression")?;
+            let else_expr = self.parse_conditional()?;
+            Ok(Expr::Conditional {
+                condition: Box::new(condition),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            })
+        } else {
+            Ok(condition)
         }
     }
 

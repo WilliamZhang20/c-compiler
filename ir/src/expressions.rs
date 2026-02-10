@@ -525,6 +525,10 @@ impl Lowerer {
             AstExpr::Cast(_ty, expr) => {
                 self.lower_expr(expr)
             }
+            AstExpr::Conditional { .. } => {
+             // TODO: Implement ternary operator properly with phi nodes
+                Err("Ternary/conditional operator (? :) not yet supported".to_string())
+            }
         }
     }
 

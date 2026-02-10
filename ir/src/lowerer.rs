@@ -195,9 +195,14 @@ impl Lowerer {
                     _ => Type::Int,
                 }
             }
-            AstExpr::Call { func: _, args: _ } => Type::Int, // Assume int return
+            AstExpr::Call { func: _, args:_ } => Type::Int, // Assume int return
             AstExpr::SizeOf(_) | AstExpr::SizeOfExpr(_) => Type::Int,
             AstExpr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
+            AstExpr::Conditional { then_expr, .. } => {
+                // Ternary operator type is the type of the then/else branches
+                // (In C, both branches should have compatible types)
+                self.get_expr_type(then_expr)
+            }
         }
     }
 

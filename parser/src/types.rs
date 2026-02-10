@@ -377,9 +377,14 @@ impl<'a> Parser<'a> {
         // Skip attributes before struct name
         let _ = self.parse_attributes()?;
         
-        let name = match self.advance() {
-            Some(Token::Identifier { value }) => value.clone(),
-            other => return Err(format!("expected struct tag, found {:?}", other)),
+        // Allow anonymous structs (no tag name)
+        let name = if let Some(Token::Identifier { value }) = self.peek() {
+            let n = value.clone();
+            self.advance();
+            n
+        } else {
+            // Anonymous struct - use empty string or generate unique name
+            String::new()
         };
         Ok((Type::Struct(name), TypeQualifiers::default()))
     }
@@ -388,9 +393,14 @@ impl<'a> Parser<'a> {
         // Skip attributes before union name
         let _ = self.parse_attributes()?;
         
-        let name = match self.advance() {
-            Some(Token::Identifier { value }) => value.clone(),
-            other => return Err(format!("expected union tag, found {:?}", other)),
+        // Allow anonymous unions (no tag name)
+        let name = if let Some(Token::Identifier { value }) = self.peek() {
+            let n = value.clone();
+            self.advance();
+            n
+        } else {
+            // Anonymous union - use empty string or generate unique name
+            String::new()
         };
         Ok((Type::Union(name), TypeQualifiers::default()))
     }

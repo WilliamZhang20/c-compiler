@@ -313,6 +313,11 @@ impl SemanticAnalyzer {
             Expr::PtrMember { expr, member: _ } => {
                 self.analyze_expr(expr)?;
             }
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                self.analyze_expr(condition)?;
+                self.analyze_expr(then_expr)?;
+                self.analyze_expr(else_expr)?;
+            }
         }
         Ok(())
     }

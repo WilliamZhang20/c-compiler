@@ -47,6 +47,7 @@ pub enum Token {
     Hash, // #
     Ellipsis, // ...
     Colon, // :
+    Question, // ?
     Dot, // .
     Ampersand, // &
     Tilde, // ~
@@ -285,6 +286,11 @@ pub enum Expr {
     PtrMember {
         expr: Box<Expr>,
         member: String,
+    },
+    Conditional {
+        condition: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
     },
 }
 

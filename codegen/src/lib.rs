@@ -78,7 +78,14 @@ impl Codegen {
         if !prog.global_strings.is_empty() {
             output.push_str(".data\n");
             for (label, content) in &prog.global_strings {
-                let escaped = content.replace("\"", "\\\"");
+                // Properly escape string for assembly output
+                let escaped = content
+                    .replace("\\", "\\\\")  // Backslash must be first
+                    .replace("\n", "\\n")   // Newline
+                    .replace("\r", "\\r")   // Carriage return
+                    .replace("\t", "\\t")   // Tab
+                    .replace("\"", "\\\"")  // Double quote
+                    .replace("\0", "\\0");  // Null (though .asciz adds one)
                 output.push_str(&format!("{}: .asciz \"{}\"\n", label, escaped));
             }
         }
