@@ -248,9 +248,14 @@ impl<'a> TypeParser for Parser<'a> {
 
             // Handle optional array in struct field
             let final_ty = if self.match_token(|t| matches!(t, Token::OpenBracket)) {
-                let size = match self.advance() {
-                    Some(Token::Constant { value }) => *value as usize,
-                    other => return Err(format!("expected constant array size, found {:?}", other)),
+                // Check if array size is provided (empty brackets [] are allowed)
+                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                    0 // Use 0 to represent unsized array
+                } else {
+                    match self.advance() {
+                        Some(Token::Constant { value }) => *value as usize,
+                        other => return Err(format!("[parse_struct_definition] expected constant array size, found {:?}", other)),
+                    }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                 Type::Array(Box::new(ty), size)
@@ -303,9 +308,14 @@ impl<'a> TypeParser for Parser<'a> {
 
             // Handle optional array in union field
             let final_ty = if self.match_token(|t| matches!(t, Token::OpenBracket)) {
-                let size = match self.advance() {
-                    Some(Token::Constant { value }) => *value as usize,
-                    other => return Err(format!("expected constant array size, found {:?}", other)),
+                // Check if array size is provided (empty brackets [] are allowed)
+                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                    0 // Use 0 to represent unsized array
+                } else {
+                    match self.advance() {
+                        Some(Token::Constant { value }) => *value as usize,
+                        other => return Err(format!("[parse_union_definition] expected constant array size, found {:?}", other)),
+                    }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                 Type::Array(Box::new(ty), size)

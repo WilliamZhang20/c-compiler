@@ -70,7 +70,14 @@ fn main() {
         return;
     }
 
-    let program = parser::parse_tokens(&tokens).expect("Parsing failed");
+    let mut program = parser::parse_tokens(&tokens).expect("Parsing failed");
+    
+    // Deduplicate global variables (common with extern declarations)
+    {
+        let mut seen = std::collections::HashSet::new();
+        program.globals.retain(|g| seen.insert(g.name.clone()));
+    }
+    
     if stop_after_parse {
         println!("AST: {:?}", program);
         if !keep_intermediates {
@@ -124,7 +131,7 @@ fn preprocess(input_path: &str, input_file: &Path) {
     preprocessed_path.push_str(".i");
 
     let exit_code = Command::new("gcc")
-        .args(["-E", "-P", {input_path}, "-o", {&preprocessed_path}])
+        .args(["-E", "-P", "-Iinclude", input_path, "-o", &preprocessed_path])
         .status()
         .expect("failed to execute process");
 

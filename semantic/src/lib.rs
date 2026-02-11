@@ -56,7 +56,8 @@ impl SemanticAnalyzer {
         
         for global in &program.globals {
             if self.global_scope.contains_key(&global.name) {
-                return Err(format!("Redeclaration of global variable {}", global.name));
+                // Allow redeclarations - just skip this one (common with extern vs definition)
+                continue;
             }
             
             // Validate restrict on pointers only

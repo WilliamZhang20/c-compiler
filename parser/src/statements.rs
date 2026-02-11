@@ -231,25 +231,48 @@ impl<'a> Parser<'a> {
                 // It's a function pointer
                 let name = match self.advance() {
                     Some(Token::Identifier { value }) => value.clone(),
-                    other => {
-                        return Err(format!(
-                            "expected identifier after '(*' in function pointer, found {:?}",
-                            other
-                        ))
+                    _other => {
+                        // Can't parse this function pointer, bail out
+                        return Err("Cannot parse function pointer declaration".to_string());
                     }
                 };
-                self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-                self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                
+                if !self.match_token(|t| matches!(t, Token::CloseParenthesis)) {
+                    // Malformed function pointer
+                    return Err("Expected ')' after function pointer name".to_string());
+                }
+                
+                if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                    // Malformed function pointer
+                    return Err("Expected '(' for function pointer parameters".to_string());
+                }
 
                 // Parse parameter types
                 let mut param_types = Vec::new();
                 if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
                     loop {
                         let param_type = self.parse_type()?;
-                        param_types.push(param_type);
+                        param_types.push(param_type.clone());
                         // Optional parameter name
                         if self.check(&|t| matches!(t, Token::Identifier { .. })) {
                             self.advance();
+                        }
+                        // Handle array syntax: type name[] or type[]
+                        if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                            // Check if array size is provided
+                            let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                                0 // Use 0 to represent unsized array
+                            } else {
+                                match self.advance() {
+                                    Some(Token::Constant { value }) => *value as usize,
+                                    other => return Err(format!("expected constant array size in function pointer parameter, found {:?}", other)),
+                                }
+                            };
+                            self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                            // Update the last parameter type to be an array
+                            if let Some(last_param) = param_types.last_mut() {
+                                *last_param = Type::Array(Box::new(param_type), size);
+                            }
                         }
                         if !self.match_token(|t| matches!(t, Token::Comma)) {
                             break;
@@ -289,9 +312,14 @@ impl<'a> Parser<'a> {
 
         // Check for array
         if self.match_token(|t| matches!(t, Token::OpenBracket)) {
-            let size = match self.advance() {
-                Some(Token::Constant { value }) => *value as usize,
-                other => return Err(format!("expected constant array size, found {:?}", other)),
+            // Check if array size is provided (empty brackets [] are allowed)
+            let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                0 // Use 0 to represent unsized array
+            } else {
+                match self.advance() {
+                    Some(Token::Constant { value }) => *value as usize,
+                    other => return Err(format!("[parse_declaration] expected constant array size, found {:?}", other)),
+                }
             };
             self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
             r#type = Type::Array(Box::new(r#type), size);
