@@ -364,7 +364,7 @@ impl Codegen {
 
     fn gen_instr(&mut self, inst: &IrInstruction) {
         match inst {
-            IrInstruction::Copy { dest, src } => {
+            IrInstruction::Copy { dest, src} => {
                 let d_op = self.var_to_op(*dest);
                 // Special handling for Global sources (function addresses, globals)
                 if let Operand::Global(name) = src {
@@ -383,7 +383,13 @@ impl Codegen {
                 }
                 
                 let s_op = self.operand_to_op(src);
-                if matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..)) {
+                // Check if source is memory or if we need intermediate register
+                // x86 doesn't allow memory-to-memory moves
+                let is_src_mem = matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..));
+                let is_dest_mem = matches!(d_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..));
+                
+                if is_src_mem || (is_dest_mem && !matches!(s_op, X86Operand::Imm(..) | X86Operand::Reg(..))) {
+                    // Use intermediate register for memory operands or complex addressing
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 } else if matches!(s_op, X86Operand::Label(..)) {
@@ -801,7 +807,7 @@ impl Codegen {
     fn gen_gep(&mut self, dest: VarId, base: &Operand, index: &Operand, element_type: &Type) {
         let i_op = self.operand_to_op(index);
         let d_op = self.var_to_op(dest);
-        let elem_size = self.get_element_size(element_type) as i64;
+        let elem_size = self.get_type_size(element_type) as i64;
         
         match base {
             Operand::Global(name) => {
@@ -996,10 +1002,7 @@ impl Codegen {
         calculator.get_type_size(r#type)
     }
 
-    fn get_element_size(&self, r#type: &model::Type) -> usize {
-        let calculator = TypeCalculator::new(&self.structs, &self.unions);
-        calculator.get_element_size(r#type)
-    }
+
 
     fn gen_terminator(&mut self, term: &IrTerminator, func_name: &str, func: &IrFunction) {
         match term {

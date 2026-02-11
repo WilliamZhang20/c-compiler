@@ -74,6 +74,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Debug test for specific file - skip by default
     fn debug_tokens() {
         let src = std::fs::read_to_string("../hello_world.i").unwrap();
         let tokens = crate::lex(&src).unwrap();

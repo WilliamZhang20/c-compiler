@@ -128,10 +128,16 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
         ) = (&instructions[i], &instructions[i + 1]) {
             if std::mem::discriminant(temp_reg) == std::mem::discriminant(temp_reg2) {
                 if !is_reg_used_after(instructions, i + 2, temp_reg) {
-                    // Replace both with direct move
-                    instructions[i] = X86Instr::Mov(dest.clone(), src.clone());
-                    instructions.remove(i + 1);
-                    return true;
+                    // Check if this would create a memory-to-memory move (illegal in x86)
+                    let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    
+                    if !is_src_mem || !is_dest_mem {
+                        // Safe to optimize: at least one operand is not memory
+                        instructions[i] = X86Instr::Mov(dest.clone(), src.clone());
+                        instructions.remove(i + 1);
+                        return true;
+                    }
                 }
             }
         }
@@ -233,53 +239,6 @@ fn matches_reg(operand: &X86Operand, reg: &X86Reg) -> bool {
         X86Operand::Mem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         X86Operand::DwordMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         X86Operand::FloatMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        _ => false,
-    }
-}
-
-#[allow(dead_code)]
-fn same_memory_location(op1: &X86Operand, op2: &X86Operand) -> bool {
-    match (op1, op2) {
-        (X86Operand::Mem(r1, off1), X86Operand::Mem(r2, off2)) => {
-            std::mem::discriminant(r1) == std::mem::discriminant(r2) && off1 == off2
-        }
-        (X86Operand::DwordMem(r1, off1), X86Operand::DwordMem(r2, off2)) => {
-            std::mem::discriminant(r1) == std::mem::discriminant(r2) && off1 == off2
-        }
-        (X86Operand::Mem(r1, off1), X86Operand::DwordMem(r2, off2)) => {
-            std::mem::discriminant(r1) == std::mem::discriminant(r2) && off1 == off2
-        }
-        (X86Operand::DwordMem(r1, off1), X86Operand::Mem(r2, off2)) => {
-            std::mem::discriminant(r1) == std::mem::discriminant(r2) && off1 == off2
-        }
-        _ => false,
-    }
-}
-
-#[allow(dead_code)]
-fn writes_to_register(inst: &X86Instr, reg: &X86Reg) -> bool {
-    match inst {
-        X86Instr::Mov(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Add(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Sub(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Imul(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Xor(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::And(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Or(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Shl(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Shr(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Set(_, X86Operand::Reg(r)) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Lea(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Movsx(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Movss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Addss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Subss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Mulss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Divss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Cvtsi2ss(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Cvttss2si(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Xorps(X86Operand::Reg(r), _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
-        X86Instr::Pop(r) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         _ => false,
     }
 }

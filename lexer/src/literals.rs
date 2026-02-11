@@ -10,6 +10,16 @@ pub fn parse_char_literal(content: &str) -> Result<i64, String> {
             Some('\\') => Ok(92), // backslash
             Some('\'') => Ok(39), // single quote
             Some('"') => Ok(34),  // double quote
+            Some('a') => Ok(7),   // alert/bell
+            Some('b') => Ok(8),   // backspace
+            Some('f') => Ok(12),  // form feed
+            Some('v') => Ok(11),  // vertical tab
+            Some('x') => {
+                // Hexadecimal escape like '\x1F'
+                let hex = &content[2..];
+                i64::from_str_radix(hex, 16)
+                    .map_err(|_| format!("Invalid hex escape sequence: {}", content))
+            }
             Some(c) if c.is_ascii_digit() => {
                 // Octal escape sequence like '\077'
                 let octal = content[1..].chars()

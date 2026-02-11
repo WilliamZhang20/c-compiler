@@ -204,39 +204,3 @@ fn instruction_uses_var(instr: &Instruction, var_id: VarId) -> bool {
 fn operand_uses_var(operand: &Operand, var_id: VarId) -> bool {
     matches!(operand, Operand::Var(id) if *id == var_id)
 }
-
-/// Collect all loads and stores for promotable allocas
-fn collect_loads_stores(
-    func: &Function,
-    promotable: &HashSet<VarId>,
-) -> (
-    HashMap<BlockId, HashMap<VarId, Vec<VarId>>>,  // block -> alloca -> [load destinations]
-    HashMap<BlockId, HashMap<VarId, VarId>>,        // block -> alloca -> store source
-) {
-    let mut loads: HashMap<BlockId, HashMap<VarId, Vec<VarId>>> = HashMap::new();
-    let mut stores: HashMap<BlockId, HashMap<VarId, VarId>> = HashMap::new();
-    
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            match instr {
-                Instruction::Load { dest, addr: Operand::Var(alloca_id), .. } 
-                    if promotable.contains(alloca_id) => {
-                    loads.entry(block.id)
-                        .or_insert_with(HashMap::new)
-                        .entry(*alloca_id)
-                        .or_insert_with(Vec::new)
-                        .push(*dest);
-                }
-                Instruction::Store { addr: Operand::Var(alloca_id), src: Operand::Var(src_var), .. } 
-                    if promotable.contains(alloca_id) => {
-                    stores.entry(block.id)
-                        .or_insert_with(HashMap::new)
-                        .insert(*alloca_id, *src_var);
-                }
-                _ => {}
-            }
-        }
-    }
-    
-    (loads, stores)
-}

@@ -16,7 +16,6 @@ mod propagation;
 mod cse;
 mod dce;
 mod folding;
-// mod load_forwarding;
 mod utils;
 
 use ir::IRProgram;
@@ -25,8 +24,6 @@ use strength::strength_reduce_function;
 use propagation::copy_propagation;
 use cse::common_subexpression_elimination;
 use folding::optimize_function;
-// use load_forwarding::load_forwarding;
-// use std::collections::HashSet;
 
 /// Main optimization entry point
 ///
@@ -46,22 +43,11 @@ use folding::optimize_function;
 /// # Returns
 /// * Optimized IR program with improved code quality and performance
 pub fn optimize(mut program: IRProgram) -> IRProgram {
-    // Collect volatile globals to prevent aggressive optimization
-    // (Unused for now)
-    /*
-    let volatile_globals: HashSet<String> = program.globals
-        .iter()
-        .filter(|g| g.qualifiers.is_volatile)
-        .map(|g| g.name.clone())
-        .collect();
-    */
-    
     for func in &mut program.functions {
         // ir::mem2reg(func);  // TODO: Fix mem2reg - currently breaks code generation
         algebraic_simplification(func);
         strength_reduce_function(func);
         copy_propagation(func);
-        // load_forwarding(func);  // Disabled - helps some benchmarks but hurts matmul
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
     }

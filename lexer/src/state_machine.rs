@@ -6,6 +6,7 @@ pub struct StateMachineLexer<'a> {
     input: &'a [u8],
     pos: usize,
     token_start: usize,
+    at_line_start: bool,
 }
 
 impl<'a> StateMachineLexer<'a> {
@@ -14,6 +15,7 @@ impl<'a> StateMachineLexer<'a> {
             input: input.as_bytes(),
             pos: 0,
             token_start: 0,
+            at_line_start: true,
         }
     }
 
@@ -48,24 +50,44 @@ impl<'a> StateMachineLexer<'a> {
             }
             '/' if self.peek(1) == Some('*') => {
                 self.skip_block_comment()?;
+                self.at_line_start = false;
                 Ok(None)
             }
             // Preprocessor directives - skip entire line
             '#' if self.is_start_of_line() => {
                 self.skip_preprocessor_line();
+                self.at_line_start = false;
                 Ok(None)
             }
             // String literals
-            '"' => self.lex_string(),
+            '"' => {
+                self.at_line_start = false;
+                self.lex_string()
+            }
             // Character literals
-            '\'' => self.lex_char(),
+            '\'' => {
+                self.at_line_start = false;
+                self.lex_char()
+            }
             // Numbers
-            '0'..='9' => self.lex_number(),
-            '.' if self.peek(1).map_or(false, |c| c.is_ascii_digit()) => self.lex_number(),
+            '0'..='9' => {
+                self.at_line_start = false;
+                self.lex_number()
+            }
+            '.' if self.peek(1).map_or(false, |c| c.is_ascii_digit()) => {
+                self.at_line_start = false;
+                self.lex_number()
+            }
             // Identifiers and keywords
-            'a'..='z' | 'A'..='Z' | '_' => self.lex_identifier(),
+            'a'..='z' | 'A'..='Z' | '_' => {
+                self.at_line_start = false;
+                self.lex_identifier()
+            }
             // Operators and punctuation
-            _ => self.lex_operator_or_punctuation(),
+            _ => {
+                self.at_line_start = false;
+                self.lex_operator_or_punctuation()
+            }
         }
     }
 
@@ -85,26 +107,18 @@ impl<'a> StateMachineLexer<'a> {
     fn skip_whitespace(&mut self) {
         while self.pos < self.input.len() {
             match self.current_char() {
-                ' ' | '\t' | '\n' | '\r' => self.pos += 1,
+                ' ' | '\t' | '\r' => self.pos += 1,
+                '\n' => {
+                    self.pos += 1;
+                    self.at_line_start = true;
+                }
                 _ => break,
             }
         }
     }
 
     fn is_start_of_line(&self) -> bool {
-        // Check if we're at the very beginning or after a newline
-        if self.pos == 0 {
-            return true;
-        }
-        // Look backward for the last non-whitespace character
-        for i in (0..self.pos).rev() {
-            match self.input[i] as char {
-                ' ' | '\t' | '\r' => continue,
-                '\n' => return true,
-                _ => return false,
-            }
-        }
-        true
+        self.at_line_start
     }
 
     fn skip_line_comment(&mut self) {
@@ -149,25 +163,61 @@ impl<'a> StateMachineLexer<'a> {
                     self.pos += 1;
                     return Ok(Some(Token::StringLiteral { value }));
                 }
-                '\\' if self.peek(1) == Some('"') => {
-                    self.pos += 2;
-                    value.push('"');
-                }
-                '\\' if self.peek(1) == Some('\\') => {
-                    self.pos += 2;
-                    value.push('\\');
-                }
-                '\\' if self.peek(1) == Some('n') => {
-                    self.pos += 2;
-                    value.push('\n');
-                }
-                '\\' if self.peek(1) == Some('t') => {
-                    self.pos += 2;
-                    value.push('\t');
-                }
-                '\\' if self.peek(1) == Some('r') => {
-                    self.pos += 2;
-                    value.push('\r');
+                '\\' => {
+                    self.pos += 1;
+                    if let Some(ch) = self.peek(0) {
+                        match ch {
+                            '"' => { self.pos += 1; value.push('"'); }
+                            '\\' => { self.pos += 1; value.push('\\'); }
+                            'n' => { self.pos += 1; value.push('\n'); }
+                            't' => { self.pos += 1; value.push('\t'); }
+                            'r' => { self.pos += 1; value.push('\r'); }
+                            '0' => { self.pos += 1; value.push('\0'); }
+                            'a' => { self.pos += 1; value.push('\x07'); }
+                            'b' => { self.pos += 1; value.push('\x08'); }
+                            'f' => { self.pos += 1; value.push('\x0C'); }
+                            'v' => { self.pos += 1; value.push('\x0B'); }
+                            'x' => {
+                                // Hexadecimal escape \xHH
+                                self.pos += 1;
+                                let hex_start = self.pos;
+                                while self.pos < self.input.len() && self.pos - hex_start < 2 {
+                                    if self.current_char().is_ascii_hexdigit() {
+                                        self.pos += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if self.pos > hex_start {
+                                    let hex_str = std::str::from_utf8(&self.input[hex_start..self.pos])
+                                        .map_err(|_| "Invalid UTF-8 in hex escape")?;
+                                    let code = u8::from_str_radix(hex_str, 16)
+                                        .map_err(|_| format!("Invalid hex escape: \\x{}", hex_str))?;
+                                    value.push(code as char);
+                                }
+                            }
+                            '0'..='7' => {
+                                // Octal escape \ooo
+                                let octal_start = self.pos;
+                                while self.pos < self.input.len() && self.pos - octal_start < 3 {
+                                    if matches!(self.current_char(), '0'..='7') {
+                                        self.pos += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let octal_str = std::str::from_utf8(&self.input[octal_start..self.pos])
+                                    .map_err(|_| "Invalid UTF-8 in octal escape")?;
+                                let code = u8::from_str_radix(octal_str, 8)
+                                    .map_err(|_| format!("Invalid octal escape: \\{}", octal_str))?;
+                                value.push(code as char);
+                            }
+                            _ => {
+                                self.pos += 1;
+                                value.push(ch);
+                            }
+                        }
+                    }
                 }
                 ch => {
                     self.pos += 1;
@@ -195,10 +245,19 @@ impl<'a> StateMachineLexer<'a> {
                 let escape_char = self.current_char();
                 self.pos += 1;
                 
-                // For octal sequences, consume additional digits
-                if escape_char.is_ascii_digit() {
+                // For octal sequences, consume additional digits (up to 3 total)
+                if escape_char.is_ascii_digit() && escape_char < '8' {
                     while self.pos < self.input.len() 
                           && self.current_char().is_ascii_digit() 
+                          && self.current_char() < '8'
+                          && self.pos - content_start < 4 {
+                        self.pos += 1;
+                    }
+                }
+                // For hex sequences \\xHH, consume hex digits
+                else if escape_char == 'x' {
+                    while self.pos < self.input.len() 
+                          && self.current_char().is_ascii_hexdigit()
                           && self.pos - content_start < 4 {
                         self.pos += 1;
                     }
