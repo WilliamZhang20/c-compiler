@@ -15,7 +15,7 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 ### How to Run
 
-The most exciting part. Currently only works on Windows, Linux compatability is coming soon. Run `release.exe` and point to any C file. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP.
+The most exciting part. Currently only works on Windows, Linux compatability is coming soon. Run `release.exe` and point to any C file. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP. The ultimate stress test may not necessarily be Linux, but rather `donut.c`.
 
 ### Architecture
 

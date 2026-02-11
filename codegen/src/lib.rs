@@ -374,6 +374,16 @@ impl Codegen {
                     return;
                 }
                 
+                // Special handling for alloca sources (array decay to pointer)
+                if let Operand::Var(src_var) = src {
+                    if let Some(buffer_offset) = self.alloca_buffers.get(src_var) {
+                        // This is an alloca (array) - get its address with LEA
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                        return;
+                    }
+                }
+                
                 // Special handling for FloatConstant - load with movss into xmm0 then store to stack
                 if let Operand::FloatConstant(_) = src {
                     let label = self.operand_to_op(src);
@@ -383,6 +393,20 @@ impl Codegen {
                 }
                 
                 let s_op = self.operand_to_op(src);
+                
+                // ADDITIONAL CHECK: If s_op is a Mem operand that matches an alloca buffer offset,
+                // use LEA to get the address instead of MOV to load the value
+                if let X86Operand::Mem(X86Reg::Rbp, offset) = s_op {
+                    // Check if this offset corresponds to any alloca buffer
+                    let is_alloca_buffer = self.alloca_buffers.values().any(|&buf_offset| buf_offset == offset);
+                    if is_alloca_buffer {
+                        // This is referencing an alloca buffer - use LEA to get address
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset)));
+                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                        return;
+                    }
+                }
+                
                 // Check if source is memory or if we need intermediate register
                 // x86 doesn't allow memory-to-memory moves
                 let is_src_mem = matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..));
@@ -753,8 +777,39 @@ impl Codegen {
                 }
             }
         } else {
-            let s_op = self.operand_to_op(src);
-            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+            // Check if source is an alloca (array decay to pointer)
+            if let Operand::Var(src_var) = src {
+                if let Some(buffer_offset) = self.alloca_buffers.get(src_var) {
+                    // This is an alloca - get its address with LEA
+                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
+                } else {
+                    let s_op = self.operand_to_op(src);
+                    // Check if s_op references an alloca buffer offset
+                    if let X86Operand::Mem(X86Reg::Rbp, offset) = s_op {
+                        let is_alloca_buffer = self.alloca_buffers.values().any(|&buf_offset| buf_offset == offset);
+                        if is_alloca_buffer {
+                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::Mem(X86Reg::Rbp, offset)));
+                        } else {
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+                        }
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+                    }
+                }
+            } else {
+                let s_op = self.operand_to_op(src);
+                // Check if s_op references an alloca buffer offset
+                if let X86Operand::Mem(X86Reg::Rbp, offset) = s_op {
+                    let is_alloca_buffer = self.alloca_buffers.values().any(|&buf_offset| buf_offset == offset);
+                    if is_alloca_buffer {
+                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::Mem(X86Reg::Rbp, offset)));
+                    } else {
+                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+                    }
+                } else {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
+                }
+            }
         }
 
         match addr {
@@ -814,8 +869,15 @@ impl Codegen {
                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Label(name.clone())));
             }
             Operand::Var(var) => {
-                let b_op = self.var_to_op(*var);
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
+                // Check if this is an alloca (array) - get its address, not its value
+                if let Some(buffer_offset) = self.alloca_buffers.get(var) {
+                    // This is an alloca - LEA to get the buffer address
+                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
+                } else {
+                    // Regular pointer variable - load its value
+                    let b_op = self.var_to_op(*var);
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
+                }
             }
             Operand::Constant(c) => {
                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(*c)));
@@ -1088,9 +1150,17 @@ impl Codegen {
                 for (pred_id, src_var) in preds {
                     if *pred_id == from {
                         let d_op = self.var_to_op(*dest);
-                        let s_op = self.var_to_op(*src_var);
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                        // Check if source is an alloca (array decay to pointer in phi)
+                        if let Some(buffer_offset) = self.alloca_buffers.get(src_var) {
+                            // Get address of alloca with LEA
+                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
+                            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                        } else {
+                            // Regular variable - load its value
+                            let s_op = self.var_to_op(*src_var);
+                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                        }
                     }
                 }
             }
