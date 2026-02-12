@@ -6,6 +6,8 @@ use crate::regalloc::{PhysicalReg, allocate_registers};
 use crate::instructions::InstructionGenerator;
 use crate::types::TypeCalculator;
 use crate::float_ops::{gen_float_binary_op, gen_float_unary_op};
+use crate::memory_ops::{gen_load, gen_store, gen_gep};
+use crate::call_ops::{gen_call, gen_indirect_call};
 
 /// Handles generation of code for a single function
 pub struct FunctionGenerator<'a> {
@@ -398,19 +400,19 @@ impl<'a> FunctionGenerator<'a> {
                 self.var_types.insert(*dest, Type::Pointer(Box::new(r#type.clone())));
             }
             IrInstruction::Load { dest, addr, value_type } => {
-                self.gen_load(*dest, addr, value_type);
+                gen_load(self, *dest, addr, value_type);
             }
             IrInstruction::Store { addr, src, value_type } => {
-                self.gen_store(addr, src, value_type);
+                gen_store(self, addr, src, value_type);
             }
             IrInstruction::GetElementPtr { dest, base, index, element_type } => {
-                self.gen_gep(*dest, base, index, element_type);
+                gen_gep(self, *dest, base, index, element_type);
             }
             IrInstruction::Call { dest, name, args } => {
-                self.gen_call(dest, name, args);
+                gen_call(self, dest, name, args);
             }
             IrInstruction::IndirectCall { dest, func_ptr, args } => {
-                self.gen_indirect_call(dest, func_ptr, args);
+                gen_indirect_call(self, dest, func_ptr, args);
             }
             IrInstruction::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
                 self.gen_inline_asm(template, outputs, inputs, clobbers, *is_volatile);
@@ -419,319 +421,7 @@ impl<'a> FunctionGenerator<'a> {
     }
 
 
-    fn gen_load(&mut self, dest: VarId, addr: &Operand, value_type: &model::Type) {
-        self.var_types.insert(dest, value_type.clone());
-        let d_op = self.var_to_op(dest);
-        let is_float = matches!(value_type, Type::Float | Type::Double);
-        let use_dword = matches!(value_type, Type::Int | Type::Float);
-        
-        // Optimization: if loading directly from an alloca (stack slot), just read it
-        if let Operand::Var(var) = addr {
-             if let Some(buffer_offset) = self.alloca_buffers.get(var) {
-                 if is_float {
-                     self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset)));
-                     self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                 } else {
-                     if use_dword {
-                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rbp, *buffer_offset)));
-                         self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-                     } else {
-                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
-                     }
-                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                 }
-                 return;
-             }
-        }
 
-        // Optimization: if loading directly from a global, use RIP-relative load
-        if let Operand::Global(name) = addr {
-             if is_float {
-                 self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::GlobalMem(name.clone())));
-                 self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-             } else {
-                 if use_dword {
-                     // 32-bit int: Mov EAX, [rip+name]
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::GlobalMem(name.clone())));
-                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-                 } else {
-                     // 64-bit int/ptr: Mov RAX, [rip+name]
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-                 }
-                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-             }
-             return;
-        }
-        
-        // General case: Load address into RAX, then dereference
-        if let Operand::Var(var) = addr {
-             let v_op = self.var_to_op(*var);
-             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), v_op));
-        } else {
-             let op = self.operand_to_op(addr);
-             match op {
-                 X86Operand::Label(l) | X86Operand::RipRelLabel(l) => {
-                     self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(l)));
-                 }
-                 _ => {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), op));
-                 }
-             }
-        }
-        
-        if is_float {
-            self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
-            self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-        } else {
-             if use_dword {
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
-                 self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
-             } else {
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rax, 0)));
-             }
-             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-        }
-    }
-
-    fn gen_store(&mut self, addr: &Operand, src: &Operand, value_type: &model::Type) {
-        let is_float = matches!(value_type, Type::Float | Type::Double);
-        let use_dword = matches!(value_type, Type::Int | Type::Float);
-
-        // Load src into register
-        if is_float {
-            let s_op = self.operand_to_op(src);
-             match s_op {
-                 X86Operand::Reg(X86Reg::Xmm0) => {},
-                 _ => self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op))
-             }
-        } else {
-            let s_op = self.operand_to_op(src);
-             // Handle alloca address loading vs value loading
-             if let Operand::Global(name) = src {
-                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::RipRelLabel(name.clone())));
-             } else if let Operand::Var(v) = src {
-                 if let Some(off) = self.alloca_buffers.get(v) {
-                     self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::Mem(X86Reg::Rbp, *off)));
-                 } else {
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
-                 }
-             } else {
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), s_op));
-             }
-        }
-
-        // Load address into RAX
-        if let Operand::Var(var) = addr {
-             if let Some(buffer_offset) = self.alloca_buffers.get(var) {
-                  self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
-             } else {
-                 let b_op = self.var_to_op(*var);
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
-             }
-        } else {
-             let op = self.operand_to_op(addr);
-             if let X86Operand::Label(l) = &op {
-                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(l.clone())));
-             } else if let X86Operand::RipRelLabel(l) = &op {
-                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(l.clone())));
-             } else {
-                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), op));
-             }
-        }
-        
-        // Store
-        if is_float {
-            self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
-        } else if use_dword {
-            self.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
-        } else {
-            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Rcx)));
-        }
-    }
-
-    fn gen_gep(&mut self, dest: VarId, base: &Operand, index: &Operand, element_type: &Type) {
-        let i_op = self.operand_to_op(index);
-        let d_op = self.var_to_op(dest);
-        let elem_size = self.get_type_size(element_type) as i64;
-        
-        match base {
-            Operand::Global(name) => {
-                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-            }
-            Operand::Var(var) => {
-                if let Some(buffer_offset) = self.alloca_buffers.get(var) {
-                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
-                } else {
-                    let b_op = self.var_to_op(*var);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
-                }
-            }
-            _ => {}
-        }
-
-        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
-        if elem_size != 1 {
-            self.asm.push(X86Instr::Imul(X86Operand::Reg(X86Reg::Rcx), X86Operand::Imm(elem_size)));
-        }
-        self.asm.push(X86Instr::Add(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
-        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-    }
-
-    fn gen_call(&mut self, dest: &Option<VarId>, name: &str, args: &[Operand]) {
-        let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-        let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
-        
-        for (i, arg) in args.iter().enumerate() {
-            let is_float = match arg {
-                Operand::FloatConstant(_) => true,
-                Operand::Var(v) => {
-                    self.var_types.get(v).map_or(false, |t| matches!(t, Type::Float | Type::Double))
-                }
-                _ => false,
-            };
-            
-            if i < 4 {
-                if is_float {
-                    let label = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
-                } else {
-                    let mut handled = false;
-                    if let Operand::Var(var) = arg {
-                         if let Some(off) = self.alloca_buffers.get(var) {
-                             self.asm.push(X86Instr::Lea(X86Operand::Reg(param_regs[i].clone()), X86Operand::Mem(X86Reg::Rbp, *off)));
-                             handled = true;
-                         }
-                    }
-                    if !handled {
-                        if let Operand::Global(name) = arg {
-                            self.asm.push(X86Instr::Lea(X86Operand::Reg(param_regs[i].clone()), X86Operand::RipRelLabel(name.clone())));
-                        } else {
-                            let val = self.operand_to_op(arg);
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
-                        }
-                    }
-                }
-            } else {
-                let offset = 32 + (i - 4) * 8;
-                if is_float {
-                    let label = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
-                    self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
-                } else {
-                    let mut handled = false;
-                    if let Operand::Var(var) = arg {
-                         if let Some(off) = self.alloca_buffers.get(var) {
-                             self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *off)));
-                             handled = true;
-                         }
-                    }
-                    if !handled {
-                        if let Operand::Global(name) = arg {
-                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-                        } else {
-                            let val = self.operand_to_op(arg);
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
-                        }
-                    }
-                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
-                }
-            }
-        }
-        
-        self.asm.push(X86Instr::Call(name.to_string()));
-        
-        if let Some(d) = dest {
-            let returns_float = self.func_return_types.get(name)
-                .map_or(false, |ret_type| matches!(ret_type, Type::Float | Type::Double));
-            
-            if returns_float {
-                self.var_types.insert(*d, Type::Float);
-            }
-            
-            let d_op = self.var_to_op(*d);
-            if returns_float {
-                self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-            } else {
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-            }
-        }
-    }
-
-    fn gen_indirect_call(&mut self, dest: &Option<VarId>, func_ptr: &Operand, args: &[Operand]) {
-        let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-        let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
-        
-        let fp_op = self.operand_to_op(func_ptr);
-        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
-        
-        for (i, arg) in args.iter().enumerate() {
-            let is_float = match arg {
-                Operand::FloatConstant(_) => true,
-                Operand::Var(v) => {
-                    self.var_types.get(v).map_or(false, |t| matches!(t, Type::Float | Type::Double))
-                }
-                _ => false,
-            };
-
-            if i < 4 {
-                if is_float {
-                    let label = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
-                } else {
-                    let val = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
-                }
-            } else {
-                let offset = 32 + (i - 4) * 8;
-                if is_float {
-                    let label = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
-                    self.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
-                } else {
-                    let val = self.operand_to_op(arg);
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
-                    self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Rax)));
-                }
-            }
-        }
-        
-        self.asm.push(X86Instr::CallIndirect(X86Operand::Reg(X86Reg::R10)));
-        
-        if let Some(d) = dest {
-             let mut is_float_ret = false;
-             
-             // Try to infer return type from function pointer type
-             if let Operand::Var(v) = func_ptr {
-                 if let Some(t) = self.var_types.get(v) {
-                     if let Type::FunctionPointer { return_type, .. } = t {
-                         if matches!(**return_type, Type::Float | Type::Double) {
-                             is_float_ret = true;
-                         }
-                         // Store the inferred type for the destination variable
-                         self.var_types.insert(*d, *return_type.clone());
-                     }
-                 }
-             }
-
-            // Fallback to checking destination type if already known
-            if !is_float_ret {
-                if let Some(t) = self.var_types.get(d) {
-                    if matches!(t, Type::Float | Type::Double) {
-                        is_float_ret = true;
-                    }
-                }
-            }
-            
-            if is_float_ret {
-                self.var_types.insert(*d, Type::Float);
-                let dest_op = self.var_to_op(*d);
-                self.asm.push(X86Instr::Movss(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
-            } else {
-                let dest_op = self.var_to_op(*d);
-                self.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
-            }
-        }
-    }
 
     fn gen_inline_asm(&mut self, template: &str, outputs: &[VarId], inputs: &[Operand], _clobbers: &[String], _is_volatile: bool) {
         let mut asm_code = template.to_string();
@@ -817,7 +507,7 @@ impl<'a> FunctionGenerator<'a> {
         label
     }
 
-    fn get_type_size(&self, r#type: &model::Type) -> usize {
+    pub(crate) fn get_type_size(&self, r#type: &model::Type) -> usize {
         let calculator = TypeCalculator::new(self.structs, self.unions);
         calculator.get_type_size(r#type)
     }

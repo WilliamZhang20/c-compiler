@@ -5,6 +5,8 @@ mod types;
 mod instructions;
 mod function;
 mod float_ops;
+mod memory_ops;
+mod call_ops;
 
 use model::Type;
 use ir::IRProgram;
