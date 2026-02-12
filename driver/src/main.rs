@@ -72,9 +72,7 @@ fn main() {
          std::process::exit(1);
     }
 
-    log!("Step 1: Preprocessing...");
     let preprocessed_path = preprocess(&input_path, input_file);
-    log!("Step 1: Done");
 
     let cleanup = |path: &str| {
         if !keep_intermediates {
@@ -84,9 +82,7 @@ fn main() {
 
     let src = std::fs::read_to_string(&preprocessed_path).expect("failed to read preprocessed file");
 
-    log!("Step 2: Lexing...");
     let tokens = lexer::lex(&src).expect("Lexing failed");
-    log!("Step 2: Done");
     
     if stop_after_lex {
         println!("Tokens: {:?}", tokens);
@@ -94,9 +90,7 @@ fn main() {
         return;
     }
 
-    log!("Step 3: Parsing...");
     let mut program = parser::parse_tokens(&tokens).expect("Parsing failed");
-    log!("Step 3: Done");
     
     // Deduplicate global variables (common with extern declarations)
     {
@@ -110,19 +104,13 @@ fn main() {
         return;
     }
 
-    log!("Step 4: Semantic Analysis...");
     let mut analyzer = semantic::SemanticAnalyzer::new();
     analyzer.analyze(&program).expect("Semantic analysis failed");
-    log!("Step 4: Done");
 
-    log!("Step 5: IR Lowering...");
     let mut lowerer = ir::Lowerer::new();
     let ir_prog = lowerer.lower_program(&program).expect("IR lowering failed");
-    log!("Step 5: Done");
     
-    log!("Step 6: Optimization...");
     let ir_prog = optimizer::optimize(ir_prog);
-    log!("Step 6: Done");
 
     if stop_after_codegen {
         println!("IR: {:?}", ir_prog);
@@ -130,10 +118,8 @@ fn main() {
         return;
     }
 
-    log!("Step 7: Code Generation...");
     let mut codegen = codegen::Codegen::new();
     let asm = codegen.gen_program(&ir_prog);
-    log!("Step 7: Done");
 
     let mut asm_path = input_file.file_stem().unwrap().to_string_lossy().into_owned();
     asm_path.push_str(".s");
@@ -144,9 +130,7 @@ fn main() {
         return;
     }
 
-    log!("Step 8: Linking...");
     run_linker(&input_file, &asm_path, args.safe_malloc);
-    log!("Step 8: Done");
     println!("Compilation successful. Generated executable: {}", input_file.file_stem().unwrap().to_string_lossy());
 
     // Cleanup
