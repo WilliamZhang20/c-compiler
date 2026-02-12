@@ -93,10 +93,29 @@ fn eliminate_jump_chains(instructions: &mut Vec<X86Instr>) {
             });
             
             if !is_referenced {
-                // Remove the label and jmp
-                instructions.remove(i);
-                instructions.remove(i);  // After removal, next is still at i
-                continue;
+                // Check if reachable by fallthrough from previous instruction
+                // Unconditional jumps and returns execute control flow change, others fall through
+                let fallthrough_reachable = if i == 0 {
+                    true
+                } else {
+                    match &instructions[i-1] {
+                        X86Instr::Jmp(_) | X86Instr::Ret => false,
+                        _ => true,
+                    }
+                };
+
+                if !fallthrough_reachable {
+                    // unreachable - remove both label and jump
+                    instructions.remove(i);
+                    instructions.remove(i); 
+                    continue;
+                } else {
+                     // reachable - remove only the label, keep the jump
+                     instructions.remove(i);
+                     // The Jump is now at i. We must continue to verify next instructions.
+                     // Since we removed 1 instruction, next iteration at i will check Jmp + next.
+                     continue;
+                }
             }
         }
         i += 1;

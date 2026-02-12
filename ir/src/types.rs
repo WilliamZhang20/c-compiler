@@ -1,11 +1,11 @@
 use model::{BinaryOp, UnaryOp, Type, GlobalVar as AstGlobalVar};
 
 /// Variable identifier in IR
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VarId(pub usize);
 
 /// Basic block identifier in IR
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub usize);
 
 /// Operand in IR instructions - can be a constant, variable, or global
@@ -50,6 +50,11 @@ pub enum Instruction {
     Copy {
         dest: VarId,
         src: Operand,
+    },
+    Cast {
+        dest: VarId,
+        src: Operand,
+        r#type: Type,
     },
     Alloca {
         dest: VarId,

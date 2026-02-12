@@ -1,6 +1,7 @@
 use model::{BinaryOp, Expr, Token, UnaryOp};
 use crate::parser::Parser;
 use crate::types::TypeParser;
+use crate::utils::ParserUtils;
 
 /// Expression parsing functionality using precedence climbing
 pub(crate) trait ExpressionParser {

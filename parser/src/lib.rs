@@ -10,9 +10,13 @@ mod parser;
 mod types;
 mod expressions;
 mod statements;
+mod attributes;
+mod declarations;
+mod utils;
 
 use model::{Program, Token};
 use parser::Parser;
+use declarations::DeclarationParser;
 
 /// Parse a list of tokens into a Program AST
 ///

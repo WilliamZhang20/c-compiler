@@ -44,12 +44,13 @@ use folding::optimize_function;
 /// * Optimized IR program with improved code quality and performance
 pub fn optimize(mut program: IRProgram) -> IRProgram {
     for func in &mut program.functions {
-        // ir::mem2reg(func);  // TODO: Fix mem2reg - currently breaks code generation
+        ir::mem2reg(func);
         algebraic_simplification(func);
         strength_reduce_function(func);
         copy_propagation(func);
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
+        ir::remove_phis(func);
     }
     program
 }

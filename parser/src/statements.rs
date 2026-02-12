@@ -2,6 +2,7 @@ use model::{Block, Stmt, Token, Type};
 use crate::parser::Parser;
 use crate::types::TypeParser;
 use crate::expressions::ExpressionParser;
+use crate::utils::ParserUtils;
 
 /// Statement parsing functionality
 pub(crate) trait StatementParser {

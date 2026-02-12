@@ -26,7 +26,30 @@ impl Lowerer {
         match stmt {
             AstStmt::Return(expr) => {
                 let val = if let Some(e) = expr {
-                    Some(self.lower_expr(e)?)
+                    let mut v = self.lower_expr(e)?;
+                    
+                    // Handle implicit cast for return value
+                    // Clone return type to avoid borrowing self while mutating self
+                    if let Some(ret_type) = self.current_return_type.clone() {
+                        let expr_type = self.get_operand_type(&v)?;
+                        
+                        let src_is_float = matches!(expr_type, Type::Float | Type::Double);
+                        let dest_is_float = matches!(ret_type, Type::Float | Type::Double);
+                        
+                        if src_is_float != dest_is_float {
+                             let dest = self.new_var();
+                             self.var_types.insert(dest, ret_type.clone());
+                             let bid = self.current_block.ok_or("Return cast outside block")?;
+                             
+                             self.blocks[bid.0].instructions.push(Instruction::Cast {
+                                 dest,
+                                 src: v,
+                                 r#type: ret_type.clone(),
+                             });
+                             v = Operand::Var(dest);
+                        }
+                    }
+                    Some(v)
                 } else {
                     None
                 };

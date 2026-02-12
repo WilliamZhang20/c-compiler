@@ -26,9 +26,12 @@ pub struct Lowerer {
     pub(crate) current_switch_cases: Vec<(i64, BlockId)>, // (value, block)
     pub(crate) current_default: Option<BlockId>,
     pub(crate) break_targets: Vec<BlockId>,
+    pub(crate) current_return_type: Option<Type>,
     // For goto/label support
     pub(crate) labels: HashMap<String, BlockId>,  // label name => block
     pub(crate) pending_gotos: Vec<(String, BlockId)>, // (label, goto_block) for forward gotos
+    // Variable types for IR variables (used for float/int conversions)
+    pub(crate) var_types: HashMap<VarId, Type>,
 }
 
 impl Lowerer {
@@ -58,6 +61,8 @@ impl Lowerer {
             break_targets: Vec::new(),
             labels: HashMap::new(),
             pending_gotos: Vec::new(),
+            var_types: HashMap::new(),
+            current_return_type: None,
         }
     }
 
@@ -425,6 +430,7 @@ impl Lowerer {
         self.variable_allocas.clear();
         self.labels.clear();
         self.pending_gotos.clear();
+        self.current_return_type = Some(f.return_type.clone());
 
         let entry_id = self.new_block();
         self.current_block = Some(entry_id);
@@ -473,4 +479,30 @@ impl Lowerer {
     pub(crate) fn is_function(&self, name: &str) -> bool {
         self.function_names.contains(name)
     }
+
+    /// Get the type of an operand
+    pub(crate) fn get_operand_type(&self, op: &crate::types::Operand) -> Result<Type, String> {
+        match op {
+            crate::types::Operand::Constant(_) => Ok(Type::Int),
+            crate::types::Operand::FloatConstant(_) => Ok(Type::Float),
+            crate::types::Operand::Var(v) => {
+                // Check var_types if tracked
+                if let Some(ty) = self.var_types.get(v) {
+                    Ok(ty.clone())
+                } else {
+                    // Default to int if not tracked
+                    Ok(Type::Int)
+                }
+            }
+            crate::types::Operand::Global(name) => {
+                // Globals are pointer types
+                if let Some(ty) = self.symbol_table.get(name) {
+                    Ok(Type::Pointer(Box::new(ty.clone())))
+                } else {
+                    Err(format!("Unknown global: {}", name))
+                }
+            }
+        }
+    }
+
 }

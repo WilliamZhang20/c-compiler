@@ -50,7 +50,8 @@ fn run_all_c_tests() {
             if !compile_status.success() {
                 println!("❌ Compilation failed for {}", file_name);
                 tests_failed += 1;
-                continue;
+                // Halt on first failure
+                break;
             }
 
             // Run executable (generated in workspace root)
@@ -68,6 +69,8 @@ fn run_all_c_tests() {
             } else {
                 println!("❌ Failed: {} (Expected {}, Got {})", file_name, expected_code, exit_code);
                 tests_failed += 1;
+                // Halt on first failure
+                break;
             }
             
             // Clean up exe

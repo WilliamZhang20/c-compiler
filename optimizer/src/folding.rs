@@ -73,6 +73,11 @@ pub fn optimize_function(func: &mut Function) {
                         }
                         new_instructions.push(Instruction::Copy { dest, src: s });
                     }
+                    Instruction::Cast { dest, src, r#type } => {
+                        let s = resolve_operand(&src, &constants);
+                        // TODO: Constant folding for casts
+                        new_instructions.push(Instruction::Cast { dest, src: s, r#type });
+                    }
                     Instruction::Call { dest, name, args } => {
                         let resolved_args: Vec<_> =
                             args.iter().map(|arg| resolve_operand(arg, &constants)).collect();

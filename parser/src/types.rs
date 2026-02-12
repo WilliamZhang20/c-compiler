@@ -1,5 +1,6 @@
 use model::{Token, Type, TypeQualifiers};
 use crate::parser::Parser;
+use crate::attributes::AttributeParser;
 
 /// Type parsing functionality
 pub(crate) trait TypeParser {

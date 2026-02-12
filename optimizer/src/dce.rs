@@ -55,6 +55,9 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
         Instruction::Copy { src, .. } => {
             add_operand_var(src, used_vars);
         }
+        Instruction::Cast { src, .. } => {
+            add_operand_var(src, used_vars);
+        }
         Instruction::Call { args, .. } => {
             for arg in args {
                 add_operand_var(arg, used_vars);
@@ -117,6 +120,7 @@ fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
         | Instruction::Unary { dest, .. }
         | Instruction::FloatUnary { dest, .. }
         | Instruction::Copy { dest, .. }
+        | Instruction::Cast { dest, .. }
         | Instruction::Load { dest, .. }
         | Instruction::GetElementPtr { dest, .. }
         | Instruction::Phi { dest, .. } => used_vars.contains(dest),

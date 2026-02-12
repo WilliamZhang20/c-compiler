@@ -12,6 +12,7 @@ mod mem2reg;
 pub use types::{VarId, BlockId, Operand, Instruction, Terminator, BasicBlock, Function, IRProgram};
 pub use lowerer::Lowerer;
 pub use mem2reg::mem2reg;
+pub use mem2reg::remove_phis;
 
 #[cfg(test)]
 mod tests {

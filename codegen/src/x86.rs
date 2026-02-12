@@ -1,10 +1,11 @@
 // X86-64 register and instruction definitions
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum X86Reg {
     Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi,
     R8, R9, R10, R11, R12, R13, R14, R15,
-    Eax, Ecx, // 32-bit registers
+    Eax, Ecx, Edx, Ebx, Ebp, Esi, Edi, Esp, // 32-bit registers
+    R8d, R9d, R10d, R11d, R12d, R13d, R14d, R15d, // 32-bit extended
     Al, // 8-bit rax
     Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7, // SSE float registers
 }
@@ -16,7 +17,10 @@ impl X86Reg {
             Self::Rsp => "rsp", Self::Rbp => "rbp", Self::Rsi => "rsi", Self::Rdi => "rdi",
             Self::R8 => "r8", Self::R9 => "r9", Self::R10 => "r10", Self::R11 => "r11",
             Self::R12 => "r12", Self::R13 => "r13", Self::R14 => "r14", Self::R15 => "r15",
-            Self::Eax => "eax", Self::Ecx => "ecx",
+            Self::Eax => "eax", Self::Ecx => "ecx", Self::Edx => "edx", Self::Ebx => "ebx",
+            Self::Ebp => "ebp", Self::Esi => "esi", Self::Edi => "edi", Self::Esp => "esp",
+            Self::R8d => "r8d", Self::R9d => "r9d", Self::R10d => "r10d", Self::R11d => "r11d",
+            Self::R12d => "r12d", Self::R13d => "r13d", Self::R14d => "r14d", Self::R15d => "r15d",
             Self::Al => "al",
             Self::Xmm0 => "xmm0", Self::Xmm1 => "xmm1", Self::Xmm2 => "xmm2", Self::Xmm3 => "xmm3",
             Self::Xmm4 => "xmm4", Self::Xmm5 => "xmm5", Self::Xmm6 => "xmm6", Self::Xmm7 => "xmm7",
@@ -24,7 +28,7 @@ impl X86Reg {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum X86Operand {
     Reg(X86Reg),
     Mem(X86Reg, i32), // [reg + offset] - QWORD PTR
@@ -70,6 +74,7 @@ pub enum X86Instr {
     Ret,
     Label(String),
     Cqto,
+    Cdq,
     Xor(X86Operand, X86Operand),
     Lea(X86Operand, X86Operand),
     And(X86Operand, X86Operand),
@@ -78,6 +83,7 @@ pub enum X86Instr {
     Shl(X86Operand, X86Operand),
     Shr(X86Operand, X86Operand),
     Movsx(X86Operand, X86Operand), // Sign-extend smaller value into larger register
+    Movzx(X86Operand, X86Operand), // Zero-extend
     // Float instructions
     Movss(X86Operand, X86Operand), // Move scalar single-precision float
     Addss(X86Operand, X86Operand), // Add scalar single-precision float
@@ -88,6 +94,7 @@ pub enum X86Instr {
     Cvtsi2ss(X86Operand, X86Operand), // Convert int to float
     Cvttss2si(X86Operand, X86Operand), // Convert float to int (truncate)
     Xorps(X86Operand, X86Operand), // XOR packed single-precision (for negation)
+    Neg(X86Operand), // TWO'S COMPLEMENT NEGATION
     Raw(String), // Raw assembly string (for inline asm)
 }
 
@@ -100,6 +107,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Mov(d, src) => s.push_str(&format!("  mov {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Add(d, src) => s.push_str(&format!("  add {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Sub(d, src) => s.push_str(&format!("  sub {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Neg(d) => s.push_str(&format!("  neg {}\n", d.to_string())),
             X86Instr::Imul(d, src) => s.push_str(&format!("  imul {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Idiv(src) => s.push_str(&format!("  idiv {}\n", src.to_string())),
             X86Instr::Cmp(l, r) => s.push_str(&format!("  cmp {}, {}\n", l.to_string(), r.to_string())),
@@ -111,6 +119,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Pop(r) => s.push_str(&format!("  pop {}\n", r.to_str())),
             X86Instr::Call(l) => s.push_str(&format!("  call {}\n", l)),            X86Instr::CallIndirect(op) => s.push_str(&format!("  call {}\n", op.to_string())),            X86Instr::Ret => s.push_str("  ret\n"),
             X86Instr::Cqto => s.push_str("  cqo\n"),
+            X86Instr::Cdq => s.push_str("  cdq\n"),
             X86Instr::Xor(d, s_op) => s.push_str(&format!("  xor {}, {}\n", d.to_string(), s_op.to_string())),
             X86Instr::Lea(d, s_op) => s.push_str(&format!("  lea {}, {}\n", d.to_string(), s_op.to_string())),
             X86Instr::And(d, s_op) => s.push_str(&format!("  and {}, {}\n", d.to_string(), s_op.to_string())),
@@ -119,6 +128,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Shl(d, c) => s.push_str(&format!("  shl {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Movzx(d, src) => s.push_str(&format!("  movzx {}, {}\n", d.to_string(), src.to_string())),
             // Float instructions
             X86Instr::Movss(d, src) => s.push_str(&format!("  movss {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Addss(d, src) => s.push_str(&format!("  addss {}, {}\n", d.to_string(), src.to_string())),

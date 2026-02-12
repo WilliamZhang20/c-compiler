@@ -64,6 +64,9 @@ pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     // 1. Compute live intervals for each variable
     let mut intervals = compute_live_intervals(func);
     
+    // Sort intervals by var ID to be deterministic
+    intervals.sort_by_key(|i| i.var);
+    
     // 2. Build interference graph
     let interference = build_interference_graph(&intervals);
     
@@ -106,6 +109,7 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::FloatUnary { dest, .. } |
                 IrInstruction::Phi { dest, .. } |
                 IrInstruction::Copy { dest, .. } |
+                IrInstruction::Cast { dest, .. } |
                 IrInstruction::Load { dest, .. } |
                 IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
                 IrInstruction::Call { dest, .. } => *dest,
@@ -177,6 +181,9 @@ where F: FnMut(VarId) {
             if let Operand::Var(v) = src { f(*v); }
         }
         IrInstruction::Copy { src, .. } => {
+            if let Operand::Var(v) = src { f(*v); }
+        }
+        IrInstruction::Cast { src, .. } => {
             if let Operand::Var(v) = src { f(*v); }
         }
         IrInstruction::Load { addr, .. } => {

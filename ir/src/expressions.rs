@@ -35,6 +35,7 @@ impl Lowerer {
                     // 2. Load current value of LHS
                     let lhs_type = self.get_expr_type(left);
                     let curr_val_var = self.new_var();
+                    self.var_types.insert(curr_val_var, lhs_type.clone());
                     self.add_instruction(Instruction::Load {
                         dest: curr_val_var,
                         addr: Operand::Var(addr),
@@ -125,6 +126,35 @@ impl Lowerer {
 
                 // Handle pointer arithmetic
                 if *op == BinaryOp::Add || *op == BinaryOp::Sub {
+                    // Special case: pointer - pointer = number of elements
+                    if *op == BinaryOp::Sub && matches!(l_ty, Type::Pointer(_)) && matches!(r_ty, Type::Pointer(_)) {
+                        // ptr - ptr: compute byte difference, then divide by element size
+                        let dest = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest,
+                            op: BinaryOp::Sub,
+                            left: l_val,
+                            right: r_val,
+                        });
+                        
+                        // Divide by element size to get number of elements
+                        if let Type::Pointer(ref inner) = l_ty {
+                            let size = self.get_type_size(inner);
+                            if size > 1 {
+                                let result_dest = self.new_var();
+                                self.add_instruction(Instruction::Binary {
+                                    dest: result_dest,
+                                    op: BinaryOp::Div,
+                                    left: Operand::Var(dest),
+                                    right: Operand::Constant(size),
+                                });
+                                return Ok(Operand::Var(result_dest));
+                            }
+                        }
+                        return Ok(Operand::Var(dest));
+                    }
+                    
+                    // Regular pointer arithmetic: ptr +/- int
                     if let Type::Pointer(ref inner) = l_ty {
                         let size = self.get_type_size(inner);
                         if size > 1 {
@@ -219,6 +249,7 @@ impl Lowerer {
                     // Regular variable: load its value
                     let addr = self.lower_to_addr(expr)?;
                     let dest = self.new_var();
+                    self.var_types.insert(dest, var_type.clone());
                     self.add_instruction(Instruction::Load {
                         dest,
                         addr: Operand::Var(addr),
@@ -232,6 +263,7 @@ impl Lowerer {
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
                 let value_type = self.get_expr_type(expr);
+                self.var_types.insert(dest, value_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest,
                     addr: Operand::Var(addr),
@@ -243,6 +275,7 @@ impl Lowerer {
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
                 let value_type = self.get_expr_type(expr);
+                self.var_types.insert(dest, value_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest,
                     addr: Operand::Var(addr),
@@ -256,6 +289,7 @@ impl Lowerer {
                 // 2. Load old value
                 let old_val_var = self.new_var();
                 let expr_type = self.get_expr_type(expr);
+                self.var_types.insert(old_val_var, expr_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
@@ -308,6 +342,7 @@ impl Lowerer {
                 // 2. Load old value
                 let old_val_var = self.new_var();
                 let expr_type = self.get_expr_type(expr);
+                self.var_types.insert(old_val_var, expr_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
@@ -360,6 +395,7 @@ impl Lowerer {
                 // 2. Load old value
                 let old_val_var = self.new_var();
                 let expr_type = self.get_expr_type(expr);
+                self.var_types.insert(old_val_var, expr_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
@@ -412,6 +448,7 @@ impl Lowerer {
                 // 2. Load old value
                 let old_val_var = self.new_var();
                 let expr_type = self.get_expr_type(expr);
+                self.var_types.insert(old_val_var, expr_type.clone());
                 self.add_instruction(Instruction::Load {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
@@ -522,8 +559,39 @@ impl Lowerer {
             AstExpr::SizeOfExpr(_expr) => {
                 Ok(Operand::Constant(8)) 
             }
-            AstExpr::Cast(_ty, expr) => {
-                self.lower_expr(expr)
+            AstExpr::Cast(ty, expr) => {
+                let src_val = self.lower_expr(expr)?;
+                // Check if this is a type conversion (not just a pointer cast)
+                let src_type = self.get_operand_type(&src_val)?;
+                
+                // If types are the same, no conversion needed
+                if &src_type == ty {
+                    return Ok(src_val);
+                }
+                
+                // Check if this requires a float<->int conversion
+                let src_is_float = matches!(src_type, Type::Float | Type::Double);
+                let dest_is_float = matches!(ty, Type::Float | Type::Double);
+                
+                if src_is_float != dest_is_float {
+                    // This is a float<->int conversion, generate a Copy instruction
+                    // The codegen layer will handle this specially  
+                    let dest = self.new_var();
+                    // Record the destination type
+                    self.var_types.insert(dest, ty.clone());
+                    
+                    let bid = self.current_block.ok_or("Cast outside block")?;
+                    self.blocks[bid.0].instructions.push(Instruction::Cast {
+                        dest,
+                        src: src_val,
+                        r#type: ty.clone(),
+                    });
+                    return Ok(Operand::Var(dest));
+                }
+                
+                // For other casts (like int to int of different sizes, or pointer casts),
+                // just return the source value (no conversion needed in SSA form)
+                Ok(src_val)
             }
             AstExpr::Conditional { .. } => {
              // TODO: Implement ternary operator properly with phi nodes
