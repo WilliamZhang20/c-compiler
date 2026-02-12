@@ -258,18 +258,30 @@ impl Lowerer {
                     Ok(Operand::Var(dest))
                 }
             }
-            AstExpr::Variable(_name) => {
+            AstExpr::Variable(name) => {
                 // Global variables or other variables not in allocas
-                let addr = self.lower_to_addr(expr)?;
-                let dest = self.new_var();
-                let value_type = self.get_expr_type(expr);
-                self.var_types.insert(dest, value_type.clone());
-                self.add_instruction(Instruction::Load {
-                    dest,
-                    addr: Operand::Var(addr),
-                    value_type,
-                });
-                Ok(Operand::Var(dest))
+                if self.global_vars.contains(name) {
+                     let dest = self.new_var();
+                     let value_type = self.get_expr_type(expr);
+                     self.var_types.insert(dest, value_type.clone());
+                     self.add_instruction(Instruction::Load {
+                        dest,
+                        addr: Operand::Global(name.clone()),
+                        value_type,
+                    });
+                     Ok(Operand::Var(dest))
+                } else {
+                    let addr = self.lower_to_addr(expr)?;
+                    let dest = self.new_var();
+                    let value_type = self.get_expr_type(expr);
+                    self.var_types.insert(dest, value_type.clone());
+                    self.add_instruction(Instruction::Load {
+                        dest,
+                        addr: Operand::Var(addr),
+                        value_type,
+                    });
+                    Ok(Operand::Var(dest))
+                }
             }
             AstExpr::Index { .. } | AstExpr::Member { .. } | AstExpr::PtrMember { .. } | AstExpr::Unary { op: UnaryOp::Deref, .. } => {
                 let addr = self.lower_to_addr(expr)?;

@@ -49,11 +49,11 @@ mod tests {
         assert_eq!(ir.globals.len(), 1);
         
         let f = &ir.functions[0];
-        // Should have a Copy instruction to load the global address
+        // Should NOT have a Copy instruction to load the global address (optimized out)
         let copy = f.blocks[0].instructions.iter().find(|i| matches!(i, Instruction::Copy { src: Operand::Global(_), .. }));
-        assert!(copy.is_some());
-        // And a Load instruction using that address
-        let load = f.blocks[0].instructions.iter().find(|i| matches!(i, Instruction::Load { .. }));
+        assert!(!copy.is_some());
+        // Should have a Load instruction using the global address directly
+        let load = f.blocks[0].instructions.iter().find(|i| matches!(i, Instruction::Load { addr: Operand::Global(_), .. }));
         assert!(load.is_some());
     }
 }

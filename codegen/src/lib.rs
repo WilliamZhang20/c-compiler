@@ -4,6 +4,7 @@ mod peephole;
 mod types;
 mod instructions;
 mod function;
+mod float_ops;
 
 use model::Type;
 use ir::IRProgram;

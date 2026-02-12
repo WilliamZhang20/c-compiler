@@ -1,30 +1,31 @@
 use std::collections::HashMap;
 use crate::x86::{X86Reg, X86Operand, X86Instr};
-use model::{BinaryOp, UnaryOp, Type};
+use model::Type;
 use ir::{Function as IrFunction, BlockId, VarId, Operand, Instruction as IrInstruction, Terminator as IrTerminator};
 use crate::regalloc::{PhysicalReg, allocate_registers};
 use crate::instructions::InstructionGenerator;
 use crate::types::TypeCalculator;
+use crate::float_ops::{gen_float_binary_op, gen_float_unary_op};
 
 /// Handles generation of code for a single function
 pub struct FunctionGenerator<'a> {
     pub asm: Vec<X86Instr>,
     
     // Context from parent Codegen
-    structs: &'a HashMap<String, model::StructDef>,
-    unions: &'a HashMap<String, model::UnionDef>,
-    func_return_types: &'a HashMap<String, Type>,
-    float_constants: &'a mut HashMap<String, f64>,
-    next_float_const: &'a mut usize,
+    pub(crate) structs: &'a HashMap<String, model::StructDef>,
+    pub(crate) unions: &'a HashMap<String, model::UnionDef>,
+    pub(crate) func_return_types: &'a HashMap<String, Type>,
+    pub(crate) float_constants: &'a mut HashMap<String, f64>,
+    pub(crate) next_float_const: &'a mut usize,
     
     // Per-function state
-    stack_slots: HashMap<VarId, i32>,
-    next_slot: i32,
-    reg_alloc: HashMap<VarId, PhysicalReg>,
-    var_types: HashMap<VarId, Type>,
-    alloca_buffers: HashMap<VarId, i32>,
-    current_saved_regs: Vec<X86Reg>,
-    enable_regalloc: bool,
+    pub(crate) stack_slots: HashMap<VarId, i32>,
+    pub(crate) next_slot: i32,
+    pub(crate) reg_alloc: HashMap<VarId, PhysicalReg>,
+    pub(crate) var_types: HashMap<VarId, Type>,
+    pub(crate) alloca_buffers: HashMap<VarId, i32>,
+    pub(crate) current_saved_regs: Vec<X86Reg>,
+    pub(crate) enable_regalloc: bool,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -382,7 +383,7 @@ impl<'a> FunctionGenerator<'a> {
                 InstructionGenerator::gen_binary_op(&mut self.asm, *dest, op, l_op, r_op, d_op);
             }
             IrInstruction::FloatBinary { dest, op, left, right } => {
-                self.gen_float_binary_op(*dest, op, left, right);
+                gen_float_binary_op(self, *dest, op, left, right);
             }
             IrInstruction::Unary { dest, op, src } => {
                 let s_op = self.operand_to_op(src);
@@ -390,7 +391,7 @@ impl<'a> FunctionGenerator<'a> {
                 InstructionGenerator::gen_unary_op(&mut self.asm, *dest, op, s_op, d_op);
             }
             IrInstruction::FloatUnary { dest, op, src } => {
-                self.gen_float_unary_op(*dest, op, src);
+                gen_float_unary_op(self, *dest, op, src);
             }
             IrInstruction::Phi { .. } => {}
             IrInstruction::Alloca { dest, r#type } => {
@@ -417,122 +418,6 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
 
-    fn gen_float_binary_op(&mut self, dest: VarId, op: &BinaryOp, left: &Operand, right: &Operand) {
-        // Load left operand into xmm0
-        match left {
-            Operand::FloatConstant(_) => {
-                let left_label = self.operand_to_op(left);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), left_label));
-            }
-            Operand::Var(v) => {
-                let left_op = self.var_to_op(*v);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), left_op));
-            }
-            Operand::Constant(c) => {
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::Imm(*c)));
-                self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Eax)));
-            }
-            _ => {}
-        }
-        
-        // Load right operand into xmm1
-        match right {
-            Operand::FloatConstant(_) => {
-                let right_label = self.operand_to_op(right);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm1), right_label));
-            }
-            Operand::Var(v) => {
-                let right_op = self.var_to_op(*v);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm1), right_op));
-            }
-            Operand::Constant(c) => {
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::Imm(*c)));
-                self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm1), X86Operand::Reg(X86Reg::Eax)));
-            }
-            _ => {}
-        }
-        
-        // Perform operation
-        match op {
-            BinaryOp::Add => {
-                self.var_types.insert(dest, Type::Float);
-                self.asm.push(X86Instr::Addss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            }
-            BinaryOp::Sub => {
-                self.var_types.insert(dest, Type::Float);
-                self.asm.push(X86Instr::Subss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            }
-            BinaryOp::Mul => {
-                self.var_types.insert(dest, Type::Float);
-                self.asm.push(X86Instr::Mulss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            }
-            BinaryOp::Div => {
-                self.var_types.insert(dest, Type::Float);
-                self.asm.push(X86Instr::Divss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            }
-            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual | BinaryOp::EqualEqual | BinaryOp::NotEqual => {
-                self.var_types.insert(dest, Type::Int);
-                self.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-                let cond = match op {
-                    BinaryOp::Less => "b",
-                    BinaryOp::LessEqual => "be",
-                    BinaryOp::Greater => "a",
-                    BinaryOp::GreaterEqual => "ae",
-                    BinaryOp::EqualEqual => "e",
-                    BinaryOp::NotEqual => "ne",
-                    _ => unreachable!(),
-                };
-                self.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
-                let dest_op = self.var_to_op(dest); 
-                self.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
-                self.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
-                return; 
-            }
-            _ => {
-                self.var_types.insert(dest, Type::Float);
-                self.asm.push(X86Instr::Xorps(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
-            }
-        }
-        let dest_op = self.var_to_op(dest);
-        self.asm.push(X86Instr::Movss(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
-    }
-
-    fn gen_float_unary_op(&mut self, dest: VarId, op: &UnaryOp, src: &Operand) {
-        self.var_types.insert(dest, Type::Float);
-        let d_op = self.var_to_op(dest);
-        match src {
-            Operand::FloatConstant(_) => {
-                let src_label = self.operand_to_op(src);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), src_label));
-            }
-            Operand::Var(v) => {
-                let src_op = self.var_to_op(*v);
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), src_op));
-            }
-            Operand::Constant(c) => {
-                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::Imm(*c)));
-                self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Eax)));
-            }
-            _ => {}
-        }
-        match op {
-            UnaryOp::Minus => {
-                let sign_bit_label = self.get_or_create_float_const(f64::from_bits(0x8000000000000000u64));
-                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm1), X86Operand::RipRelLabel(sign_bit_label)));
-                self.asm.push(X86Instr::Xorps(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            }
-            UnaryOp::LogicalNot => {
-                self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(X86Reg::Eax), X86Operand::Reg(X86Reg::Xmm0)));
-                self.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Eax), X86Operand::Imm(0)));
-                self.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
-                self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
-                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                return;
-            }
-            _ => {}
-        }
-        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-    }
 
     fn gen_load(&mut self, dest: VarId, addr: &Operand, value_type: &model::Type) {
         self.var_types.insert(dest, value_type.clone());
@@ -557,6 +442,25 @@ impl<'a> FunctionGenerator<'a> {
                  }
                  return;
              }
+        }
+
+        // Optimization: if loading directly from a global, use RIP-relative load
+        if let Operand::Global(name) = addr {
+             if is_float {
+                 self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::GlobalMem(name.clone())));
+                 self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+             } else {
+                 if use_dword {
+                     // 32-bit int: Mov EAX, [rip+name]
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::GlobalMem(name.clone())));
+                     self.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
+                 } else {
+                     // 64-bit int/ptr: Mov RAX, [rip+name]
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
+                 }
+                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+             }
+             return;
         }
         
         // General case: Load address into RAX, then dereference
@@ -872,7 +776,7 @@ impl<'a> FunctionGenerator<'a> {
         slot
     }
 
-    fn var_to_op(&mut self, var: VarId) -> X86Operand {
+    pub(crate) fn var_to_op(&mut self, var: VarId) -> X86Operand {
         if let Some(&buffer_offset) = self.alloca_buffers.get(&var) {
             return X86Operand::Mem(X86Reg::Rbp, buffer_offset);
         }
@@ -889,7 +793,7 @@ impl<'a> FunctionGenerator<'a> {
         X86Operand::Mem(X86Reg::Rbp, slot)
     }
 
-    fn operand_to_op(&mut self, op: &Operand) -> X86Operand {
+    pub(crate) fn operand_to_op(&mut self, op: &Operand) -> X86Operand {
         match op {
             Operand::Constant(c) => X86Operand::Imm(*c),
             Operand::FloatConstant(f) => {
@@ -901,7 +805,7 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
     
-    fn get_or_create_float_const(&mut self, value: f64) -> String {
+    pub(crate) fn get_or_create_float_const(&mut self, value: f64) -> String {
         for (label, &v) in self.float_constants.iter() {
             if (v - value).abs() < f64::EPSILON {
                 return label.clone();
