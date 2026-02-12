@@ -50,8 +50,6 @@ impl<'a> DeclarationParser for Parser<'a> {
                         let _ = self.skip_top_level_item();
                     }
                 }
-            } else if self.is_inline_function() {
-                 let _ = self.skip_extern_inline_function();
             } else if self.peek() == Some(&Token::Extern) {
                 // Skip extern variable declarations BEFORE other type checks
                 let _ = self.skip_extern_declaration();

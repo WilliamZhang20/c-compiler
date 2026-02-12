@@ -37,12 +37,8 @@ impl Codegen {
     }
 
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
-        if let Some(func) = prog.functions.first() {
-            println!("CodeGen: Function {}", func.name);
-            for block in &func.blocks {
-                 println!("  Block {}: {} instructions", block.id.0, block.instructions.len());
-            }
-        }
+        // Debug output removed
+        
         self.structs.clear();
         self.unions.clear();
         for s_def in &prog.structs {

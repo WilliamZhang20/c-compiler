@@ -603,7 +603,9 @@ impl<'a> FunctionGenerator<'a> {
         } else {
             let s_op = self.operand_to_op(src);
              // Handle alloca address loading vs value loading
-             if let Operand::Var(v) = src {
+             if let Operand::Global(name) = src {
+                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::RipRelLabel(name.clone())));
+             } else if let Operand::Var(v) = src {
                  if let Some(off) = self.alloca_buffers.get(v) {
                      self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::Mem(X86Reg::Rbp, *off)));
                  } else {
@@ -793,11 +795,29 @@ impl<'a> FunctionGenerator<'a> {
         
         if let Some(d) = dest {
              let mut is_float_ret = false;
-            if let Some(t) = self.var_types.get(d) {
-                if matches!(t, Type::Float | Type::Double) {
-                    is_float_ret = true;
+             
+             // Try to infer return type from function pointer type
+             if let Operand::Var(v) = func_ptr {
+                 if let Some(t) = self.var_types.get(v) {
+                     if let Type::FunctionPointer { return_type, .. } = t {
+                         if matches!(**return_type, Type::Float | Type::Double) {
+                             is_float_ret = true;
+                         }
+                         // Store the inferred type for the destination variable
+                         self.var_types.insert(*d, *return_type.clone());
+                     }
+                 }
+             }
+
+            // Fallback to checking destination type if already known
+            if !is_float_ret {
+                if let Some(t) = self.var_types.get(d) {
+                    if matches!(t, Type::Float | Type::Double) {
+                        is_float_ret = true;
+                    }
                 }
             }
+            
             if is_float_ret {
                 self.var_types.insert(*d, Type::Float);
                 let dest_op = self.var_to_op(*d);

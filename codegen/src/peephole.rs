@@ -245,8 +245,25 @@ fn is_reg_used_after(instructions: &[X86Instr], start: usize, reg: &X86Reg) -> b
                     return true;
                 }
             }
-            X86Instr::Label(_) => return false, // Don't optimize across labels
-            _ => {}
+            // Conservative: assume used for any control flow or unknown instruction
+            X86Instr::Label(_) | X86Instr::Jmp(_) | X86Instr::Jcc(_, _) | 
+            X86Instr::Call(_) | X86Instr::CallIndirect(_) | X86Instr::Ret => return true,
+            
+            // For other instructions, check operands if possible, otherwise assume usage
+            X86Instr::Movsx(dest, src) | X86Instr::Movzx(dest, src) |
+            X86Instr::Movss(dest, src) | X86Instr::Addss(dest, src) |
+            X86Instr::Subss(dest, src) | X86Instr::Mulss(dest, src) |
+            X86Instr::Divss(dest, src) | X86Instr::Ucomiss(dest, src) |
+            X86Instr::Xorps(dest, src) | X86Instr::Cvtsi2ss(dest, src) |
+            X86Instr::Cvttss2si(dest, src) | X86Instr::And(dest, src) |
+            X86Instr::Or(dest, src) | X86Instr::Xor(dest, src) |
+            X86Instr::Lea(dest, src) | X86Instr::Shl(dest, src) |
+            X86Instr::Shr(dest, src) | X86Instr::Test(dest, src) => {
+                if matches_reg(dest, reg) || matches_reg(src, reg) {
+                    return true;
+                }
+            }
+            _ => return true,
         }
     }
     false
