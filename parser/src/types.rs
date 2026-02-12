@@ -247,8 +247,9 @@ impl<'a> TypeParser for Parser<'a> {
                 other => return Err(format!("expected field name, found {:?}", other)),
             };
 
-            // Handle optional array in struct field
-            let final_ty = if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+            // Handle optional array in struct field (supports multi-dimensional)
+            let mut final_ty = ty;
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
                 let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
@@ -259,10 +260,8 @@ impl<'a> TypeParser for Parser<'a> {
                     }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
-                Type::Array(Box::new(ty), size)
-            } else {
-                ty
-            };
+                final_ty = Type::Array(Box::new(final_ty), size);
+            }
 
             // Check for bit field syntax (: width)
             let bit_width = if self.match_token(|t| matches!(t, Token::Colon)) {
@@ -307,8 +306,9 @@ impl<'a> TypeParser for Parser<'a> {
                 other => return Err(format!("expected field name, found {:?}", other)),
             };
 
-            // Handle optional array in union field
-            let final_ty = if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+            // Handle optional array in union field (supports multi-dimensional)
+            let mut final_ty = ty;
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
                 let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
@@ -319,10 +319,8 @@ impl<'a> TypeParser for Parser<'a> {
                     }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
-                Type::Array(Box::new(ty), size)
-            } else {
-                ty
-            };
+                final_ty = Type::Array(Box::new(final_ty), size);
+            }
 
             fields.push(model::StructField {
                 field_type: final_ty,

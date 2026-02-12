@@ -40,6 +40,7 @@ impl Codegen {
     }
 
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
+        eprintln!("Starting gen_program");
         // Debug output removed
         
         self.structs.clear();
@@ -133,6 +134,7 @@ impl Codegen {
         
         for func in &prog.functions {
             // Emit .globl directive for all functions (for linking)
+            output.push_str(&format!(".globl {}\n", func.name));
             output.push_str(&format!(".globl {}\n", func.name));
             
             let func_gen = FunctionGenerator::new(

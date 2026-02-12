@@ -258,8 +258,8 @@ impl<'a> Parser<'a> {
                         if self.check(&|t| matches!(t, Token::Identifier { .. })) {
                             self.advance();
                         }
-                        // Handle array syntax: type name[] or type[]
-                        if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                        // Handle array syntax: type name[] or type[] (supports multi-dimensional)
+                        while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                             // Check if array size is provided
                             let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                                 0 // Use 0 to represent unsized array
@@ -272,7 +272,8 @@ impl<'a> Parser<'a> {
                             self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                             // Update the last parameter type to be an array
                             if let Some(last_param) = param_types.last_mut() {
-                                *last_param = Type::Array(Box::new(param_type), size);
+                                let inner = last_param.clone();
+                                *last_param = Type::Array(Box::new(inner), size);
                             }
                         }
                         if !self.match_token(|t| matches!(t, Token::Comma)) {
@@ -311,8 +312,8 @@ impl<'a> Parser<'a> {
             other => return Err(format!("expected identifier after type, found {:?}", other)),
         };
 
-        // Check for array
-        if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+        // Check for array (supports multi-dimensional)
+        while self.match_token(|t| matches!(t, Token::OpenBracket)) {
             // Check if array size is provided (empty brackets [] are allowed)
             let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                 0 // Use 0 to represent unsized array

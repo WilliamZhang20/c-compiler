@@ -234,8 +234,8 @@ impl<'a> DeclarationParser for Parser<'a> {
             };
             self.typedefs.insert(name);
             
-            // Check for array syntax: typedef int arr[10];
-            if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+            // Check for array syntax: typedef int arr[10]; (supports multi-dimensional)
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
                 if !self.check(&|t| matches!(t, Token::CloseBracket)) {
                     // Skip the size expression (could be constant or expression)
@@ -367,8 +367,8 @@ impl<'a> DeclarationParser for Parser<'a> {
                 "".to_string()
             };
             
-            // Handle array syntax in function parameters: type name[]
-            if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+            // Handle array syntax in function parameters: type name[] (supports multi-dimensional)
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are common for params)
                 let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
@@ -407,8 +407,8 @@ impl<'a> DeclarationParser for Parser<'a> {
             other => return Err(format!("expected identifier after type, found {:?}", other)),
         };
 
-        // Check for array
-        if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+        // Check for array (supports multi-dimensional)
+        while self.match_token(|t| matches!(t, Token::OpenBracket)) {
             // Check if array size is provided (empty brackets [] are allowed for externs/params)
             let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
                 0 // Use 0 to represent unsized array

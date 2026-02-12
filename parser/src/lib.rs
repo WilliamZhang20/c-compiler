@@ -129,6 +129,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_2d_array_decl() {
+        let src = "int main() { int arr[2][2]; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens);
+        assert!(program.is_ok(), "2D array declaration failed to parse");
+    }
+
+    #[test]
     fn test_header_tolerance() {
         let src = "typedef int my_int; struct foo { int x; }; int main() { return 0; }";
         let tokens = lex(src).unwrap();

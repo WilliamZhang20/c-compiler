@@ -1,29 +1,31 @@
-// Matrix multiply simplified - using 1D arrays
-// Tests nested loops and array indexing
+// Matrix multiply - using 2D arrays
+// Tests nested loops and 2D array indexing
 int main() {
-    int a[100];
-    int b[100];
-    int c[100];
-    int i;
+    int a[10][10];
+    int b[10][10];
+    int c[10][10];
+    int i; 
     int j;
     int k;
     int N = 10;
     
-    // Initialize matrices (stored as 1D arrays, 10x10)
-    for (i = 0; i < 100; i = i + 1) {
-        a[i] = i % N;
-        b[i] = (i / N) % N;
-        c[i] = 0;
+    // Initialize matrices
+    for (i = 0; i < 10; i = i + 1) {
+        for (j = 0; j < 10; j = j + 1) {
+            a[i][j] = i % N;
+            b[i][j] = (i / N) % N;
+            c[i][j] = 0;
+        }
     }
     
-    // Matrix multiplication (simplified)
-    for (i = 0; i < N; i = i + 1) {
-        for (j = 0; j < N; j = j + 1) {
-            for (k = 0; k < N; k = k + 1) {
-                c[i * N + j] = c[i * N + j] + a[i * N + k] * b[k * N + j];
+    // Matrix multiplication
+    for (i = 0; i < 10; i = i + 1) {
+        for (j = 0; j < 10; j = j + 1) {
+            for (k = 0; k < 10; k = k + 1) {
+                c[i][j] = c[i][j] + a[i][k] * b[k][j];
             }
         }
     }
     
-    return c[55] % 256;  // Element at [5][5]
+    return c[5][5] % 256; 
 }
