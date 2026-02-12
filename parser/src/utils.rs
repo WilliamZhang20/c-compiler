@@ -516,7 +516,12 @@ impl<'a> ParserUtils for Parser<'a> {
                     }
                     continue;
                 }
-                Some(Token::OpenBrace) | Some(Token::CloseBrace) => {
+                Some(Token::OpenBrace) => {
+                    let _ = self.skip_block_internal();
+                    return Ok(());
+                }
+                Some(Token::CloseBrace) => {
+                    self.advance();
                     return Ok(());
                 }
                 _ => {
