@@ -161,10 +161,10 @@ pub fn optimize_function(func: &mut Function) {
     }
 
     if iterations >= MAX_ITERATIONS {
-        eprintln!(
-            "Warning: Optimizer reached max iterations ({}) for function {}",
-            MAX_ITERATIONS, func.name
-        );
+        // eprintln!(
+        //     "Warning: Optimizer reached max iterations ({}) for function {}",
+        //     MAX_ITERATIONS, func.name
+        // );
     }
 }
 

@@ -57,6 +57,9 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     pub fn gen_function(mut self, func: &IrFunction) -> Vec<X86Instr> {
+        // Check if function is variadic (uses va_start)
+        let uses_va_start = func.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, IrInstruction::VaStart {..})));
+
         // Perform register allocation
         if self.enable_regalloc {
             self.reg_alloc = allocate_registers(func);
@@ -98,6 +101,14 @@ impl<'a> FunctionGenerator<'a> {
         
         if sub_amount > 0 {
             self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rsp), X86Operand::Imm(sub_amount as i64)));
+        }
+
+        // Spill register parameters to shadow space if variadic
+        if uses_va_start {
+            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 16), X86Operand::Reg(X86Reg::Rcx)));
+            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 24), X86Operand::Reg(X86Reg::Rdx)));
+            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 32), X86Operand::Reg(X86Reg::R8)));
+            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 40), X86Operand::Reg(X86Reg::R9)));
         }
 
         // Handle parameters (Windows ABI: RCX, RDX, R8, R9 for ints; XMM0-XMM3 for floats)
@@ -169,7 +180,8 @@ impl<'a> FunctionGenerator<'a> {
                     IrInstruction::Copy { dest, .. } |
                     IrInstruction::Cast { dest, .. } |
                     IrInstruction::Load { dest, .. } |
-                    IrInstruction::GetElementPtr { dest, .. } => {
+                    IrInstruction::GetElementPtr { dest, .. } |
+                    IrInstruction::VaArg { dest, .. } => {
                         if !self.reg_alloc.contains_key(dest) {
                             self.get_or_create_slot(*dest);
                         }
@@ -195,7 +207,8 @@ impl<'a> FunctionGenerator<'a> {
                             }
                         }
                     }
-                    IrInstruction::Store { .. } => {}
+                    IrInstruction::Store { .. } | IrInstruction::VaStart { .. } |
+                    IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => {}
                 }
             }
         }
@@ -274,12 +287,26 @@ impl<'a> FunctionGenerator<'a> {
                          self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                          self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                      } else {
-                         if matches!(d_op, X86Operand::DwordMem(..)) {
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                         // Check operand sizes to avoid invalid mov instructions
+                         let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+                         let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                         
+                         if src_is_dword && dst_is_dword {
+                             // Both 32-bit
+                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                         } else if src_is_dword {
+                             // 32-bit source to 64-bit dest - zero extend via EAX
+                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                         } else if dst_is_dword {
+                             // 64-bit source to 32-bit dest - truncate via RAX->EAX
+                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
                          } else {
-                            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                             // Both 64-bit
+                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                          }
                      }
                 }
@@ -349,11 +376,36 @@ impl<'a> FunctionGenerator<'a> {
                 if matches!(s_op, X86Operand::FloatMem(..)) || matches!(d_op, X86Operand::FloatMem(..)) {
                      self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                      self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                } else if matches!(s_op, X86Operand::DwordMem(..)) && matches!(d_op, X86Operand::DwordMem(..)) {
+                     // Both 32-bit memory
+                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
                 } else if matches!(s_op, X86Operand::Mem(..)) && matches!(d_op, X86Operand::Mem(..)) {
+                     // Both 64-bit memory
                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 } else {
-                     self.asm.push(X86Instr::Mov(d_op, s_op));
+                     // Handle all other cases including register<->memory moves
+                     let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+                     let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                     let dst_is_reg64 = matches!(d_op, X86Operand::Reg(X86Reg::Rax | X86Reg::Rbx | X86Reg::Rcx | X86Reg::Rdx | X86Reg::Rsi | X86Reg::Rdi | X86Reg::Rsp | X86Reg::Rbp | X86Reg::R8 | X86Reg::R9 | X86Reg::R10 | X86Reg::R11 | X86Reg::R12 | X86Reg::R13 | X86Reg::R14 | X86Reg::R15));
+                     let dst_is_reg32 = matches!(d_op, X86Operand::Reg(X86Reg::Eax | X86Reg::Ebx | X86Reg::Ecx | X86Reg::Edx | X86Reg::Esi | X86Reg::Edi | X86Reg::Esp | X86Reg::Ebp | X86Reg::R8d | X86Reg::R9d | X86Reg::R10d | X86Reg::R11d | X86Reg::R12d | X86Reg::R13d | X86Reg::R14d | X86Reg::R15d));
+                     
+                     if src_is_dword && dst_is_reg64 {
+                         // 32-bit memory to 64-bit register - need to go through EAX first
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                     } else if src_is_dword && !dst_is_dword && !dst_is_reg32 {
+                         //32-bit source to non-32-bit dest (64-bit mem or reg)
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                     } else if !src_is_dword && dst_is_dword {
+                         // 64-bit source to 32-bit dest
+                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                     } else {
+                         self.asm.push(X86Instr::Mov(d_op, s_op));
+                     }
                 }
             }
             IrInstruction::Binary { dest, op, left, right } => {
@@ -416,6 +468,33 @@ impl<'a> FunctionGenerator<'a> {
             }
             IrInstruction::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
                 self.gen_inline_asm(template, outputs, inputs, clobbers, *is_volatile);
+            }
+            IrInstruction::VaStart { list, arg_index } => {
+                // Windows x64: Arguments are contiguous in stack (Shadow Space + Stack Args)
+                // Next param is at index + 1
+                // Offset = 16 (return addr + saved RBP) + (arg_index + 1) * 8
+                let offset = 16 + (arg_index + 1) * 8;
+                
+                // LEA RAX, [RBP + offset]
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset as i32)));
+                
+                // Store RAX into *list. list is Operand::Var(alloca). var_to_op is [RBP - offset].
+                // So MOV [RBP - offset], RAX
+                // Since `list` is char*, and var_to_op returns the location of that variable (e.g. pointer on stack)
+                let list_dest = self.operand_to_op(list);
+                self.asm.push(X86Instr::Mov(list_dest, X86Operand::Reg(X86Reg::Rax)));
+            }
+            IrInstruction::VaEnd { .. } => {
+                // No-op for now
+            }
+            IrInstruction::VaCopy { dest, src } => {
+                let s_op = self.operand_to_op(src);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                let d_op = self.operand_to_op(dest);
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            IrInstruction::VaArg { .. } => {
+                // Needs implementation if __builtin_va_arg is used
             }
         }
     }
@@ -545,8 +624,25 @@ impl<'a> FunctionGenerator<'a> {
                                   self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                                   self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                               } else {
-                                  self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                                  self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                  // Handle size mismatch between source and dest
+                                  let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+                                  let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                                  
+                                  if src_is_dword && dst_is_dword {
+                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                  } else if src_is_dword {
+                                      // 32-bit source to 64-bit dest
+                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                  } else if dst_is_dword {
+                                      // 64-bit source to 32-bit dest
+                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                  } else {
+                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                  }
                               }
                          }
                     }
@@ -565,7 +661,21 @@ impl<'a> FunctionGenerator<'a> {
                         self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
                     } else {
                         let val = self.operand_to_op(o);
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                        // Handle 32-bit vs 64-bit return values
+                        match val {
+                            X86Operand::DwordMem(..) => {
+                                // 32-bit memory operand - load into EAX, then zero-extend to RAX implicitly
+                                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), val));
+                            }
+                            X86Operand::Imm(i) if i >= i32::MIN as i64 && i <= i32::MAX as i64 => {
+                                // Small immediate - can use EAX
+                                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), val));
+                            }
+                            _ => {
+                                // 64-bit operand or large immediate
+                                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                            }
+                        }
                     }
                 }
                 

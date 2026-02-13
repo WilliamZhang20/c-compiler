@@ -91,6 +91,19 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
             }
         }
         Instruction::Alloca { .. } => {}
+        Instruction::VaStart { list, .. } => {
+             add_operand_var(list, used_vars);
+        }
+        Instruction::VaEnd { list } => {
+            add_operand_var(list, used_vars);
+        }
+        Instruction::VaCopy { dest, src } => {
+            add_operand_var(dest, used_vars);
+            add_operand_var(src, used_vars);
+        }
+        Instruction::VaArg { list, .. } => {
+            add_operand_var(list, used_vars);
+        }
     }
 }
 
@@ -130,6 +143,10 @@ fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
         | Instruction::IndirectCall { .. }
         | Instruction::Store { .. }
         | Instruction::InlineAsm { .. }
-        | Instruction::Alloca { .. } => true,
+        | Instruction::Alloca { .. }
+        | Instruction::VaStart { .. }
+        | Instruction::VaEnd { .. }
+        | Instruction::VaCopy { .. }
+        | Instruction::VaArg { .. } => true,
     }
 }

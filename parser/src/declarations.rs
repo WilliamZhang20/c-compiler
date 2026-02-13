@@ -11,7 +11,7 @@ pub(crate) trait DeclarationParser {
     fn parse_typedef(&mut self) -> Result<(), String>;
     fn parse_function(&mut self) -> Result<Function, String>;
     fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String>;
-    fn parse_global(&mut self) -> Result<GlobalVar, String>;
+    fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String>;
 }
 
 impl<'a> DeclarationParser for Parser<'a> {
@@ -53,6 +53,9 @@ impl<'a> DeclarationParser for Parser<'a> {
             } else if self.peek() == Some(&Token::Extern) {
                 // Skip extern variable declarations BEFORE other type checks
                 let _ = self.skip_extern_declaration();
+            } else if self.is_inline_function() {
+                // Skip extern inline functions from headers (e.g., printf/scanf wrappers)
+                let _ = self.skip_extern_inline_function();
             } else if self.is_function_definition() {
                 // Try to parse function, skip if it fails
                 match self.parse_function() {
@@ -60,7 +63,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                     Err(_) => {
                         // Skip malformed function
                         if self.skip_top_level_item().is_err() {
-                            // If skip also fails, just advance one  token
+                            // If skip also fails, just advance one token
                             self.advance();
                         }
                     }
@@ -69,7 +72,9 @@ impl<'a> DeclarationParser for Parser<'a> {
                 // Function prototype/declaration - just skip it
                 // The actual definition will come from another file or later
                 let _ = self.skip_function_declaration();
-            } else if self.check_is_type() {
+            } else if self.check_is_type() 
+                || self.check(&|t| matches!(t, Token::Identifier { .. })) 
+            {
                 // Could be a global declaration, struct definition, or union definition
                 // Wrap in error handling to skip complex header constructs we can't parse
                 let parse_result = if self.check(&|t| matches!(t, Token::Struct)) && self.is_struct_forward_declaration() {
@@ -97,8 +102,8 @@ impl<'a> DeclarationParser for Parser<'a> {
                         Err(e) => Err(e),
                     }
                 } else {
-                    // Try to parse as global variable
-                    self.parse_global().map(|g| globals.push(g))
+                    // Try to parse as global variable(s)
+                    self.parse_globals().map(|gs| globals.extend(gs))
                 };
                 
                 // If parsing failed, skip this item
@@ -299,7 +304,17 @@ impl<'a> DeclarationParser for Parser<'a> {
         // Parse attributes before function
         let mut attributes = self.parse_attributes()?;
         
-        let return_type = self.parse_type()?;
+        let return_type = match self.parse_type() {
+            Ok(ty) => ty,
+            Err(_) => {
+                // Check if we have an identifier next (implicit int return type)
+                if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+                    model::Type::Int
+                } else {
+                    return Err("Expected return type or function name".to_string());
+                }
+            }
+        };
         
         // Parse attributes after return type but before function name
         let mut more_attributes = self.parse_attributes()?;
@@ -392,49 +407,67 @@ impl<'a> DeclarationParser for Parser<'a> {
         Ok(params)
     }
 
-    fn parse_global(&mut self) -> Result<GlobalVar, String> {
+    fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String> {
         // Parse attributes before the type
         let mut attributes = self.parse_attributes()?;
         
-        let (mut r#type, qualifiers) = self.parse_type_with_qualifiers()?;
+        let (base_type, qualifiers) = match self.parse_type_with_qualifiers() {
+             Ok(res) => res,
+             Err(_) if self.check(&|t| matches!(t, Token::Identifier { .. })) => {
+                 (model::Type::Int, model::TypeQualifiers::default())
+             }
+             Err(e) => return Err(e),
+        };
         
         // Parse attributes after the type but before the identifier
         let mut more_attributes = self.parse_attributes()?;
         attributes.append(&mut more_attributes);
         
-        let name = match self.advance() {
-            Some(Token::Identifier { value }) => value.clone(),
-            other => return Err(format!("expected identifier after type, found {:?}", other)),
-        };
+        let mut globals = Vec::new(); // Explicit type annotation
 
-        // Check for array (supports multi-dimensional)
-        while self.match_token(|t| matches!(t, Token::OpenBracket)) {
-            // Check if array size is provided (empty brackets [] are allowed for externs/params)
-            let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
-                0 // Use 0 to represent unsized array
-            } else {
-                match self.advance() {
-                    Some(Token::Constant { value }) => *value as usize,
-                    other => return Err(format!("[parse_global] expected constant array size, found {:?}", other)),
-                }
+        loop {
+            let name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected identifier after type, found {:?}", other)),
             };
-            self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
-            r#type = model::Type::Array(Box::new(r#type), size);
-        }
 
-        let init = if self.match_token(|t| matches!(t, Token::Equal)) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
+            let mut var_type = base_type.clone();
+
+            // Check for array (supports multi-dimensional)
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                // Check if array size is provided (empty brackets [] are allowed for externs/params)
+                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                    0 // Use 0 to represent unsized array
+                } else {
+                    match self.advance() {
+                        Some(Token::Constant { value }) => *value as usize,
+                        other => return Err(format!("[parse_global] expected constant array size, found {:?}", other)),
+                    }
+                };
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                var_type = model::Type::Array(Box::new(var_type), size);
+            }
+
+            let init = if self.match_token(|t| matches!(t, Token::Equal)) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            
+            globals.push(GlobalVar {
+                r#type: var_type,
+                qualifiers: qualifiers.clone(),
+                name,
+                init,
+                attributes: attributes.clone(),
+            });
+
+            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                break;
+            }
+        }
         self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
 
-        Ok(GlobalVar {
-            r#type,
-            qualifiers,
-            name,
-            init,
-            attributes,
-        })
+        Ok(globals)
     }
 }

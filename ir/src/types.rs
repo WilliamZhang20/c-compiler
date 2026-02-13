@@ -86,6 +86,23 @@ pub enum Instruction {
         func_ptr: Operand,
         args: Vec<Operand>,
     },
+    // Variadic intrinsics
+    VaStart {
+        list: Operand,
+        arg_index: usize, // Index of the last named argument
+    },
+    VaEnd {
+        list: Operand,
+    },
+    VaCopy {
+        dest: Operand,
+        src: Operand,
+    },
+    VaArg {
+        dest: VarId,
+        list: Operand,
+        r#type: Type,
+    },
     InlineAsm {
         template: String,
         outputs: Vec<VarId>,     // Output variables

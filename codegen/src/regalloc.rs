@@ -119,7 +119,9 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                     // InlineAsm can define multiple outputs, handle first one for now
                     outputs.first().copied()
                 }
-                IrInstruction::Alloca { .. } | IrInstruction::Store { .. } => None,
+                IrInstruction::VaArg { dest, .. } => Some(*dest),
+                IrInstruction::Alloca { .. } | IrInstruction::Store { .. } 
+                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
             };
             
             if let Some(var) = def_var {
@@ -218,6 +220,19 @@ where F: FnMut(VarId) {
             for input in inputs {
                 if let Operand::Var(v) = input { f(*v); }
             }
+        }
+        IrInstruction::VaStart { list, .. } => {
+            if let Operand::Var(v) = list { f(*v); }
+        }
+        IrInstruction::VaEnd { list } => {
+            if let Operand::Var(v) = list { f(*v); }
+        }
+        IrInstruction::VaCopy { dest, src } => {
+            if let Operand::Var(v) = dest { f(*v); }
+            if let Operand::Var(v) = src { f(*v); }
+        }
+        IrInstruction::VaArg { list, .. } => {
+            if let Operand::Var(v) = list { f(*v); }
         }
         IrInstruction::Alloca { .. } => {}
     }

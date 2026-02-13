@@ -48,7 +48,7 @@ impl<'a> Mem2RegPass<'a> {
     }
 
     fn run(&mut self) {
-        println!("Running mem2reg on function {}", self.func.name);
+        // println!("Running mem2reg on function {}", self.func.name);
         self.compute_preds();
         self.identify_promotable_allocas();
         
@@ -104,11 +104,11 @@ impl<'a> Mem2RegPass<'a> {
             if Self::is_scalar_type(ty) && !Self::is_address_taken(self.func, *id) {
                 self.promotable.insert(*id);
             } else {
-                println!("Not promotable: VarId({}) (scalar: {}, address_taken: {})", 
-                    id.0, Self::is_scalar_type(ty), Self::is_address_taken(self.func, *id));
+                // println!("Not promotable: VarId({}) (scalar: {}, address_taken: {})", 
+                //     id.0, Self::is_scalar_type(ty), Self::is_address_taken(self.func, *id));
             }
         }
-        println!("Promotable allocas: {:?}", self.promotable);
+        // println!("Promotable allocas: {:?}", self.promotable);
     }
     
     fn ensure_zeros(&mut self) {
@@ -345,6 +345,12 @@ impl<'a> Mem2RegPass<'a> {
                 Self::operand_uses_var(base, var_id) || Self::operand_uses_var(index, var_id),
             Instruction::Call { args, .. } | Instruction::IndirectCall { args, .. } => 
                 args.iter().any(|arg| Self::operand_uses_var(arg, var_id)),
+            Instruction::VaStart { list, .. } => 
+                Self::operand_uses_var(list, var_id),
+            Instruction::VaEnd { list } => Self::operand_uses_var(list, var_id),
+            Instruction::VaCopy { dest, src } => 
+                Self::operand_uses_var(dest, var_id) || Self::operand_uses_var(src, var_id),
+            Instruction::VaArg { list, .. } => Self::operand_uses_var(list, var_id),
             Instruction::InlineAsm { inputs, outputs, .. } => 
                 inputs.iter().any(|input| Self::operand_uses_var(input, var_id))
                 || outputs.contains(&var_id),

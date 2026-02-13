@@ -530,11 +530,53 @@ impl Lowerer {
                 Ok(Operand::Global(label))
             }
             AstExpr::Call { func, args } => {
+                let bid = self.current_block.ok_or("Call outside block")?;
+                
+                // Handle intrinsics that require l-value arguments (pass-by-reference semantics)
+                if let AstExpr::Variable(name) = func.as_ref() {
+                    if name == "__builtin_va_start" {
+                        if args.len() >= 2 {
+                            let list_addr = self.lower_to_addr(&args[0])?;
+                            
+                            // Find index of second argument (last named parameter)
+                            let arg_index = if let AstExpr::Variable(name) = &args[1] {
+                                *self.param_indices.get(name).ok_or(format!("__builtin_va_start argument '{}' must be a parameter name", name))?
+                            } else {
+                                return Err("__builtin_va_start second argument must be a variable name".to_string());
+                            };
+                            
+                            self.blocks[bid.0].instructions.push(Instruction::VaStart {
+                                list: Operand::Var(list_addr),
+                                arg_index,
+                            });
+                            return Ok(Operand::Constant(0));
+                        }
+                    } else if name == "__builtin_va_end" {
+                        if !args.is_empty() {
+                            let list_addr = self.lower_to_addr(&args[0])?;
+                            self.blocks[bid.0].instructions.push(Instruction::VaEnd {
+                                list: Operand::Var(list_addr),
+                            });
+                            return Ok(Operand::Constant(0));
+                        }
+                    } else if name == "__builtin_va_copy" {
+                        if args.len() >= 2 {
+                            let dest_addr = self.lower_to_addr(&args[0])?;
+                            let src_val = self.lower_expr(&args[1])?;
+                            self.blocks[bid.0].instructions.push(Instruction::VaCopy {
+                                dest: Operand::Var(dest_addr),
+                                src: src_val,
+                            });
+                            return Ok(Operand::Constant(0));
+                        }
+                    }
+                }
+
                 let mut ir_args = Vec::new();
                 for arg in args {
                     ir_args.push(self.lower_expr(arg)?);
                 }
-                let bid = self.current_block.ok_or("Call outside block")?;
+                
                 let dest = self.new_var();
                 
                 // Check if it's a direct call (function name) or indirect call (function pointer variable)

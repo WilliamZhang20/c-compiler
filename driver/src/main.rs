@@ -1,14 +1,18 @@
 use clap::Parser; // clap crate for CLI argument parsing
 use std::{path::Path, process::Command};
-// use std::io::Write; // Unused import
+use std::sync::OnceLock;
+
+static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
 
 macro_rules! log {
     ($($arg:tt)*) => {{
-        let msg = format!($($arg)*);
-        eprintln!("{}", msg);
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("debug_driver.log") {
-            let _ = writeln!(file, "{}", msg);
+        if *DEBUG_ENABLED.get().unwrap_or(&false) {
+            let msg = format!($($arg)*);
+            eprintln!("{}", msg);
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("debug_driver.log") {
+                let _ = writeln!(file, "{}", msg);
+            }
         }
     }};
 }
@@ -42,13 +46,19 @@ struct Args {
     /// Use safe malloc runtime (detects buffer overflows, use-after-free, etc.)
     #[arg(long, default_value_t = false)]
     safe_malloc: bool,
+
+    /// Enable debug output
+    #[arg(short, long, default_value_t = false)]
+    debug: bool,
 }
-// Embed the malloc runtime source code for portability
+
 const MALLOC_C_SOURCE: &str = include_str!("../../runtime/malloc.c");
 
 fn main() {
-    println!("DEBUG: Driver started immediately");
     let args = Args::parse();
+    DEBUG_ENABLED.set(args.debug).ok();
+    
+    log!("DEBUG: Driver started");
     log!("DEBUG: Args parsed");
 
     let stop_after_emit_asm = args.emit_asm;
@@ -188,7 +198,7 @@ fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
             args.push("runtime/malloc.o".to_string());
         } else {
             // "Run anywhere" mode: write embedded source to temp file and compile
-            let mut temp_dir = std::env::temp_dir();
+            let temp_dir = std::env::temp_dir();
             let unique_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
             
             let c_path = temp_dir.join(format!("malloc_{}.c", unique_id));

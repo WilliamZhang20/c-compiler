@@ -1,6 +1,6 @@
 use model::{Type, Program as AstProgram, Function as AstFunction, Expr as AstExpr};
 use std::collections::{HashMap, HashSet};
-use crate::types::{VarId, BlockId, BasicBlock, Function, IRProgram, Instruction, Terminator};
+use crate::types::{VarId, BlockId, BasicBlock, Function, IRProgram, Instruction, Terminator, Operand};
 
 /// Main AST to IR lowering engine with SSA construction
 pub struct Lowerer {
@@ -32,6 +32,7 @@ pub struct Lowerer {
     pub(crate) pending_gotos: Vec<(String, BlockId)>, // (label, goto_block) for forward gotos
     // Variable types for IR variables (used for float/int conversions)
     pub(crate) var_types: HashMap<VarId, Type>,
+    pub(crate) param_indices: HashMap<String, usize>,
 }
 
 impl Lowerer {
@@ -62,6 +63,7 @@ impl Lowerer {
             labels: HashMap::new(),
             pending_gotos: Vec::new(),
             var_types: HashMap::new(),
+            param_indices: HashMap::new(),
             current_return_type: None,
         }
     }
@@ -431,15 +433,34 @@ impl Lowerer {
         self.labels.clear();
         self.pending_gotos.clear();
         self.current_return_type = Some(f.return_type.clone());
+        self.param_indices.clear();
 
         let entry_id = self.new_block();
         self.current_block = Some(entry_id);
         self.sealed_blocks.insert(entry_id);
 
         let mut params = Vec::new();
-        for (t, name) in &f.params {
+        for (i, (t, name)) in f.params.iter().enumerate() {
             let var = self.new_var();
-            self.write_variable(name, entry_id, var);
+            // Map parameter name to index
+            self.param_indices.insert(name.clone(), i);
+
+            // Create stack slot for parameter (to support address-of and mem2reg will optimize if not needed)
+            let stack_slot = self.new_var();
+            self.blocks[entry_id.0].instructions.push(Instruction::Alloca {
+                dest: stack_slot,
+                r#type: t.clone(),
+            });
+            self.variable_allocas.insert(name.clone(), stack_slot);
+            self.var_types.insert(stack_slot, Type::Pointer(Box::new(t.clone())));
+            
+            // Store initial value
+            self.blocks[entry_id.0].instructions.push(Instruction::Store {
+                addr: Operand::Var(stack_slot),
+                src: Operand::Var(var),
+                value_type: t.clone(),
+            });
+
             self.symbol_table.insert(name.clone(), t.clone());
             params.push((t.clone(), var));
         }
