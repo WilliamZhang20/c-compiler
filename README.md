@@ -17,6 +17,11 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 The most exciting part. Currently only works on Windows, Linux compatability is coming soon. Run `release.exe` and point to any C file. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP. The ultimate stress test may not necessarily be Linux, but rather `donut.c`.
 
+To build a new release from the existing files, run the following and copy the created `target/run/driver.exe` into the home directory.
+```
+cargo build --bin driver --release
+```
+
 ### Architecture
 
 The compiler is built in Rust using a multi-stage pipeline. It orchestrates preprocessing via GCC, followed by custom lexing, parsing, and semantic analysis to ensure code validity.
