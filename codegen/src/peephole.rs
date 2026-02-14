@@ -123,6 +123,61 @@ fn eliminate_jump_chains(instructions: &mut Vec<X86Instr>) {
 }
 
 fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
+    // Pattern 0: Comparison followed by set/test/branch -> direct conditional jump
+    // Looking for: cmp regA, opB; mov regC, 0; set<cond> al; mov regD, rax; test regD, regD; j<cc> label
+    // Simplify to: cmp regA, opB; j<cond> label (when jcc is "ne") or j<!cond> label (when jcc is "e")
+    if i + 5 < instructions.len() {
+        // First check if the pattern matches (read-only)
+        let pattern_matches = matches!(
+            (&instructions[i], &instructions[i+1], &instructions[i+2], &instructions[i+3], &instructions[i+4], &instructions[i+5]),
+            (
+                X86Instr::Cmp(_, _),
+                X86Instr::Mov(X86Operand::Reg(X86Reg::Rax | X86Reg::Eax), X86Operand::Imm(0)),
+                X86Instr::Set(_, X86Operand::Reg(X86Reg::Al)),
+                X86Instr::Mov(test_reg_dest, X86Operand::Reg(X86Reg::Rax | X86Reg::Eax)),
+                X86Instr::Test(test_left, test_right),
+                X86Instr::Jcc(_, _)
+            ) if test_left == test_reg_dest && test_right == test_reg_dest
+        );
+        
+        if pattern_matches {
+            // Clone the values we need before modifying
+            let cmp_left = if let X86Instr::Cmp(l, _) = &instructions[i] { l.clone() } else { unreachable!() };
+            let cmp_right = if let X86Instr::Cmp(_, r) = &instructions[i] { r.clone() } else { unreachable!() };
+            let set_cond = if let X86Instr::Set(c, _) = &instructions[i+2] { c.clone() } else { unreachable!() };
+            let (branch_cond, branch_label) = if let X86Instr::Jcc(c, l) = &instructions[i+5] { (c.clone(), l.clone()) } else { unreachable!() };
+            
+            // Map set condition to branch condition
+            let final_cond = if branch_cond == "ne" {
+                // jne means "jump if not zero", so use the set condition directly
+                set_cond
+            } else if branch_cond == "e" {
+                // je means "jump if zero", so invert the set condition
+                match set_cond.as_str() {
+                    "e" => "ne".to_string(),
+                    "ne" => "e".to_string(),
+                    "l" => "ge".to_string(),
+                    "le" => "g".to_string(),
+                    "g" => "le".to_string(),
+                    "ge" => "l".to_string(),
+                    _ => return false, // Unknown condition, don't optimize
+                }
+            } else {
+                return false; // Not a simple ne/e branch
+            };
+            
+            // Replace with: cmp + jcc
+            instructions[i] = X86Instr::Cmp(cmp_left, cmp_right);
+            instructions[i+1] = X86Instr::Jcc(final_cond, branch_label);
+            // Remove the 4 intermediate instructions
+            instructions.remove(i+2);
+            instructions.remove(i+2);
+            instructions.remove(i+2);
+            instructions.remove(i+2);
+            return true;
+        }
+    }
+    
     // Pattern 1: mov reg, reg -> remove (no-op)
     if let Some(X86Instr::Mov(X86Operand::Reg(r1), X86Operand::Reg(r2))) = instructions.get(i) {
         if matches!((r1, r2), 
@@ -136,6 +191,30 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
         ) {
             instructions.remove(i);
             return true;
+        }
+    }
+
+    // Pattern 1b: mov reg1, src; cmp reg1, op -> cmp src, op (if reg1 not used after and src is a register)
+    if i + 1 < instructions.len() {
+        if let (
+            X86Instr::Mov(X86Operand::Reg(mov_dest), mov_src @ X86Operand::Reg(_)),
+            X86Instr::Cmp(X86Operand::Reg(cmp_left), cmp_right)
+        ) = (&instructions[i], &instructions[i + 1]) {
+            if std::mem::discriminant(mov_dest) == std::mem::discriminant(cmp_left) {
+                // Check if the next instruction after cmp is a jump/branch
+                // If so, the register is not used in the immediate fall-through
+                let next_is_jump = i + 2 < instructions.len() && matches!(
+                    instructions[i + 2],
+                    X86Instr::Jmp(_) | X86Instr::Jcc(_, _) | X86Instr::Ret
+                );
+                
+                if next_is_jump || !is_reg_used_after(instructions, i + 2, mov_dest) {
+                    // Replace mov + cmp with just cmp
+                    instructions[i] = X86Instr::Cmp(mov_src.clone(), cmp_right.clone());
+                    instructions.remove(i + 1);
+                    return true;
+                }
+            }
         }
     }
 

@@ -685,11 +685,11 @@ impl<'a> FunctionGenerator<'a> {
                     for reg in self.current_saved_regs.iter().rev() {
                         self.asm.push(X86Instr::Pop(reg.clone()));
                     }
+                    self.asm.push(X86Instr::Pop(X86Reg::Rbp));
                 } else {
-                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rsp), X86Operand::Reg(X86Reg::Rbp)));
+                    self.asm.push(X86Instr::Leave);
                 }
                 
-                self.asm.push(X86Instr::Pop(X86Reg::Rbp));
                 self.asm.push(X86Instr::Ret);
             }
             IrTerminator::Br(id) => {
