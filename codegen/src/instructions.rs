@@ -38,7 +38,10 @@ impl InstructionGenerator {
         match op {
             BinaryOp::Add => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    if d_op == r_op {
+                    if d_op == l_op {
+                        // Optimize: dest = dest + right -> just add
+                        asm.push(X86Instr::Add(d_op, r_op));
+                    } else if d_op == r_op {
                          asm.push(X86Instr::Add(d_op, l_op));
                     } else {
                         asm.push(X86Instr::Mov(d_op.clone(), l_op));
@@ -52,7 +55,10 @@ impl InstructionGenerator {
             }
             BinaryOp::Sub => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    if d_op == r_op {
+                    if d_op == l_op {
+                        // Optimize: dest = dest - right -> just sub
+                        asm.push(X86Instr::Sub(d_op, r_op));
+                    } else if d_op == r_op {
                          asm.push(X86Instr::Neg(d_op.clone()));
                          asm.push(X86Instr::Add(d_op, l_op));
                     } else {
@@ -67,7 +73,10 @@ impl InstructionGenerator {
             }
             BinaryOp::Mul => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    if d_op == r_op {
+                    if d_op == l_op {
+                        // Optimize: dest = dest * right -> just imul
+                        asm.push(X86Instr::Imul(d_op, r_op));
+                    } else if d_op == r_op {
                         asm.push(X86Instr::Imul(d_op, l_op));
                     } else {
                          asm.push(X86Instr::Mov(d_op.clone(), l_op));
@@ -133,8 +142,16 @@ impl InstructionGenerator {
             }
             BinaryOp::BitwiseAnd => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    asm.push(X86Instr::Mov(d_op.clone(), l_op));
-                    asm.push(X86Instr::And(d_op, r_op));
+                    if d_op == l_op {
+                        // Optimize: dest = dest & right -> just and
+                        asm.push(X86Instr::And(d_op, r_op));
+                    } else if d_op == r_op {
+                        // Optimize: dest = left & dest -> just and (commutative)
+                        asm.push(X86Instr::And(d_op, l_op));
+                    } else {
+                        asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                        asm.push(X86Instr::And(d_op, r_op));
+                    }
                 } else {
                     asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                     asm.push(X86Instr::And(ax_op.clone(), r_op));
@@ -143,8 +160,16 @@ impl InstructionGenerator {
             }
             BinaryOp::BitwiseOr => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    asm.push(X86Instr::Mov(d_op.clone(), l_op));
-                    asm.push(X86Instr::Or(d_op, r_op));
+                    if d_op == l_op {
+                        // Optimize: dest = dest | right -> just or
+                        asm.push(X86Instr::Or(d_op, r_op));
+                    } else if d_op == r_op {
+                        // Optimize: dest = left | dest -> just or (commutative)
+                        asm.push(X86Instr::Or(d_op, l_op));
+                    } else {
+                        asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                        asm.push(X86Instr::Or(d_op, r_op));
+                    }
                 } else {
                     asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                     asm.push(X86Instr::Or(ax_op.clone(), r_op));
@@ -153,8 +178,16 @@ impl InstructionGenerator {
             }
             BinaryOp::BitwiseXor => {
                 if matches!(d_op, X86Operand::Reg(_)) {
-                    asm.push(X86Instr::Mov(d_op.clone(), l_op));
-                    asm.push(X86Instr::Xor(d_op, r_op));
+                    if d_op == l_op {
+                        // Optimize: dest = dest ^ right -> just xor
+                        asm.push(X86Instr::Xor(d_op, r_op));
+                    } else if d_op == r_op {
+                        // Optimize: dest = left ^ dest -> just xor (commutative)
+                        asm.push(X86Instr::Xor(d_op, l_op));
+                    } else {
+                        asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                        asm.push(X86Instr::Xor(d_op, r_op));
+                    }
                 } else {
                     asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                     asm.push(X86Instr::Xor(ax_op.clone(), r_op));
@@ -162,7 +195,6 @@ impl InstructionGenerator {
                 }
             }
             BinaryOp::ShiftLeft => {
-                asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                 let count_op = if let X86Operand::Imm(_) = r_op {
                     r_op
                 } else {
@@ -170,11 +202,17 @@ impl InstructionGenerator {
                     asm.push(X86Instr::Mov(X86Operand::Reg(c_cx), r_op));
                     X86Operand::Reg(X86Reg::Rcx)
                 };
-                asm.push(X86Instr::Shl(ax_op.clone(), count_op));
-                asm.push(X86Instr::Mov(d_op, ax_op));
+                
+                if matches!(d_op, X86Operand::Reg(_)) && d_op == l_op {
+                    // Optimize: dest = dest << count -> just shl
+                    asm.push(X86Instr::Shl(d_op, count_op));
+                } else {
+                    asm.push(X86Instr::Mov(ax_op.clone(), l_op));
+                    asm.push(X86Instr::Shl(ax_op.clone(), count_op));
+                    asm.push(X86Instr::Mov(d_op, ax_op));
+                }
             }
             BinaryOp::ShiftRight => {
-                asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                 let count_op = if let X86Operand::Imm(_) = r_op {
                     r_op
                 } else {
@@ -182,8 +220,15 @@ impl InstructionGenerator {
                     asm.push(X86Instr::Mov(X86Operand::Reg(c_cx), r_op));
                     X86Operand::Reg(X86Reg::Rcx)
                 };
-                asm.push(X86Instr::Shr(ax_op.clone(), count_op));
-                asm.push(X86Instr::Mov(d_op, ax_op));
+                
+                if matches!(d_op, X86Operand::Reg(_)) && d_op == l_op {
+                    // Optimize: dest = dest >> count -> just shr
+                    asm.push(X86Instr::Shr(d_op, count_op));
+                } else {
+                    asm.push(X86Instr::Mov(ax_op.clone(), l_op));
+                    asm.push(X86Instr::Shr(ax_op.clone(), count_op));
+                    asm.push(X86Instr::Mov(d_op, ax_op));
+                }
             }
             _ => {}
         }
@@ -207,9 +252,18 @@ impl InstructionGenerator {
 
         match op {
             UnaryOp::Minus => {
-                asm.push(X86Instr::Mov(ax_op.clone(), X86Operand::Imm(0)));
-                asm.push(X86Instr::Sub(ax_op.clone(), s_op));
-                asm.push(X86Instr::Mov(d_op, ax_op));
+                if matches!(d_op, X86Operand::Reg(_)) && d_op == s_op {
+                    // Optimize: dest = -dest -> just neg
+                    asm.push(X86Instr::Neg(d_op));
+                } else if matches!(d_op, X86Operand::Reg(_)) {
+                    // Optimize: if dest is a register, can negate directly
+                    asm.push(X86Instr::Mov(d_op.clone(), s_op));
+                    asm.push(X86Instr::Neg(d_op));
+                } else {
+                    asm.push(X86Instr::Mov(ax_op.clone(), s_op));
+                    asm.push(X86Instr::Neg(ax_op.clone()));
+                    asm.push(X86Instr::Mov(d_op, ax_op));
+                }
             }
             UnaryOp::LogicalNot => {
                 // Determine source size for CMP
@@ -227,13 +281,21 @@ impl InstructionGenerator {
                 asm.push(X86Instr::Mov(d_op, ax_op));
             }
             UnaryOp::BitwiseNot => {
-                asm.push(X86Instr::Mov(ax_op.clone(), s_op));
-                asm.push(X86Instr::Not(ax_op.clone()));
-                asm.push(X86Instr::Mov(d_op, ax_op));
+                if matches!(d_op, X86Operand::Reg(_)) && d_op == s_op {
+                    // Optimize: dest = ~dest -> just not
+                    asm.push(X86Instr::Not(d_op));
+                } else {
+                    asm.push(X86Instr::Mov(ax_op.clone(), s_op));
+                    asm.push(X86Instr::Not(ax_op.clone()));
+                    asm.push(X86Instr::Mov(d_op, ax_op));
+                }
             }
             UnaryOp::Plus => {
-                asm.push(X86Instr::Mov(ax_op.clone(), s_op));
-                asm.push(X86Instr::Mov(d_op, ax_op));
+                // Unary plus is identity: just move source to destination
+                if d_op != s_op {
+                    asm.push(X86Instr::Mov(d_op, s_op));
+                }
+                // If d_op == s_op, no operation needed at all
             }
             UnaryOp::AddrOf | UnaryOp::Deref => unreachable!("AddrOf and Deref should be lowered by IR"),
         }
