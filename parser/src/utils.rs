@@ -138,11 +138,12 @@ impl<'a> ParserUtils for Parser<'a> {
         false
     }
 
-    /// Check if this is an extern inline function (from headers)
+    /// Check if this is an extern inline or static inline function (from headers)
     fn is_inline_function(&self) -> bool {
         let mut temp_pos = self.pos;
         let mut has_inline = false;
         let mut has_extern = false;
+        let mut has_static = false;
 
         // Scan modifiers
         while temp_pos < self.tokens.len() {
@@ -156,7 +157,11 @@ impl<'a> ParserUtils for Parser<'a> {
                     has_extern = true;
                     temp_pos += 1;
                 }
-                Token::Static | Token::Const | Token::Volatile | Token::Restrict | Token::Extension => {
+                Token::Static => {
+                    has_static = true;
+                    temp_pos += 1;
+                }
+                Token::Const | Token::Volatile | Token::Restrict | Token::Extension => {
                     temp_pos += 1;
                 }
                 Token::Attribute => {
@@ -169,8 +174,8 @@ impl<'a> ParserUtils for Parser<'a> {
             }
         }
 
-        // Must have BOTH extern AND inline (header functions) and be a function definition (with body)
-        has_inline && has_extern && self.is_function_definition()
+        // Skip inline functions from headers: extern inline OR static inline with function body
+        has_inline && (has_extern || has_static) && self.is_function_definition()
     }
 
     /// Skip an extern inline function definition

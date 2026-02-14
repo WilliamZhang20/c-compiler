@@ -54,7 +54,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                 // Skip extern variable declarations BEFORE other type checks
                 let _ = self.skip_extern_declaration();
             } else if self.is_inline_function() {
-                // Skip extern inline functions from headers (e.g., printf/scanf wrappers)
+                // Skip extern/static inline functions from headers (e.g., printf/scanf wrappers)
                 let _ = self.skip_extern_inline_function();
             } else if self.is_function_definition() {
                 // Try to parse function, skip if it fails
