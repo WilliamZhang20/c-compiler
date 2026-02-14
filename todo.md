@@ -1,3 +1,14 @@
+# Compiler TODOS
+
+### Efficiency Problems
+
+- Still using 2 callee-saved registers (rbx, rsi) vs GCC's 0
+- PHI-induced register shuffling (mov r8/r9 between blocks)
+- GCC uses stack slots, which is more efficient for short-lived variables
+
+### Miscellaneous Improvements
+
+- Auto-introduce obvious missing headers
 
 ## Future Feature Roadmap
 
