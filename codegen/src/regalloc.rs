@@ -60,7 +60,7 @@ pub struct LiveInterval {
     pub spill_slot: Option<i32>,
 }
 
-/// allocate_registers performs graph-coloring register allocation
+/// allocate_registers performs graph-coloring register allocation with copy coalescing
 pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     // 1. Compute live intervals for each variable
     let mut intervals = compute_live_intervals(func);
@@ -71,10 +71,17 @@ pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     // 2. Build interference graph
     let interference = build_interference_graph(&intervals);
     
-    // 3. Graph coloring with prioritization heuristics
-    color_graph(&mut intervals, &interference);
+    // 3. Collect copy hints for coalescing (maps dest -> src for Copy instructions)
+    let copy_hints = collect_copy_hints(func);
     
-    // 4. Build result map
+    // 4. Determine if we should allow callee-saved registers
+    // For small functions, avoid callee-saved to eliminate push/pop overhead
+    let use_callee_saved = should_use_callee_saved(func);
+    
+    // 5. Graph coloring with copy coalescing
+    color_graph(&mut intervals, &interference, &copy_hints, use_callee_saved);
+    
+    // 6. Build result map
     let mut reg_alloc = HashMap::new();
     for interval in &intervals {
         if let Some(reg) = interval.reg {
@@ -83,6 +90,20 @@ pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     }
     
     reg_alloc
+}
+
+fn should_use_callee_saved(func: &IrFunction) -> bool {
+    // Heuristic: for small functions with few blocks and instructions,
+    // prefer to spill to stack rather than use callee-saved registers
+    // This avoids the push/pop overhead which can be significant
+    
+    let num_blocks = func.blocks.len();
+    let num_instructions: usize = func.blocks.iter()
+        .map(|b| b.instructions.len())
+        .sum();
+    
+    // Allow callee-saved only for larger functions (>5 blocks or >30 instructions)
+    num_blocks > 5 || num_instructions > 30
 }
 
 fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
@@ -238,6 +259,24 @@ where F: FnMut(VarId) {
     }
 }
 
+fn collect_copy_hints(func: &IrFunction) -> HashMap<VarId, VarId> {
+    let mut hints = HashMap::new();
+    
+    // Collect copy instructions where src is a Var (dest = src)
+    // These are candidates for coalescing (assigning same register to both)
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let IrInstruction::Copy { dest, src } = inst {
+                if let Operand::Var(src_var) = src {
+                    hints.insert(*dest, *src_var);
+                }
+            }
+        }
+    }
+    
+    hints
+}
+
 fn build_interference_graph(intervals: &[LiveInterval]) -> HashMap<VarId, HashSet<VarId>> {
     let mut graph: HashMap<VarId, HashSet<VarId>> = HashMap::new();
     
@@ -258,7 +297,7 @@ fn build_interference_graph(intervals: &[LiveInterval]) -> HashMap<VarId, HashSe
     graph
 }
 
-fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>) {
+fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>, copy_hints: &HashMap<VarId, VarId>, use_callee_saved: bool) {
     // Sort by spill cost heuristic (shorter intervals = higher priority)
     intervals.sort_by_key(|i| i.end - i.start);
     
@@ -267,7 +306,7 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
     // Build a map of var -> register for already colored intervals
     let mut var_colors: HashMap<VarId, PhysicalReg> = HashMap::new();
     
-    // Greedy coloring with preference for caller-saved registers (no save/restore overhead)
+    // Greedy coloring with copy coalescing and preference for caller-saved registers
     for i in 0..intervals.len() {
         let mut used_colors: HashSet<PhysicalReg> = HashSet::new();
         let current_var = intervals[i].var;
@@ -281,17 +320,33 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // Try to assign a register, preferring caller-saved (no save/restore needed)
+        // Try to coalesce with copy hint first (if they don't interfere)
         let mut assigned_reg: Option<PhysicalReg> = None;
-        for reg in PhysicalReg::caller_saved() {
-            if !used_colors.contains(&reg) && available_regs.contains(&reg) {
-                assigned_reg = Some(reg);
-                break;
+        if let Some(hint_var) = copy_hints.get(&current_var) {
+            if let Some(hint_reg) = var_colors.get(hint_var) {
+                // Check if we can use the same register (not interfering and not already used)
+                let interferes = interference.get(&current_var)
+                    .map(|neighbors| neighbors.contains(hint_var))
+                    .unwrap_or(false);
+                
+                if !interferes && !used_colors.contains(hint_reg) && available_regs.contains(hint_reg) {
+                    assigned_reg = Some(*hint_reg);
+                }
             }
         }
         
-        // Fall back to callee-saved if caller-saved are exhausted
+        // If coalescing didn't work, try to assign a register with caller-saved preference
         if assigned_reg.is_none() {
+            for reg in PhysicalReg::caller_saved() {
+                if !used_colors.contains(&reg) && available_regs.contains(&reg) {
+                    assigned_reg = Some(reg);
+                    break;
+                }
+            }
+        }
+        
+        // Fall back to callee-saved if caller-saved are exhausted (and allowed)
+        if assigned_reg.is_none() && use_callee_saved {
             for reg in PhysicalReg::callee_saved() {
                 if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                     assigned_reg = Some(reg);
