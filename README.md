@@ -5,7 +5,7 @@ This repo contains the code for a C compiler project written in Rust, based on t
 
 The project began in a Rust study group at Trend Micro while I was interning there. After the internship was over, I completed the project independently, and am still iterating to make the compiler generate more efficient code.
 
-**Performance Achievement**: The compiler now **beats or ties GCC -O0 on 4 out of 5 benchmarks** (array_sum, matmul, bitwise, struct_bench), with only fib being ~5% slower. This demonstrates that effective mid-level IR optimizations and smart register allocation can match or exceed GCC's baseline performance.
+**Performance Achievement**: The compiler now **beats or ties GCC -O0** on 5 benchmark programs in the `benchmarks folder`. This demonstrates that effective mid-level IR optimizations and smart register allocation can match or exceed GCC's baseline performance.
 
 Disclaimer: the vast majority of the project is vibe-coded using a variety of Agentic IDEs like Copilot and Antigravity.
 

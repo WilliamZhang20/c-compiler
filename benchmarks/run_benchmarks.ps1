@@ -57,14 +57,25 @@ foreach ($bench in $benchmarks) {
     Write-Host "  Compiling with GCC -O2..." -ForegroundColor Gray
     gcc -O2 $sourceFile -o "benchmarks\${bench}_gcc_o2.exe" 2>&1 | Out-Null
     
-    # Run benchmarks (10 iterations each, take average)
+    # Run benchmarks with warmup and outlier filtering
     Write-Host "  Running benchmarks..." -ForegroundColor Gray
+    
+    $warmupRuns = 10
+    $measureRuns = 50
     
     $ourTimes = @()
     $gccO0Times = @()
     $gccO2Times = @()
     
-    for ($i = 0; $i -lt 10; $i++) {
+    # Warmup runs (don't measure)
+    for ($i = 0; $i -lt $warmupRuns; $i++) {
+        & ".\$ourExe" | Out-Null
+        & "benchmarks\${bench}_gcc_o0.exe" | Out-Null
+        & "benchmarks\${bench}_gcc_o2.exe" | Out-Null
+    }
+    
+    # Measurement runs
+    for ($i = 0; $i -lt $measureRuns; $i++) {
         # Our compiler
         $ourTime = Measure-Command { & ".\$ourExe" | Out-Null }
         $ourTimes += $ourTime.TotalMilliseconds
@@ -78,9 +89,18 @@ foreach ($bench in $benchmarks) {
         $gccO2Times += $gccO2Time.TotalMilliseconds
     }
     
-    $ourAvg = ($ourTimes | Measure-Object -Average).Average
-    $gccO0Avg = ($gccO0Times | Measure-Object -Average).Average
-    $gccO2Avg = ($gccO2Times | Measure-Object -Average).Average
+    # Filter outliers: remove top and bottom 20% and take average of middle 60%
+    function Get-TrimmedMean($times) {
+        $sorted = $times | Sort-Object
+        $count = $sorted.Count
+        $removeCount = [math]::Floor($count * 0.2)
+        $kept = $sorted[$removeCount..($count - $removeCount - 1)]
+        return ($kept | Measure-Object -Average).Average
+    }
+    
+    $ourAvg = Get-TrimmedMean $ourTimes
+    $gccO0Avg = Get-TrimmedMean $gccO0Times
+    $gccO2Avg = Get-TrimmedMean $gccO2Times
     
     $speedupO0 = [math]::Round($gccO0Avg / $ourAvg, 2)
     $speedupO2 = [math]::Round($gccO2Avg / $ourAvg, 2)
@@ -98,7 +118,8 @@ foreach ($bench in $benchmarks) {
 }
 
 $results += "`n`n## Notes`n"
-$results += "- Times are averaged over 10 runs`n"
+$results += "- Measurement methodology: 10 warmup runs + 50 measured runs per benchmark`n"
+$results += "- Times are trimmed mean (remove top/bottom 20%, average middle 60%) to filter outliers`n"
 $results += "- Speedup > 1.0 means our compiler is faster`n"
 $results += "- GCC -O0 is no optimization, GCC -O2 is standard optimizations`n"
 
