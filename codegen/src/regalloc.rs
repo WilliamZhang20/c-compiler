@@ -267,7 +267,7 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
     // Build a map of var -> register for already colored intervals
     let mut var_colors: HashMap<VarId, PhysicalReg> = HashMap::new();
     
-    // Greedy coloring with preference for callee-saved registers
+    // Greedy coloring with preference for caller-saved registers (no save/restore overhead)
     for i in 0..intervals.len() {
         let mut used_colors: HashSet<PhysicalReg> = HashSet::new();
         let current_var = intervals[i].var;
@@ -281,18 +281,18 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // Try to assign a register, preferring callee-saved
+        // Try to assign a register, preferring caller-saved (no save/restore needed)
         let mut assigned_reg: Option<PhysicalReg> = None;
-        for reg in PhysicalReg::callee_saved() {
+        for reg in PhysicalReg::caller_saved() {
             if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                 assigned_reg = Some(reg);
                 break;
             }
         }
         
-        // Fall back to caller-saved
+        // Fall back to callee-saved if caller-saved are exhausted
         if assigned_reg.is_none() {
-            for reg in PhysicalReg::caller_saved() {
+            for reg in PhysicalReg::callee_saved() {
                 if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                     assigned_reg = Some(reg);
                     break;
