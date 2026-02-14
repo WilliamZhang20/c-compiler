@@ -48,7 +48,7 @@ impl<'a> Parser<'a> {
     where
         F: Fn(&Token) -> bool,
     {
-        if self.check(&predicate) {
+        if self.check(predicate) {
             self.advance();
             true
         } else {
@@ -56,7 +56,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub(crate) fn check<F>(&self, predicate: &F) -> bool
+    pub(crate) fn check<F>(&self, predicate: F) -> bool
     where
         F: Fn(&Token) -> bool,
     {

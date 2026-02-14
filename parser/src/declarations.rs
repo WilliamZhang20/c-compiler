@@ -31,12 +31,12 @@ impl<'a> DeclarationParser for Parser<'a> {
                 }
             } else if self.match_token(|t| matches!(t, Token::Extension | Token::Attribute)) {
                 // Skip attributes/extensions at top level
-                if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                     let _ = self.skip_parentheses();
                 }
                 // Continue to next iteration without skipping the whole item
                 continue;
-            } else if self.check(&|t| matches!(t, Token::Enum))
+            } else if self.check(|t| matches!(t, Token::Enum))
                 && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
             {
                 // enum definition: enum Color { ... };
@@ -73,17 +73,17 @@ impl<'a> DeclarationParser for Parser<'a> {
                 // The actual definition will come from another file or later
                 let _ = self.skip_function_declaration();
             } else if self.check_is_type() 
-                || self.check(&|t| matches!(t, Token::Identifier { .. })) 
+                || self.check(|t| matches!(t, Token::Identifier { .. })) 
             {
                 // Could be a global declaration, struct definition, or union definition
                 // Wrap in error handling to skip complex header constructs we can't parse
-                let parse_result = if self.check(&|t| matches!(t, Token::Struct)) && self.is_struct_forward_declaration() {
+                let parse_result = if self.check(|t| matches!(t, Token::Struct)) && self.is_struct_forward_declaration() {
                     // Forward struct declaration: struct foo;
                     self.skip_forward_declaration()
-                } else if self.check(&|t| matches!(t, Token::Union)) && self.is_union_forward_declaration() {
+                } else if self.check(|t| matches!(t, Token::Union)) && self.is_union_forward_declaration() {
                     // Forward union declaration: union foo;
                     self.skip_forward_declaration()
-                } else if self.check(&|t| matches!(t, Token::Struct)) && self.is_struct_definition() {
+                } else if self.check(|t| matches!(t, Token::Struct)) && self.is_struct_definition() {
                     // struct definition without variable: struct foo { ... };
                     match self.parse_struct_definition() {
                         Ok(s) => {
@@ -92,7 +92,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                         }
                         Err(e) => Err(e),
                     }
-                } else if self.check(&|t| matches!(t, Token::Union)) && self.is_union_definition() {
+                } else if self.check(|t| matches!(t, Token::Union)) && self.is_union_definition() {
                     // union definition without variable: union foo { ... };
                     match self.parse_union_definition() {
                         Ok(u) => {
@@ -129,7 +129,7 @@ impl<'a> DeclarationParser for Parser<'a> {
         let _ty = self.parse_type()?;
         
         // Check if there's an inline struct/union/enum definition
-        if self.check(&|t| matches!(t, Token::OpenBrace)) {
+        if self.check(|t| matches!(t, Token::OpenBrace)) {
             // Skip the inline definition body
             self.skip_block_internal()?;
         }
@@ -137,13 +137,13 @@ impl<'a> DeclarationParser for Parser<'a> {
         // Check for function pointer typedef: typedef int (*name)(params);
         // After parsing the base type (e.g., "int"), the next token should be
         // '(' marking the start of the function pointer declarator.
-        if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+        if self.check(|t| matches!(t, Token::OpenParenthesis)) {
             // This is a function pointer typedef
             self.advance(); // consume '('
             
             // Skip attributes if present (e.g., __attribute__((__cdecl__)))
             while self.match_token(|t| matches!(t, Token::Attribute)) {
-                if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                     self.skip_parentheses()?;
                 }
             }
@@ -242,9 +242,9 @@ impl<'a> DeclarationParser for Parser<'a> {
             // Check for array syntax: typedef int arr[10]; (supports multi-dimensional)
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
-                if !self.check(&|t| matches!(t, Token::CloseBracket)) {
+                if !self.check(|t| matches!(t, Token::CloseBracket)) {
                     // Skip the size expression (could be constant or expression)
-                    while !self.check(&|t| matches!(t, Token::CloseBracket)) && !self.is_at_end() {
+                    while !self.check(|t| matches!(t, Token::CloseBracket)) && !self.is_at_end() {
                         self.advance();
                     }
                 }
@@ -290,7 +290,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                 }
                 Some(Token::Attribute | Token::Extension) => {
                     self.pos += 1;
-                    if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                    if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                         let _ = self.skip_parentheses();
                     }
                 }
@@ -308,7 +308,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             Ok(ty) => ty,
             Err(_) => {
                 // Check if we have an identifier next (implicit int return type)
-                if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+                if self.check(|t| matches!(t, Token::Identifier { .. })) {
                     model::Type::Int
                 } else {
                     return Err("Expected return type or function name".to_string());
@@ -353,7 +353,7 @@ impl<'a> DeclarationParser for Parser<'a> {
     fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String> {
         let mut params = Vec::new();
 
-        if self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+        if self.check(|t| matches!(t, Token::CloseParenthesis)) {
             return Ok(params);
         }
 
@@ -369,7 +369,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             let mut p_type = self.parse_type()?;
             
             // Handle (void)
-            if matches!(p_type, model::Type::Void) && self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+            if matches!(p_type, model::Type::Void) && self.check(|t| matches!(t, Token::CloseParenthesis)) {
                 break;
             }
 
@@ -385,7 +385,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             // Handle array syntax in function parameters: type name[] (supports multi-dimensional)
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are common for params)
-                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
                     match self.advance() {
@@ -413,7 +413,7 @@ impl<'a> DeclarationParser for Parser<'a> {
         
         let (base_type, qualifiers) = match self.parse_type_with_qualifiers() {
              Ok(res) => res,
-             Err(_) if self.check(&|t| matches!(t, Token::Identifier { .. })) => {
+             Err(_) if self.check(|t| matches!(t, Token::Identifier { .. })) => {
                  (model::Type::Int, model::TypeQualifiers::default())
              }
              Err(e) => return Err(e),
@@ -436,7 +436,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             // Check for array (supports multi-dimensional)
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed for externs/params)
-                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
                     match self.advance() {

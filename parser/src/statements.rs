@@ -14,7 +14,7 @@ impl<'a> StatementParser for Parser<'a> {
     fn parse_block(&mut self) -> Result<Block, String> {
         self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
         let mut statements = Vec::new();
-        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+        while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
             statements.push(self.parse_stmt()?);
         }
         self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
@@ -85,7 +85,7 @@ impl<'a> StatementParser for Parser<'a> {
         }
 
         // Block statement
-        if self.check(&|t| matches!(t, Token::OpenBrace)) {
+        if self.check(|t| matches!(t, Token::OpenBrace)) {
             let block = self.parse_block()?;
             return Ok(Stmt::Block(block));
         }
@@ -97,7 +97,7 @@ impl<'a> StatementParser for Parser<'a> {
 
         // Check for label (identifier followed by colon)
         // We need to lookahead to distinguish from expression statements
-        if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+        if self.check(|t| matches!(t, Token::Identifier { .. })) {
             let saved_pos = self.pos;
             let label_name = if let Some(Token::Identifier { value }) = self.advance() {
                 value.clone()
@@ -105,7 +105,7 @@ impl<'a> StatementParser for Parser<'a> {
                 String::new()
             };
             
-            if !label_name.is_empty() && self.check(&|t| matches!(t, Token::Colon)) {
+            if !label_name.is_empty() && self.check(|t| matches!(t, Token::Colon)) {
                 // It's a label
                 self.advance(); // consume colon
                 return Ok(Stmt::Label(label_name));
@@ -222,7 +222,7 @@ impl<'a> Parser<'a> {
         let (mut r#type, qualifiers) = self.parse_type_with_qualifiers()?;
 
         // Check for function pointer: type (*name)(params)
-        if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+        if self.check(|t| matches!(t, Token::OpenParenthesis)) {
             // Could be function pointer or just grouped expression
             // Peek ahead to see if it's (*identifier)
             let saved_pos = self.pos;
@@ -250,18 +250,18 @@ impl<'a> Parser<'a> {
 
                 // Parse parameter types
                 let mut param_types = Vec::new();
-                if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                if !self.check(|t| matches!(t, Token::CloseParenthesis)) {
                     loop {
                         let param_type = self.parse_type()?;
                         param_types.push(param_type.clone());
                         // Optional parameter name
-                        if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+                        if self.check(|t| matches!(t, Token::Identifier { .. })) {
                             self.advance();
                         }
                         // Handle array syntax: type name[] or type[] (supports multi-dimensional)
                         while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                             // Check if array size is provided
-                            let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                            let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                                 0 // Use 0 to represent unsized array
                             } else {
                                 match self.advance() {
@@ -315,7 +315,7 @@ impl<'a> Parser<'a> {
         // Check for array (supports multi-dimensional)
         while self.match_token(|t| matches!(t, Token::OpenBracket)) {
             // Check if array size is provided (empty brackets [] are allowed)
-            let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+            let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                 0 // Use 0 to represent unsized array
             } else {
                 match self.advance() {
@@ -361,7 +361,7 @@ impl<'a> Parser<'a> {
         
         // Parse outputs (if present)
         if self.match_token(|t| matches!(t, Token::Colon)) {
-            if !self.check(&|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
+            if !self.check(|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
                 loop {
                     let constraint = match self.advance() {
                         Some(Token::StringLiteral { value }) => value.clone(),
@@ -380,7 +380,7 @@ impl<'a> Parser<'a> {
             
             // Parse inputs (if present)
             if self.match_token(|t| matches!(t, Token::Colon)) {
-                if !self.check(&|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
+                if !self.check(|t| matches!(t, Token::Colon | Token::CloseParenthesis)) {
                     loop {
                         let constraint = match self.advance() {
                             Some(Token::StringLiteral { value }) => value.clone(),
@@ -399,7 +399,7 @@ impl<'a> Parser<'a> {
                 
                 // Parse clobbers (if present)
                 if self.match_token(|t| matches!(t, Token::Colon)) {
-                    if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                    if !self.check(|t| matches!(t, Token::CloseParenthesis)) {
                         loop {
                             let clobber = match self.advance() {
                                 Some(Token::StringLiteral { value }) => value.clone(),

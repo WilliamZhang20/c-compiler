@@ -44,7 +44,7 @@ impl<'a> TypeParser for Parser<'a> {
                 }
                 Some(Token::Attribute | Token::Extension) => {
                     self.advance();
-                    if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+                    if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                         self.skip_parentheses()?;
                     }
                 }
@@ -240,7 +240,7 @@ impl<'a> TypeParser for Parser<'a> {
         self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
 
         let mut fields = Vec::new();
-        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+        while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
             let ty = self.parse_type()?;
             let field_name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
@@ -251,7 +251,7 @@ impl<'a> TypeParser for Parser<'a> {
             let mut final_ty = ty;
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
-                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
                     match self.advance() {
@@ -299,7 +299,7 @@ impl<'a> TypeParser for Parser<'a> {
         self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
 
         let mut fields = Vec::new();
-        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+        while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
             let ty = self.parse_type()?;
             let field_name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
@@ -310,7 +310,7 @@ impl<'a> TypeParser for Parser<'a> {
             let mut final_ty = ty;
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Check if array size is provided (empty brackets [] are allowed)
-                let size = if self.check(&|t| matches!(t, Token::CloseBracket)) {
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
                     match self.advance() {
@@ -345,7 +345,7 @@ impl<'a> TypeParser for Parser<'a> {
         let mut constants = Vec::new();
         let mut next_value = 0_i64;
 
-        while !self.check(&|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
+        while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
             let const_name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
                 other => return Err(format!("expected enum constant name, found {:?}", other)),

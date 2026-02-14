@@ -17,7 +17,7 @@ impl<'a> AttributeParser for Parser<'a> {
             }
             if !self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
                 // Malformed attribute, skip to semicolon or close paren
-                while !self.check(&|t| matches!(t, Token::Semicolon | Token::CloseParenthesis)) && !self.is_at_end() {
+                while !self.check(|t| matches!(t, Token::Semicolon | Token::CloseParenthesis)) && !self.is_at_end() {
                     self.advance();
                 }
                 continue;
@@ -25,7 +25,7 @@ impl<'a> AttributeParser for Parser<'a> {
 
             // Parse attributes inside, comma-separated
             loop {
-                if self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                if self.check(|t| matches!(t, Token::CloseParenthesis)) {
                     break;
                 }
 

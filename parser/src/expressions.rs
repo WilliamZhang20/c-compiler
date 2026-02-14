@@ -19,7 +19,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_assignment(&mut self) -> Result<Expr, String> {
         let left = self.parse_conditional()?;
 
-        if self.check(&|t| matches!(t, Token::Equal 
+        if self.check(|t| matches!(t, Token::Equal 
             | Token::PlusEqual | Token::MinusEqual | Token::StarEqual | Token::SlashEqual 
             | Token::PercentEqual | Token::AndEqual | Token::OrEqual | Token::XorEqual 
             | Token::LessLessEqual | Token::GreaterGreaterEqual)) 
@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
             Ok(Expr::PrefixDecrement(Box::new(expr)))
         } else if self.match_token(|t| matches!(t, Token::SizeOf)) {
             self.parse_sizeof()
-        } else if self.check(&|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1)
+        } else if self.check(|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1)
         {
             // Cast: (type)expr
             self.advance(); // consume '('
@@ -344,7 +344,7 @@ impl<'a> Parser<'a> {
             } else if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
                 // Function call
                 let mut args = Vec::new();
-                if !self.check(&|t| matches!(t, Token::CloseParenthesis)) {
+                if !self.check(|t| matches!(t, Token::CloseParenthesis)) {
                     loop {
                         args.push(self.parse_expr()?);
                         if !self.match_token(|t| matches!(t, Token::Comma)) {

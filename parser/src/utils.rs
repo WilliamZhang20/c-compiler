@@ -176,9 +176,9 @@ impl<'a> ParserUtils for Parser<'a> {
     /// Skip an extern inline function definition
     fn skip_extern_inline_function(&mut self) -> Result<(), String> {
         // Skip modifiers and type
-        while self.check(&|t| matches!(t, Token::Extern | Token::Inline | Token::Static | Token::Const | Token::Volatile | Token::Restrict | Token::Extension | Token::Attribute)) {
+        while self.check(|t| matches!(t, Token::Extern | Token::Inline | Token::Static | Token::Const | Token::Volatile | Token::Restrict | Token::Extension | Token::Attribute)) {
             self.advance();
-            if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                 self.skip_parentheses()?;
             }
         }
@@ -187,15 +187,15 @@ impl<'a> ParserUtils for Parser<'a> {
         self.parse_type()?;
         
         // Skip attributes after type
-        while self.check(&|t| matches!(t, Token::Attribute | Token::Extension)) {
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
             self.advance();
-            if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                 self.skip_parentheses()?;
             }
         }
         
         // Skip function name
-        if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+        if self.check(|t| matches!(t, Token::Identifier { .. })) {
             self.advance();
         }
         
@@ -212,9 +212,9 @@ impl<'a> ParserUtils for Parser<'a> {
         }
         
         // Skip attributes after parameters
-        while self.check(&|t| matches!(t, Token::Attribute | Token::Extension)) {
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
             self.advance();
-            if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                 self.skip_parentheses()?;
             }
         }
@@ -483,14 +483,14 @@ impl<'a> ParserUtils for Parser<'a> {
     fn skip_forward_declaration(&mut self) -> Result<(), String> {
         self.advance(); // skip struct/union keyword
         
-        while self.check(&|t| matches!(t, Token::Attribute | Token::Extension)) {
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
             self.advance();
-            if self.check(&|t| matches!(t, Token::OpenParenthesis)) {
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
                 self.skip_parentheses()?;
             }
         }
         
-        if self.check(&|t| matches!(t, Token::Identifier { .. })) {
+        if self.check(|t| matches!(t, Token::Identifier { .. })) {
             self.advance();
         }
         

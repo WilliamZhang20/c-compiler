@@ -33,6 +33,11 @@ pub struct Lowerer {
     // Variable types for IR variables (used for float/int conversions)
     pub(crate) var_types: HashMap<VarId, Type>,
     pub(crate) param_indices: HashMap<String, usize>,
+    // Cache for predecessor lookups
+    pub(crate) pred_cache: HashMap<BlockId, Vec<BlockId>>,
+    pub(crate) pred_cache_valid: bool,
+    // Cache for type sizes (using string representation as key since Type doesn't implement Hash)
+    pub(crate) type_size_cache: HashMap<String, i64>,
 }
 
 impl Lowerer {
@@ -65,6 +70,9 @@ impl Lowerer {
             var_types: HashMap::new(),
             param_indices: HashMap::new(),
             current_return_type: None,
+            pred_cache: HashMap::new(),
+            pred_cache_valid: false,
+            type_size_cache: HashMap::new(),
         }
     }
 
@@ -214,8 +222,17 @@ impl Lowerer {
     }
 
     /// Calculate the size of a type in bytes
-    pub(crate) fn get_type_size(&self, ty: &Type) -> i64 {
-        match ty {
+    pub(crate) fn get_type_size(&mut self, ty: &Type) -> i64 {
+        // Create a cache key from the type
+        let cache_key = format!("{:?}", ty);
+        
+        // Check cache first
+        if let Some(&size) = self.type_size_cache.get(&cache_key) {
+            return size;
+        }
+        
+        // Compute size
+        let size = match ty {
             Type::Int | Type::UnsignedInt => 4,  // 32-bit int
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
@@ -228,7 +245,7 @@ impl Lowerer {
             Type::FunctionPointer { .. } => 8, // Function pointers are 8 bytes
             Type::Array(base, size) => self.get_type_size(base) * (*size as i64),
             Type::Struct(name) => {
-                if let Some(s_def) = self.struct_defs.get(name) {
+                if let Some(s_def) = self.struct_defs.get(name).cloned() {
                     let is_packed = s_def.attributes.iter().any(|attr| matches!(attr, model::Attribute::Packed));
                     let mut size = 0;
                     
@@ -257,7 +274,7 @@ impl Lowerer {
                 }
             }
             Type::Union(name) => {
-                if let Some(u_def) = self.union_defs.get(name) {
+                if let Some(u_def) = self.union_defs.get(name).cloned() {
                     // Union size is the largest field
                     let mut max_size = 0;
                     for field in &u_def.fields {
@@ -272,13 +289,17 @@ impl Lowerer {
                 }
             }
             Type::Typedef(name) => {
-                if let Some(real_ty) = self.typedefs.get(name) {
-                    self.get_type_size(real_ty)
+                if let Some(real_ty) = self.typedefs.get(name).cloned() {
+                    self.get_type_size(&real_ty)
                 } else {
                     4
                 }
             }
-        }
+        };
+        
+        // Cache the result
+        self.type_size_cache.insert(cache_key, size);
+        size
     }
 
     /// Get the natural alignment of a type in bytes
@@ -343,9 +364,9 @@ impl Lowerer {
     }
 
     /// Get the byte offset and type of a struct/union member
-    pub(crate) fn get_member_offset(&self, struct_or_union_name: &str, member_name: &str) -> (i64, Type) {
+    pub(crate) fn get_member_offset(&mut self, struct_or_union_name: &str, member_name: &str) -> (i64, Type) {
         // Check if it's a struct
-        if let Some(s_def) = self.struct_defs.get(struct_or_union_name) {
+        if let Some(s_def) = self.struct_defs.get(struct_or_union_name).cloned() {
             let is_packed = s_def.attributes.iter().any(|attr| matches!(attr, model::Attribute::Packed));
             let mut offset = 0;
             
@@ -434,6 +455,8 @@ impl Lowerer {
         self.pending_gotos.clear();
         self.current_return_type = Some(f.return_type.clone());
         self.param_indices.clear();
+        self.pred_cache.clear();
+        self.pred_cache_valid = false;
 
         let entry_id = self.new_block();
         self.current_block = Some(entry_id);

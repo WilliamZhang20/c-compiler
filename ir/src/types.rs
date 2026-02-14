@@ -9,7 +9,7 @@ pub struct VarId(pub usize);
 pub struct BlockId(pub usize);
 
 /// Operand in IR instructions - can be a constant, variable, or global
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
     Constant(i64),
     FloatConstant(f64),

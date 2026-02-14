@@ -55,6 +55,7 @@ fn try_simplify_binary(
         BinaryOp::BitwiseOr => simplify_or(left, right, dest),
         BinaryOp::BitwiseXor => simplify_xor(left, right, dest),
         BinaryOp::ShiftLeft | BinaryOp::ShiftRight => simplify_shift(op, left, right, dest),
+        BinaryOp::EqualEqual | BinaryOp::NotEqual => simplify_comparison(op, left, right, dest),
         _ => None,
     }
 }
@@ -146,6 +147,15 @@ fn simplify_sub(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Inst
             src: left.clone(),
         });
     }
+    // x - x = 0 (same variable)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            return Some(Instruction::Copy {
+                dest,
+                src: Operand::Constant(0),
+            });
+        }
+    }
     None
 }
 
@@ -169,6 +179,15 @@ fn simplify_and(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Inst
             dest,
             src: right.clone(),
         });
+    }
+    // x & x = x (idempotent)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            return Some(Instruction::Copy {
+                dest,
+                src: left.clone(),
+            });
+        }
     }
     None
 }
@@ -194,6 +213,15 @@ fn simplify_or(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instr
             src: Operand::Constant(-1),
         });
     }
+    // x | x = x (idempotent)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            return Some(Instruction::Copy {
+                dest,
+                src: left.clone(),
+            });
+        }
+    }
     None
 }
 
@@ -210,6 +238,15 @@ fn simplify_xor(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Inst
             dest,
             src: right.clone(),
         });
+    }
+    // x ^ x = 0 (same variable)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            return Some(Instruction::Copy {
+                dest,
+                src: Operand::Constant(0),
+            });
+        }
     }
     None
 }
@@ -233,6 +270,25 @@ fn simplify_shift(
             dest,
             src: Operand::Constant(0),
         });
+    }
+    None
+}
+
+fn simplify_comparison(
+    op: &BinaryOp,
+    left: &Operand,
+    right: &Operand,
+    dest: ir::VarId,
+) -> Option<Instruction> {
+    // x == x is always true, x != x is always false (for same variable)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            let result = if matches!(op, BinaryOp::EqualEqual) { 1 } else { 0 };
+            return Some(Instruction::Copy {
+                dest,
+                src: Operand::Constant(result),
+            });
+        }
     }
     None
 }

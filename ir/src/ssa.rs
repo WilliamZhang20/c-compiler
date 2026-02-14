@@ -73,8 +73,16 @@ impl Lowerer {
         phi_var
     }
 
-    /// Get all predecessor blocks for a given block
-    pub(crate) fn get_predecessors(&self, block: BlockId) -> Vec<BlockId> {
+    /// Get all predecessor blocks for a given block (with caching)
+    pub(crate) fn get_predecessors(&mut self, block: BlockId) -> Vec<BlockId> {
+        // Check cache first
+        if self.pred_cache_valid {
+            if let Some(preds) = self.pred_cache.get(&block) {
+                return preds.clone();
+            }
+        }
+        
+        // Compute predecessors
         let mut preds = Vec::new();
         for b in &self.blocks {
             match &b.terminator {
@@ -86,6 +94,46 @@ impl Lowerer {
                 _ => {}
             }
         }
+        
+        // Update cache if it's valid
+        if self.pred_cache_valid {
+            self.pred_cache.insert(block, preds.clone());
+        }
+        
         preds
+    }
+    
+    /// Invalidate the predecessor cache (call when CFG changes)
+    #[allow(dead_code)]
+    pub(crate) fn invalidate_pred_cache(&mut self) {
+        self.pred_cache_valid = false;
+        self.pred_cache.clear();
+    }
+    
+    /// Rebuild the predecessor cache for all blocks
+    #[allow(dead_code)]
+    pub(crate) fn rebuild_pred_cache(&mut self) {
+        self.pred_cache.clear();
+        
+        // Initialize empty predecessor lists for all blocks
+        for block in &self.blocks {
+            self.pred_cache.insert(block.id, Vec::new());
+        }
+        
+        // Populate predecessor lists
+        for block in &self.blocks {
+            match &block.terminator {
+                Terminator::Br(target) => {
+                    self.pred_cache.entry(*target).or_default().push(block.id);
+                }
+                Terminator::CondBr { then_block, else_block, .. } => {
+                    self.pred_cache.entry(*then_block).or_default().push(block.id);
+                    self.pred_cache.entry(*else_block).or_default().push(block.id);
+                }
+                _ => {}
+            }
+        }
+        
+        self.pred_cache_valid = true;
     }
 }
