@@ -11,11 +11,13 @@ pub trait CallingConvention {
     fn float_param_regs(&self) -> &'static [X86Reg];
     
     /// Register used for return values
+    #[allow(dead_code)]
     fn return_reg(&self) -> X86Reg {
         X86Reg::Rax
     }
     
     /// Register used for floating-point return values
+    #[allow(dead_code)]
     fn float_return_reg(&self) -> X86Reg {
         X86Reg::Xmm0
     }
@@ -24,6 +26,7 @@ pub trait CallingConvention {
     fn shadow_space_size(&self) -> usize;
     
     /// Callee-saved registers (must be preserved across function calls)
+    #[allow(dead_code)]
     fn callee_saved_regs(&self) -> &'static [X86Reg];
 }
 
@@ -81,6 +84,7 @@ pub fn get_convention(convention_type: ConventionType) -> Box<dyn CallingConvent
 }
 
 /// Helper to get calling convention for current host
+#[allow(dead_code)]
 pub fn host_convention() -> Box<dyn CallingConvention> {
     let platform = Platform::host();
     let convention_type = ConventionType::for_platform(platform);

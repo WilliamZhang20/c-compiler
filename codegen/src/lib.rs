@@ -181,6 +181,11 @@ impl Codegen {
             }
         }
         
+        // Add .note.GNU-stack section for Linux to mark stack as non-executable
+        if matches!(self.target.platform, model::Platform::Linux) {
+            output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
+        }
+        
         output
     }
 }
