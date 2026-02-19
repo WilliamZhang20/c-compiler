@@ -90,7 +90,9 @@ impl Codegen {
                  let mut in_custom_section = false;
                  for attr in &g.attributes {
                      if let model::Attribute::Section(section_name) = attr {
-                         output.push_str(&format!(".section {}\n", section_name));
+                         // Add "aw" flags (allocatable, writable) and @progbits type
+                         // This ensures the section is loaded into memory on Linux
+                         output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
                          in_custom_section = true;
                      }
                  }
@@ -145,6 +147,7 @@ impl Codegen {
                 &mut self.float_constants,
                 &mut self.next_float_const,
                 self.enable_regalloc,
+                &self.target,
             );
             
             let mut func_asm = func_gen.gen_function(func);

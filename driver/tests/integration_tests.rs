@@ -7,7 +7,14 @@ fn run_all_c_tests() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let workspace_root = Path::new(&manifest_dir).parent().expect("Failed to get workspace root");
     let testing_dir = workspace_root.join("testing");
-    let driver_path = workspace_root.join("target").join("debug").join("driver.exe");
+    
+    // Platform-specific driver executable name
+    let driver_name = if cfg!(target_os = "windows") {
+        "driver.exe"
+    } else {
+        "driver"
+    };
+    let driver_path = workspace_root.join("target").join("debug").join(driver_name);
 
     // Ensure driver is built
     let status = Command::new("cargo")
@@ -55,7 +62,8 @@ fn run_all_c_tests() {
             }
 
             // Run executable (generated in workspace root)
-            let exe_name = path.file_stem().unwrap().to_str().unwrap().to_string() + ".exe";
+            let exe_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let exe_name = path.file_stem().unwrap().to_str().unwrap().to_string() + exe_ext;
             let exe_path = workspace_root.join(&exe_name);
             
             let run_status = Command::new(&exe_path)

@@ -8,6 +8,7 @@ use crate::types::TypeCalculator;
 use crate::float_ops::{gen_float_binary_op, gen_float_unary_op};
 use crate::memory_ops::{gen_load, gen_store, gen_gep};
 use crate::call_ops::{gen_call, gen_indirect_call};
+use crate::calling_convention::get_convention;
 
 /// Handles generation of code for a single function
 pub struct FunctionGenerator<'a> {
@@ -19,6 +20,7 @@ pub struct FunctionGenerator<'a> {
     pub(crate) func_return_types: &'a HashMap<String, Type>,
     pub(crate) float_constants: &'a mut HashMap<String, f64>,
     pub(crate) next_float_const: &'a mut usize,
+    pub(crate) target: &'a model::TargetConfig,
     
     // Per-function state
     pub(crate) stack_slots: HashMap<VarId, i32>,
@@ -38,6 +40,7 @@ impl<'a> FunctionGenerator<'a> {
         float_constants: &'a mut HashMap<String, f64>,
         next_float_const: &'a mut usize,
         enable_regalloc: bool,
+        target: &'a model::TargetConfig,
     ) -> Self {
         Self {
             asm: Vec::new(),
@@ -46,6 +49,7 @@ impl<'a> FunctionGenerator<'a> {
             func_return_types,
             float_constants,
             next_float_const,
+            target,
             stack_slots: HashMap::new(),
             next_slot: 0,
             reg_alloc: HashMap::new(),
@@ -60,15 +64,18 @@ impl<'a> FunctionGenerator<'a> {
         // Check if function is variadic (uses va_start)
         let uses_va_start = func.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, IrInstruction::VaStart {..})));
 
+        // Get calling convention for this target
+        let convention = get_convention(self.target.calling_convention);
+        
         // Perform register allocation
         if self.enable_regalloc {
-            self.reg_alloc = allocate_registers(func);
+            self.reg_alloc = allocate_registers(func, self.target);
         }
         
         // Identify used callee-saved registers
         self.current_saved_regs.clear();
         let used_regs: std::collections::HashSet<_> = self.reg_alloc.values().collect();
-        for reg in PhysicalReg::callee_saved() {
+        for reg in PhysicalReg::callee_saved(self.target) {
             if used_regs.contains(&reg) {
                 self.current_saved_regs.push(reg.to_x86());
             }
@@ -92,7 +99,7 @@ impl<'a> FunctionGenerator<'a> {
         
         let saved_size = (self.current_saved_regs.len() * 8) as i32;
         let locals_size = self.next_slot - saved_size;
-        let shadow_space = 32;
+        let shadow_space = convention.shadow_space_size() as i32;
         
         // Align total stack frame to 16 bytes
         let total_stack = saved_size + locals_size + shadow_space;
@@ -105,15 +112,19 @@ impl<'a> FunctionGenerator<'a> {
 
         // Spill register parameters to shadow space if variadic
         if uses_va_start {
-            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 16), X86Operand::Reg(X86Reg::Rcx)));
-            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 24), X86Operand::Reg(X86Reg::Rdx)));
-            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 32), X86Operand::Reg(X86Reg::R8)));
-            self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, 40), X86Operand::Reg(X86Reg::R9)));
+            for (i, reg) in convention.param_regs().iter().enumerate() {
+                let offset = 16 + (i * 8) as i32;
+                self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, offset), X86Operand::Reg(reg.clone())));
+            }
         }
 
-        // Handle parameters (Windows ABI: RCX, RDX, R8, R9 for ints; XMM0-XMM3 for floats)
-        let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-        let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
+        // Handle parameters
+        let param_regs = convention.param_regs();
+        let float_regs = convention.float_param_regs();
+        
+        // Build a list of (source_reg, dest_op) pairs to handle conflicts
+        let mut param_moves: Vec<(X86Operand, X86Operand, bool)> = Vec::new();
+        
         for (i, (param_type, var)) in func.params.iter().enumerate() {
             // Record parameter type for later use
             self.var_types.insert(*var, param_type.clone());
@@ -121,23 +132,124 @@ impl<'a> FunctionGenerator<'a> {
             let dest = self.var_to_op(*var);
             let is_float = matches!(param_type, Type::Float | Type::Double);
             
-            if i < 4 {
-                if is_float {
+            if i < param_regs.len() {
+                if is_float && i < float_regs.len() {
                     // Float parameters come in XMM registers
-                    self.asm.push(X86Instr::Movss(dest, X86Operand::Reg(float_regs[i].clone())));
-                } else {
+                    let src = X86Operand::Reg(float_regs[i].clone());
+                    if src != dest {
+                        param_moves.push((src, dest, true));
+                    }
+                } else if !is_float {
                     // Integer/pointer parameters come in general-purpose registers
-                    self.asm.push(X86Instr::Mov(dest, X86Operand::Reg(param_regs[i].clone())));
+                    let src = X86Operand::Reg(param_regs[i].clone());
+                    if src != dest {
+                        param_moves.push((src, dest, false));
+                    }
                 }
             } else {
-                // Parameters beyond the 4th are on the stack
-                let offset = 16 + 32 + (i - 4) * 8;
+                // Parameters beyond register count are on the stack
+                let offset = 16 + shadow_space + ((i - param_regs.len()) * 8) as i32;
                 if is_float {
                     self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, offset as i32)));
                     self.asm.push(X86Instr::Movss(dest, X86Operand::Reg(X86Reg::Xmm0)));
                 } else {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset as i32)));
                     self.asm.push(X86Instr::Mov(dest, X86Operand::Reg(X86Reg::Rax)));
+                }
+            }
+        }
+        
+        // Execute parameter moves, handling conflicts by breaking cycles
+        let mut completed = vec![false; param_moves.len()];
+        
+        while completed.iter().any(|&c| !c) {
+            let mut made_progress = false;
+            
+            for i in 0..param_moves.len() {
+                if completed[i] {
+                    continue;
+                }
+                
+                let (ref src, ref dst, is_float) = param_moves[i];
+                
+                // Check if dst conflicts with any uncompleted src
+                let has_conflict = param_moves.iter().enumerate().any(|(j, (s, _, _))| {
+                    !completed[j] && i != j && dst == s
+                });
+                
+                if !has_conflict {
+                    // Safe to move
+                    if is_float {
+                        self.asm.push(X86Instr::Movss(dst.clone(), src.clone()));
+                    } else {
+                        self.asm.push(X86Instr::Mov(dst.clone(), src.clone()));
+                    }
+                    completed[i] = true;
+                    made_progress = true;
+                }
+            }
+            
+            // If we couldn't make progress, we have a cycle - break it with a swap
+            if !made_progress {
+                // Find the cycle
+                for i in 0..param_moves.len() {
+                    if completed[i] {
+                        continue;
+                    }
+                    
+                    let (ref src_i, ref dst_i, is_float_i) = param_moves[i];
+                    
+                    // Look for the other move in the cycle (where dst_i == src_j)
+                    for j in 0..param_moves.len() {
+                        if i == j || completed[j] {
+                            continue;
+                        }
+                        
+                        let (ref src_j, ref dst_j, is_float_j) = param_moves[j];
+                        
+                        if dst_i == src_j && src_i == dst_j {
+                            // Found a 2-cycle: swap regi <-> regj
+                            // Standard 3-instruction swap: temp = src_i; dst_j = src_j; dst_i = temp
+                            assert_eq!(is_float_i, is_float_j, "Float/int mismatch in cycle");
+                            
+                            if is_float_i {
+                                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm7), src_i.clone()));
+                                self.asm.push(X86Instr::Movss(dst_j.clone(), src_j.clone()));
+                                self.asm.push(X86Instr::Movss(dst_i.clone(), X86Operand::Reg(X86Reg::Xmm7)));
+                            } else {
+                                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), src_i.clone()));
+                                self.asm.push(X86Instr::Mov(dst_j.clone(), src_j.clone()));
+                                self.asm.push(X86Instr::Mov(dst_i.clone(), X86Operand::Reg(X86Reg::R10)));
+                            }
+                            completed[i] = true;
+                            completed[j] = true;
+                            made_progress = true;
+                            break;
+                        }
+                    }
+                    
+                    if made_progress {
+                        break;
+                    }
+                }
+                
+                // If still no progress, we may have a longer cycle (3+) - shouldn't happen with simple parameter passing
+                // but handle by breaking one edge
+                if !made_progress {
+                    for i in 0..param_moves.len() {
+                        if !completed[i] {
+                            let (ref src, ref dst, is_float) = param_moves[i];
+                            if is_float {
+                                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm7), src.clone()));
+                                self.asm.push(X86Instr::Movss(dst.clone(), X86Operand::Reg(X86Reg::Xmm7)));
+                            } else {
+                                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), src.clone()));
+                                self.asm.push(X86Instr::Mov(dst.clone(), X86Operand::Reg(X86Reg::R10)));
+                            }
+                            completed[i] = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
