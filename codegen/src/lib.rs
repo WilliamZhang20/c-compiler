@@ -7,6 +7,7 @@ mod function;
 mod float_ops;
 mod memory_ops;
 mod call_ops;
+mod calling_convention;
 
 use model::Type;
 use ir::IRProgram;
@@ -16,6 +17,7 @@ pub use x86::{X86Reg, X86Operand, X86Instr, emit_asm};
 pub use regalloc::{PhysicalReg, allocate_registers};
 use peephole::apply_peephole;
 use function::FunctionGenerator;
+pub use model::TargetConfig;
 
 pub struct Codegen {
     // Shared state
@@ -25,6 +27,7 @@ pub struct Codegen {
     next_float_const: usize,
     func_return_types: HashMap<String, Type>,
     enable_regalloc: bool,
+    target: TargetConfig,
 }
 
 impl Codegen {
@@ -36,6 +39,7 @@ impl Codegen {
             next_float_const: 0,
             func_return_types: HashMap::new(),
             enable_regalloc: true,
+            target: TargetConfig::host(),
         }
     }
 
