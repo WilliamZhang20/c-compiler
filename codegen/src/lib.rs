@@ -90,9 +90,18 @@ impl Codegen {
                  let mut in_custom_section = false;
                  for attr in &g.attributes {
                      if let model::Attribute::Section(section_name) = attr {
-                         // Add "aw" flags (allocatable, writable) and @progbits type
-                         // This ensures the section is loaded into memory on Linux
-                         output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
+                         // Generate platform-specific section directive
+                         match self.target.platform {
+                             model::Platform::Linux => {
+                                 // ELF format: section name, flags, type
+                                 // "aw" = allocatable, writable; @progbits = contains data
+                                 output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
+                             }
+                             model::Platform::Windows => {
+                                 // PE/COFF format: section name only (no @type syntax)
+                                 output.push_str(&format!(".section {}\n", section_name));
+                             }
+                         }
                          in_custom_section = true;
                      }
                  }
