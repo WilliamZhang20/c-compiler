@@ -241,10 +241,38 @@ impl<'a> TypeParser for Parser<'a> {
 
         let mut fields = Vec::new();
         while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
-            let ty = self.parse_type()?;
+            // Try to parse field type - if it fails, skip to next semicolon or closing brace
+            let ty = match self.parse_type() {
+                Ok(t) => t,
+                Err(_) => {
+                    // Failed to parse type (e.g., unknown typedef from headers)
+                    // Skip to next semicolon to continue parsing other fields
+                    while !self.is_at_end() 
+                        && !self.check(|t| matches!(t, Token::Semicolon)) 
+                        && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                        self.advance();
+                    }
+                    if self.check(|t| matches!(t, Token::Semicolon)) {
+                        self.advance();
+                    }
+                    continue; // Skip this field and try next one
+                }
+            };
+            
             let field_name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
-                other => return Err(format!("expected field name, found {:?}", other)),
+                _ => {
+                    // Skip to next semicolon or closing brace
+                    while !self.is_at_end() 
+                        && !self.check(|t| matches!(t, Token::Semicolon)) 
+                        && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                        self.advance();
+                    }
+                    if self.check(|t| matches!(t, Token::Semicolon)) {
+                        self.advance();
+                    }
+                    continue; // Skip this field
+                }
             };
 
             // Handle optional array in struct field (supports multi-dimensional)
@@ -256,7 +284,18 @@ impl<'a> TypeParser for Parser<'a> {
                 } else {
                     match self.advance() {
                         Some(Token::Constant { value }) => *value as usize,
-                        other => return Err(format!("[parse_struct_definition] expected constant array size, found {:?}", other)),
+                        _ => {
+                            // Skip malformed array
+                            while !self.is_at_end() 
+                                && !self.check(|t| matches!(t, Token::Semicolon)) 
+                                && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                                self.advance();
+                            }
+                            if self.check(|t| matches!(t, Token::Semicolon)) {
+                                self.advance();
+                            }
+                            continue; // Skip this field
+                        }
                     }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
@@ -267,7 +306,18 @@ impl<'a> TypeParser for Parser<'a> {
             let bit_width = if self.match_token(|t| matches!(t, Token::Colon)) {
                 match self.advance() {
                     Some(Token::Constant { value }) => Some(*value as usize),
-                    other => return Err(format!("expected bit width constant, found {:?}", other)),
+                    _ => {
+                        // Skip malformed bit field
+                        while !self.is_at_end() 
+                            && !self.check(|t| matches!(t, Token::Semicolon)) 
+                            && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                            self.advance();
+                        }
+                        if self.check(|t| matches!(t, Token::Semicolon)) {
+                            self.advance();
+                        }
+                        continue; // Skip this field
+                    }
                 }
             } else {
                 None
@@ -278,7 +328,18 @@ impl<'a> TypeParser for Parser<'a> {
                 name: field_name,
                 bit_width,
             });
-            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            
+            if self.expect(|t| matches!(t, Token::Semicolon), "';'").is_err() {
+                // Failed to find semicolon - skip to next one or closing brace
+                while !self.is_at_end() 
+                    && !self.check(|t| matches!(t, Token::Semicolon)) 
+                    && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                    self.advance();
+                }
+                if self.check(|t| matches!(t, Token::Semicolon)) {
+                    self.advance();
+                }
+            }
         }
 
         self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
@@ -300,10 +361,38 @@ impl<'a> TypeParser for Parser<'a> {
 
         let mut fields = Vec::new();
         while !self.check(|t| matches!(t, Token::CloseBrace)) && !self.is_at_end() {
-            let ty = self.parse_type()?;
+            // Try to parse field type - if it fails, skip to next semicolon or closing brace
+            let ty = match self.parse_type() {
+                Ok(t) => t,
+                Err(_) => {
+                    // Failed to parse type (e.g., unknown typedef from headers)
+                    // Skip to next semicolon to continue parsing other fields
+                    while !self.is_at_end() 
+                        && !self.check(|t| matches!(t, Token::Semicolon)) 
+                        && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                        self.advance();
+                    }
+                    if self.check(|t| matches!(t, Token::Semicolon)) {
+                        self.advance();
+                    }
+                    continue; // Skip this field and try next one
+                }
+            };
+            
             let field_name = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
-                other => return Err(format!("expected field name, found {:?}", other)),
+                _ => {
+                    // Skip to next semicolon or closing brace
+                    while !self.is_at_end() 
+                        && !self.check(|t| matches!(t, Token::Semicolon)) 
+                        && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                        self.advance();
+                    }
+                    if self.check(|t| matches!(t, Token::Semicolon)) {
+                        self.advance();
+                    }
+                    continue; // Skip this field
+                }
             };
 
             // Handle optional array in union field (supports multi-dimensional)
@@ -315,7 +404,18 @@ impl<'a> TypeParser for Parser<'a> {
                 } else {
                     match self.advance() {
                         Some(Token::Constant { value }) => *value as usize,
-                        other => return Err(format!("[parse_union_definition] expected constant array size, found {:?}", other)),
+                        _ => {
+                            // Skip malformed array
+                            while !self.is_at_end() 
+                                && !self.check(|t| matches!(t, Token::Semicolon)) 
+                                && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                                self.advance();
+                            }
+                            if self.check(|t| matches!(t, Token::Semicolon)) {
+                                self.advance();
+                            }
+                            continue; // Skip this field
+                        }
                     }
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
@@ -327,7 +427,18 @@ impl<'a> TypeParser for Parser<'a> {
                 name: field_name,
                 bit_width: None, // Unions don't support bit fields
             });
-            self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+            
+            if self.expect(|t| matches!(t, Token::Semicolon), "';'").is_err() {
+                // Failed to find semicolon - skip to next one or closing brace
+                while !self.is_at_end() 
+                    && !self.check(|t| matches!(t, Token::Semicolon)) 
+                    && !self.check(|t| matches!(t, Token::CloseBrace)) {
+                    self.advance();
+                }
+                if self.check(|t| matches!(t, Token::Semicolon)) {
+                    self.advance();
+                }
+            }
         }
 
         self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
