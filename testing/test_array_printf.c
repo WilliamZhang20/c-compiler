@@ -1,3 +1,4 @@
+// EXPECT: 0
 int main() {
     int arr[5];
     int i;

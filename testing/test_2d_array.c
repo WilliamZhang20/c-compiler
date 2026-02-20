@@ -1,3 +1,4 @@
+// EXPECT: 4
 int main() {
     int arr[2][2];
     arr[0][0] = 1;

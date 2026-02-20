@@ -1,3 +1,4 @@
+// EXPECT: 100
 int main() {
     int x = 10;
     if (x > 5) {

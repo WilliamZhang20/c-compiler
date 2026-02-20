@@ -1,3 +1,4 @@
+// EXPECT: 0
 // #include <stdarg.h>
 
 // A simple variadic function that sums integers.

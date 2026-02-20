@@ -1,4 +1,3 @@
-// Test for loop with empty init
 // EXPECT: 10
 int main() {
     int i = 0;

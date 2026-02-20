@@ -20,8 +20,12 @@ macro_rules! log {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to the C source file
-    input_path: String,
+    /// Path(s) to the C source file(s)
+    input_paths: Vec<String>,
+
+    /// Output executable name
+    #[arg(short = 'o', long)]
+    output: Option<String>,
 
     /// Run lexer only
     #[arg(short, long)]
@@ -43,16 +47,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     keep_intermediates: bool,
 
-    /// Use safe malloc runtime (detects buffer overflows, use-after-free, etc.)
-    #[arg(long, default_value_t = false)]
-    safe_malloc: bool,
-
     /// Enable debug output
     #[arg(short, long, default_value_t = false)]
     debug: bool,
 }
-
-const MALLOC_C_SOURCE: &str = include_str!("../../runtime/malloc.c");
 
 fn main() {
     let args = Args::parse();
@@ -60,6 +58,11 @@ fn main() {
     
     log!("DEBUG: Driver started");
     log!("DEBUG: Args parsed");
+
+    if args.input_paths.is_empty() {
+        eprintln!("Error: No input files provided.");
+        std::process::exit(1);
+    }
 
     let stop_after_emit_asm = args.emit_asm;
     let stop_after_codegen = args.codegen;
@@ -75,93 +78,127 @@ fn main() {
     }
     log!("DEBUG: GCC check passed");
 
-    let input_path = args.input_path.clone();
-    let input_file = Path::new(&input_path);
-    if !input_file.exists() {
-         log!("Error: Input file '{}' not found.", input_path);
-         std::process::exit(1);
-    }
-
-    log!("Step 1: Preprocessing...");
-    let preprocessed_path = preprocess(&input_path, input_file);
-    log!("Step 1: Done");
-
     let cleanup = |path: &str| {
         if !keep_intermediates {
             let _ = std::fs::remove_file(path);
         }
     };
 
-    let src = std::fs::read_to_string(&preprocessed_path).expect("failed to read preprocessed file");
+    let mut asm_paths = Vec::new();
+    let mut preprocessed_paths = Vec::new();
 
-    log!("Step 2: Lexing...");
-    let tokens = lexer::lex(&src).expect("Lexing failed");
-    log!("Step 2: Done");
-    
-    if stop_after_lex {
-        println!("Tokens: {:?}", tokens);
-        cleanup(&preprocessed_path);
+    // Process each input file
+    for input_path in &args.input_paths {
+        let input_file = Path::new(&input_path);
+        if !input_file.exists() {
+             eprintln!("Error: Input file '{}' not found.", input_path);
+             std::process::exit(1);
+        }
+
+        log!("Processing file: {}", input_path);
+        log!("Step 1: Preprocessing...");
+        let preprocessed_path = preprocess(&input_path, input_file);
+        log!("Step 1: Done");
+
+        let src = std::fs::read_to_string(&preprocessed_path).expect("failed to read preprocessed file");
+
+        log!("Step 2: Lexing...");
+        let tokens = lexer::lex(&src).expect("Lexing failed");
+        log!("Step 2: Done");
+        
+        if stop_after_lex {
+            println!("Tokens for {}: {:?}", input_path, tokens);
+            preprocessed_paths.push(preprocessed_path);
+            continue;
+        }
+
+        log!("Step 3: Parsing...");
+        let mut program = parser::parse_tokens(&tokens).expect("Parsing failed");
+        log!("Step 3: Done");
+        
+        // Deduplicate global variables (common with extern declarations)
+        {
+            let mut seen = std::collections::HashSet::new();
+            program.globals.retain(|g| seen.insert(g.name.clone()));
+        }
+        
+        if stop_after_parse {
+            println!("AST for {}: {:?}", input_path, program);
+            preprocessed_paths.push(preprocessed_path);
+            continue;
+        }
+
+        log!("Step 4: Semantic Analysis...");
+        let mut analyzer = semantic::SemanticAnalyzer::new();
+        analyzer.analyze(&program).expect("Semantic analysis failed");
+        log!("Step 4: Done");
+
+        log!("Step 5: IR Lowering...");
+        let mut lowerer = ir::Lowerer::new();
+        let ir_prog = lowerer.lower_program(&program).expect("IR lowering failed");
+        log!("Step 5: Done");
+        
+        log!("Step 6: Optimization...");
+        let ir_prog = optimizer::optimize(ir_prog);
+        log!("Step 6: Done");
+
+        if stop_after_codegen {
+            println!("IR for {}: {:?}", input_path, ir_prog);
+            preprocessed_paths.push(preprocessed_path);
+            continue;
+        }
+
+        log!("Step 7: Code Generation...");
+        let mut codegen = codegen::Codegen::new();
+        let asm = codegen.gen_program(&ir_prog);
+        log!("Step 7: Done");
+
+        let mut asm_path = input_file.file_stem().unwrap().to_string_lossy().into_owned();
+        asm_path.push_str(".s");
+        std::fs::write(&asm_path, asm).expect("failed to write assembly file");
+
+        asm_paths.push(asm_path);
+        preprocessed_paths.push(preprocessed_path);
+    }
+
+    if stop_after_lex || stop_after_parse || stop_after_codegen {
+        for path in preprocessed_paths {
+            cleanup(&path);
+        }
         return;
     }
-
-    log!("Step 3: Parsing...");
-    let mut program = parser::parse_tokens(&tokens).expect("Parsing failed");
-    log!("Step 3: Done");
-    
-    // Deduplicate global variables (common with extern declarations)
-    {
-        let mut seen = std::collections::HashSet::new();
-        program.globals.retain(|g| seen.insert(g.name.clone()));
-    }
-    
-    if stop_after_parse {
-        println!("AST: {:?}", program);
-        cleanup(&preprocessed_path);
-        return;
-    }
-
-    log!("Step 4: Semantic Analysis...");
-    let mut analyzer = semantic::SemanticAnalyzer::new();
-    analyzer.analyze(&program).expect("Semantic analysis failed");
-    log!("Step 4: Done");
-
-    log!("Step 5: IR Lowering...");
-    let mut lowerer = ir::Lowerer::new();
-    let ir_prog = lowerer.lower_program(&program).expect("IR lowering failed");
-    log!("Step 5: Done");
-    
-    log!("Step 6: Optimization...");
-    let ir_prog = optimizer::optimize(ir_prog);
-    log!("Step 6: Done");
-
-    if stop_after_codegen {
-        println!("IR: {:?}", ir_prog);
-        cleanup(&preprocessed_path);
-        return;
-    }
-
-    log!("Step 7: Code Generation...");
-    let mut codegen = codegen::Codegen::new();
-    let asm = codegen.gen_program(&ir_prog);
-    log!("Step 7: Done");
-
-    let mut asm_path = input_file.file_stem().unwrap().to_string_lossy().into_owned();
-    asm_path.push_str(".s");
-    std::fs::write(&asm_path, asm).expect("failed to write assembly file");
 
     if stop_after_emit_asm {
-        cleanup(&preprocessed_path);
+        for path in preprocessed_paths {
+            cleanup(&path);
+        }
         return;
     }
 
+    // Determine output executable name
+    let output_name = if let Some(name) = args.output {
+        name
+    } else {
+        // Default: use first input file's stem
+        let first_input = Path::new(&args.input_paths[0]);
+        let platform = model::Platform::host();
+        let mut name = first_input.file_stem().unwrap().to_string_lossy().into_owned();
+        name.push_str(platform.executable_extension());
+        name
+    };
+
     log!("Step 8: Linking...");
-    run_linker(&input_file, &asm_path, args.safe_malloc);
+    run_linker(&asm_paths, &output_name);
     log!("Step 8: Done");
-    println!("Compilation successful. Generated executable: {}", input_file.file_stem().unwrap().to_string_lossy());
+    println!("Compilation successful. Generated executable: {}", output_name);
 
     // Cleanup
-    cleanup(&preprocessed_path);
-    cleanup(&asm_path);
+    for path in preprocessed_paths {
+        cleanup(&path);
+    }
+    for path in asm_paths {
+        cleanup(&path);
+    }
 }
 
 fn preprocess(input_path: &str, input_file: &Path) -> String {
@@ -182,49 +219,18 @@ fn preprocess(input_path: &str, input_file: &Path) -> String {
     preprocessed_path
 }
 
-fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
+fn run_linker(asm_paths: &[String], output_file: &str) {
     let platform = model::Platform::host();
-    let mut executable_file = input_file.file_stem().unwrap().to_string_lossy().into_owned();
-    executable_file.push_str(platform.executable_extension());
 
-    let mut args = vec![asm_path.to_string()];
-    let mut temp_malloc_o = None;
-    let mut temp_malloc_c = None;
+    let mut args = Vec::new();
     
-    // Optionally link with safe malloc runtime
-    if use_safe_malloc {
-        // Try to find local runtime/malloc.o first (development mode)
-        let local_malloc = Path::new("runtime/malloc.o");
-        if local_malloc.exists() {
-            args.push("runtime/malloc.o".to_string());
-        } else {
-            // "Run anywhere" mode: write embedded source to temp file and compile
-            let temp_dir = std::env::temp_dir();
-            let unique_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-            
-            let c_path = temp_dir.join(format!("malloc_{}.c", unique_id));
-            let o_path = temp_dir.join(format!("malloc_{}.o", unique_id));
-            
-            std::fs::write(&c_path, MALLOC_C_SOURCE).expect("Failed to write temp malloc.c");
-            
-            // Compile malloc.c -> malloc.o
-            let status = Command::new("gcc")
-                .args(["-c", c_path.to_str().unwrap(), "-o", o_path.to_str().unwrap()])
-                .status()
-                .expect("Failed to compile embedded malloc.c");
-                
-            if !status.success() {
-                panic!("Failed to compile embedded malloc runtime");
-            }
-            
-            args.push(o_path.to_str().unwrap().to_string());
-            temp_malloc_c = Some(c_path);
-            temp_malloc_o = Some(o_path);
-        }
+    // Add all assembly files
+    for asm_path in asm_paths {
+        args.push(asm_path.clone());
     }
     
     args.push("-o".to_string());
-    args.push(executable_file.clone());
+    args.push(output_file.to_string());
     
     // Add platform-specific linker flags
     if platform.needs_console_flag() {
@@ -242,8 +248,4 @@ fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
         }
         panic!("gcc compilation was terminated by a signal");
     }
-    
-    // Clean up temporary malloc files
-    if let Some(p) = temp_malloc_c { let _ = std::fs::remove_file(p); }
-    if let Some(p) = temp_malloc_o { let _ = std::fs::remove_file(p); }
 }

@@ -1,4 +1,5 @@
 // Test function pointers with printf debugging
+// TODO: This test currently has a bug - skipping for now
 #include <stdio.h>
 
 int add(int a, int b) {

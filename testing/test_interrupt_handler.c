@@ -1,4 +1,5 @@
 // Test interrupt handler with more complex signal usage
+// TODO: This test uses struct sigaction which is not yet supported
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>

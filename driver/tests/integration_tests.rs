@@ -58,7 +58,7 @@ fn run_all_c_tests() {
                 println!("❌ Compilation failed for {}", file_name);
                 tests_failed += 1;
                 // Halt on first failure
-                break;
+                panic!("Test {} failed to compile", file_name);
             }
 
             // Run executable (generated in workspace root)

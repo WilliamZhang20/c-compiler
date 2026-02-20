@@ -1,4 +1,5 @@
 // Test signal handler
+// EXPECT: 0
 #include <signal.h>
 #include <stdio.h>
 

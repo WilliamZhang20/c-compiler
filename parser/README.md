@@ -1,11 +1,34 @@
 # Parser
 
-The **Parser** crate analyzes the token stream produced by the lexer and constructs an Abstract Syntax Tree (AST) that represents the hierarchical structure of the C program. It implements a Recursive Descent Parser, a top-down parsing strategy where each non-terminal symbol in the grammar corresponds to a function in the parser (e.g., `parse_statement`, `parse_expression`, `parse_function`).
+The **Parser** crate transforms the token stream produced by the lexer into an Abstract Syntax Tree (AST). It implements a **recursive-descent** parser where each grammar production maps to a function. The public entry point is `parse_tokens(tokens) -> Result<Program, String>`, which returns a `Program` containing functions, global variables, struct/union/enum definitions.
 
-This component handles the complex grammar rules of the C language, including operator precedence, associativity, and the various statement types like `if`, `while`, `for`, `return`, and block scopes. It converts linear sequences of tokens into a structured tree where nodes represent constructs like `FunctionDefinition`, `VariableDeclaration`, `BinaryExpression`, and `IfStatement`.
+## Architecture
 
-A key responsibility of the parser is to ensure syntactical correctness. If the source code violates the grammar rules (e.g., missing semicolon, mismatched parentheses, invalid declaration), the parser detects this and reports a descriptive error. It also handles certain ambiguities in C syntax by using lookahead or backtracking where necessary.
+The core `Parser` struct (in `parser.rs`) holds the token slice, a cursor position, and a set of known `typedef` names. Parsing logic is split across several files, each exposed to `Parser` via a trait (e.g. `ExpressionParser`, `StatementParser`). This keeps individual files focused while sharing the same parser state.
 
-The output of the parser is a `Program` structure containing a list of global declarations, functions, and type definitions. This AST is then passed to the Semantic Analyzer for type checking and further validation. The parser does not perform type checking itself but ensures that the code follows the structural rules of the language.
+## Source Files
 
-The design relies on the `Token` definitions from the `model` crate and produces AST nodes also defined in `model`. By isolating the parsing logic here, the compiler maintains a clear separation of concerns, making the grammar rules easier to maintain and extend.
+### `parser.rs`
+Defines the `Parser` struct and low-level token navigation: `peek()`, `advance()`, `match_token()`, `expect()`, and `check()`. This file contains no grammar rules — those are distributed across the trait implementations below. The typedef set is pre-seeded with `__builtin_va_list`.
+
+### `declarations.rs`
+Top-level program parsing via the `DeclarationParser` trait. `parse_program()` loops over tokens, distinguishing between function definitions, global variable declarations, struct/union/enum definitions, typedefs, and extern declarations. It also gracefully skips unsupported constructs from system headers (extern inline functions, forward declarations) so that pre-processed source can be compiled. Helper methods include `parse_function()`, `parse_function_params()`, `parse_globals()`, and `parse_typedef()`.
+
+### `expressions.rs`
+Expression parsing via the `ExpressionParser` trait, using **precedence climbing**. Each precedence level has its own method, called in order from lowest to highest:
+
+assignment → conditional (ternary) → logical or → logical and → bitwise or → xor → bitwise and → equality → relational → shift → additive → multiplicative → unary → postfix → primary
+
+This handles all C expression forms: binary and compound-assignment operators, ternary `?:`, prefix/postfix increment/decrement, `sizeof`, type casts, function calls, array indexing, member access (`.` and `->`), and primary atoms (identifiers, constants, string literals, parenthesized sub-expressions).
+
+### `statements.rs`
+Statement parsing via the `StatementParser` trait. `parse_stmt()` dispatches on the current token to handle `return`, `break`, `continue`, `goto`, labeled statements, `if`/`else`, `while`, `do`/`while`, `for` (including C99 init-declarations), `switch`/`case`/`default`, inline assembly (`asm`), block scopes, local variable declarations, and expression statements. `parse_block()` handles `{ ... }` sequences.
+
+### `types.rs`
+Type parsing via the `TypeParser` trait. `parse_type_with_qualifiers()` handles storage-class specifiers (`static`, `extern`, `inline`), type qualifiers (`const`, `volatile`, `restrict`), GCC attributes, and the full set of base types including `char`, `short`, `int`, `long`, `long long`, `float`, `double`, `unsigned`/`signed` variants, `void`, `struct`/`union`/`enum` types, typedef names, and pointer/array/function-pointer declarators. Also contains `parse_struct_definition()`, `parse_union_definition()`, and `parse_enum_definition()` for aggregate type bodies.
+
+### `attributes.rs`
+GCC `__attribute__((...))` parsing via the `AttributeParser` trait. Recognizes `packed`, `aligned(N)`, `section("name")`, `noreturn`, `always_inline`, `format(...)`, `interrupt`, and `signal`. Unknown attributes are skipped. The parsed `Attribute` values are attached to functions and struct definitions in the AST.
+
+### `utils.rs`
+Lookahead and skip utilities via the `ParserUtils` trait. Contains heuristics for distinguishing function definitions from declarations (`is_function_definition()`), detecting inline/extern functions from headers, and skipping over constructs the parser does not yet fully support (forward declarations, extern declarations, top-level items). Also provides `check_is_type()` for disambiguating type names from identifiers in contexts like casts and declarations.

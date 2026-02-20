@@ -1,4 +1,5 @@
 // Test char array indexing
+// EXPECT: 210
 int main() {
     char arr[10];
     arr[0] = 72;   // 'H'

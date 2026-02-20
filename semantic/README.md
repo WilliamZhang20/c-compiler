@@ -1,16 +1,33 @@
 # Semantic Analyzer
 
-The **Semantic Analyzer** crate is responsible for verifying the semantic correctness of the parsed Abstract Syntax Tree (AST). While the parser ensures the code structure adheres to the grammar, the semantic analyzer checks for logical consistency, type correctness, and proper scoping rules.
+The **Semantic Analyzer** crate validates the parsed AST before it is lowered to IR. It performs name resolution, qualifier enforcement, and control-flow validity checks. The public entry point is `SemanticAnalyzer::analyze(program) -> Result<(), String>`.
 
-A primary function of this component is **Type Checking**. It ensures that operations are performed on compatible types—for example, preventing the addition of a pointer to a struct or ensuring that function arguments match the declared parameters. It also tracks variable declarations and usages to catch errors like "variable not declared" or "redefinition of symbol."
+## Architecture
 
-This crate maintains a **Symbol Table** (or environment) that tracks the scope of variables and functions. It handles block scoping rules (variables declared inside `{ ... }` are not visible outside), function scoping, and global definitions. This ensures that identifiers are correctly resolved to their definitions.
+The analyzer is implemented as a single-file, single-pass checker in `lib.rs`. It walks every function body, recursively visiting statements and expressions. Errors are returned immediately (fail-fast, no multi-error accumulation).
 
-The output of the semantic analysis is typically an annotated AST or a verified AST, which is then safe to be lowered into Intermediate Representation (IR). If semantic errors are found, the analyzer reports them with helpful messages, stopping the compilation before invalid code can reach the code generator.
+## Source File
 
-Key checks performed include:
-*   Use of undeclared variables.
-*   Type mismatches in assignments and expressions.
-*   Correct return types in functions.
-*   Duplicate declarations in the same scope.
-*   Control flow validity (e.g., `break` must be inside a loop).
+### `lib.rs`
+
+The `SemanticAnalyzer` struct maintains:
+
+- **Scope stack** — a `Vec<HashMap<String, Type>>` implementing lexical scoping. `enter_scope()` pushes a new frame; `exit_scope()` pops it. `lookup_symbol()` searches from innermost to outermost, providing standard shadowing semantics.
+- **Global scope** — a separate `HashMap` for global variables and function signatures, cloned as the base of each function's scope stack.
+- **Qualifier maps** — `const_vars` and `volatile_vars` track per-variable qualifier state for assignment checks.
+- **Type definitions** — `structs`, `unions`, and `enum_constants` are registered globally at the start of analysis, before any function body is visited.
+- **Control-flow depth** — `loop_depth` and `in_switch` track nesting to validate `break`, `continue`, `case`, and `default` placement.
+
+**Checks performed:**
+
+- Use of undeclared variables (with a carve-out for direct function calls, allowing implicit declarations).
+- Assignment or increment/decrement of `const`-qualified variables.
+- `restrict` qualifier applied to non-pointer types.
+- `break` outside a loop or switch; `continue` outside a loop.
+- `case`/`default` outside a switch.
+- Duplicate function definitions and duplicate enum constant names.
+- Inline assembly operand validation (outputs and inputs are well-formed expressions).
+
+**Scope handling per function:** The scope stack is reset to a clone of the global scope, then a fresh local scope is pushed for parameters. Each `Block` statement introduces and removes a scope. Global variable redeclarations are silently allowed to support `extern` forward declarations.
+
+The analyzer does not perform type-compatibility checking on assignments or binary operations — it is primarily a name-resolution and qualifier-enforcement pass. Goto/label validation is deferred to the IR lowering stage.

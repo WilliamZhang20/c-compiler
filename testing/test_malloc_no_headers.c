@@ -1,3 +1,4 @@
+// EXPECT: 0
 extern int printf(const char* format, ...);
 extern void* malloc(int size);
 extern void free(void* ptr);

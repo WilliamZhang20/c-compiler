@@ -1,4 +1,5 @@
 // Test int array indexing
+// EXPECT: 90
 int main() {
     int arr[5];
     arr[0] = 10;

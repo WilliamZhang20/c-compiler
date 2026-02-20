@@ -1,4 +1,5 @@
 // Test various escape sequences
+// EXPECT: 0
 #include <stdio.h>
 
 int main() {

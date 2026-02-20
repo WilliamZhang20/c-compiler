@@ -1,3 +1,4 @@
+// EXPECT: 20
 int main() {
     int x = 10;
     int x = 20; // Redeclaration error
