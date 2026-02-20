@@ -1,4 +1,4 @@
-use model::{Block, Stmt, Token, Type};
+use model::{Block, Expr, Stmt, Token, Type};
 use crate::parser::Parser;
 use crate::types::TypeParser;
 use crate::expressions::ExpressionParser;
@@ -332,6 +332,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        
+        // Infer array size from string literal initializer if size is unspecified
+        if let Type::Array(inner, 0) = &r#type {
+            if let Some(Expr::StringLiteral(s)) = &init {
+                // Set array size to string length + 1 (for null terminator)
+                r#type = Type::Array(inner.clone(), s.len() + 1);
+            }
+        }
+        
         self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
 
         Ok(Stmt::Declaration {

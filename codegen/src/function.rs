@@ -129,7 +129,23 @@ impl<'a> FunctionGenerator<'a> {
             // Record parameter type for later use
             self.var_types.insert(*var, param_type.clone());
             
-            let dest = self.var_to_op(*var);
+            // Parameters always go to their stack slots, not registers
+            // This ensures they're preserved across function calls that clobber parameter registers
+            let dest = if let Some(&buffer_offset) = self.alloca_buffers.get(var) {
+                X86Operand::Mem(X86Reg::Rbp, buffer_offset)
+            } else if let Some(var_type) = self.var_types.get(var) {
+                if matches!(var_type, Type::Float | Type::Double) {
+                    let slot = self.stack_slots.get(var).copied().unwrap_or_else(|| self.get_or_create_slot(*var));
+                    X86Operand::FloatMem(X86Reg::Rbp, slot)
+                } else {
+                    let slot = self.stack_slots.get(var).copied().unwrap_or_else(|| self.get_or_create_slot(*var));
+                    X86Operand::Mem(X86Reg::Rbp, slot)
+                }
+            } else {
+                let slot = self.stack_slots.get(var).copied().unwrap_or_else(|| self.get_or_create_slot(*var));
+                X86Operand::Mem(X86Reg::Rbp, slot)
+            };
+            
             let is_float = matches!(param_type, Type::Float | Type::Double);
             
             if i < param_regs.len() {
@@ -253,6 +269,12 @@ impl<'a> FunctionGenerator<'a> {
                 }
             }
         }
+        
+        // Remove parameters from reg_alloc since they're now in stack slots
+        // This ensures var_to_op returns the stack slot, not the clobbered parameter register
+        for (_, var) in &func.params {
+            self.reg_alloc.remove(var);
+        }
 
         for block in &func.blocks {
             // Skip unreachable blocks (marked by CFG simplification)
@@ -330,11 +352,11 @@ impl<'a> FunctionGenerator<'a> {
             }
         }
         
-        // Parameters: only allocate stack if no register
+        // Parameters: always allocate stack slots
+        // Even if register-allocated, parameters need stack homes because
+        // their parameter-passing registers (rdi, rsi, etc.) get clobbered by function calls
         for (_, var) in &func.params {
-            if !self.reg_alloc.contains_key(var) {
-                self.get_or_create_slot(*var);
-            }
+            self.get_or_create_slot(*var);
         }
     }
 

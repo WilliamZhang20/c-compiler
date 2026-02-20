@@ -1,4 +1,4 @@
-use model::{Type, Stmt as AstStmt, Block as AstBlock, Expr as AstExpr};
+use model::{Type, Stmt as AstStmt, Block as AstBlock, Expr as AstExpr, BinaryOp};
 use crate::types::{Operand, Instruction, Terminator};
 use crate::lowerer::Lowerer;
 
@@ -69,6 +69,45 @@ impl Lowerer {
                     });
                     self.write_variable(name, bid, var);
                     self.variable_allocas.insert(name.clone(), var);
+                    
+                    // Handle array initialization (e.g., char arr[] = "string")
+                    if let Some(init_expr) = init {
+                        match init_expr {
+                            AstExpr::StringLiteral(s) => {
+                                // Initialize each character in the array
+                                for (i, ch) in s.chars().chain(std::iter::once('\0')).enumerate() {
+                                    // Calculate offset: base + i * element_size
+                                    let elem_type = if let Type::Array(inner, _) = r#type {
+                                        inner.as_ref().clone()
+                                    } else {
+                                        unreachable!()
+                                    };
+                                    
+                                    let offset_var = if i == 0 {
+                                        var
+                                    } else {
+                                        let idx_var = self.new_var();
+                                        self.blocks[bid.0].instructions.push(Instruction::Binary {
+                                            dest: idx_var,
+                                            op: BinaryOp::Add,
+                                            left: Operand::Var(var),
+                                            right: Operand::Constant(i as i64),
+                                        });
+                                        idx_var
+                                    };
+                                    
+                                    self.blocks[bid.0].instructions.push(Instruction::Store {
+                                        addr: Operand::Var(offset_var),
+                                        src: Operand::Constant(ch as i64),
+                                        value_type: elem_type.clone(),
+                                    });
+                                }
+                            }
+                            _ => {
+                                // TODO: Handle other array initializers (e.g., {1, 2, 3})
+                            }
+                        }
+                    }
                 } else {
                     // Alloca for all scalars too to support & operator
                     let alloca_var = self.new_var();

@@ -612,8 +612,9 @@ impl Lowerer {
             AstExpr::SizeOf(ty) => {
                 Ok(Operand::Constant(self.get_type_size(ty)))
             }
-            AstExpr::SizeOfExpr(_expr) => {
-                Ok(Operand::Constant(8)) 
+            AstExpr::SizeOfExpr(expr) => {
+                let expr_type = self.get_expr_type(expr);
+                Ok(Operand::Constant(self.get_type_size(&expr_type)))
             }
             AstExpr::Cast(ty, expr) => {
                 let src_val = self.lower_expr(expr)?;
