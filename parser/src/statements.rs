@@ -22,6 +22,11 @@ impl<'a> StatementParser for Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
+        // Empty statement: a lone semicolon
+        if self.match_token(|t| matches!(t, Token::Semicolon)) {
+            return Ok(Stmt::Block(Block { statements: vec![] }));
+        }
+
         // Return statement
         if self.match_token(|t| matches!(t, Token::Return)) {
             return self.parse_return_stmt();
