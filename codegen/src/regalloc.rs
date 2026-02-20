@@ -453,8 +453,10 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // Fall back to callee-saved if caller-saved are exhausted/forbidden (and allowed)
-        if assigned_reg.is_none() && use_callee_saved {
+        // Fall back to callee-saved if caller-saved are exhausted/forbidden (and allowed).
+        // Also forced when the variable is live across a call, regardless of the heuristic,
+        // because we *must* preserve it — using a caller-saved register would be wrong.
+        if assigned_reg.is_none() && (use_callee_saved || is_live_across_call) {
             for reg in PhysicalReg::callee_saved(target) {
                 if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                     assigned_reg = Some(reg);
