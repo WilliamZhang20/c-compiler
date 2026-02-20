@@ -91,6 +91,7 @@ impl Lowerer {
             id: BlockId(id),
             instructions: Vec::new(),
             terminator: Terminator::Unreachable,
+            is_label_target: false,
         };
         self.blocks.push(block);
         BlockId(id)

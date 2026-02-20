@@ -255,6 +255,11 @@ impl<'a> FunctionGenerator<'a> {
         }
 
         for block in &func.blocks {
+            // Skip unreachable blocks (marked by CFG simplification)
+            if block.instructions.is_empty() && matches!(block.terminator, IrTerminator::Unreachable) {
+                continue;
+            }
+            
             self.asm.push(X86Instr::Label(format!("{}_{}", func.name, block.id.0)));
             for inst in &block.instructions {
                 self.gen_instr(inst);

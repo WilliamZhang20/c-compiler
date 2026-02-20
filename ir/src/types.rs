@@ -131,6 +131,8 @@ pub struct BasicBlock {
     pub id: BlockId,
     pub instructions: Vec<Instruction>,
     pub terminator: Terminator,
+    /// True if this block is a target of a goto/label statement (should not be merged)
+    pub is_label_target: bool,
 }
 
 /// Function in IR form
