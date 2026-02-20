@@ -1,5 +1,5 @@
 use model::{BinaryOp, UnaryOp, Type, Expr as AstExpr};
-use crate::types::{VarId, Operand, Instruction};
+use crate::types::{VarId, Operand, Instruction, Terminator};
 use crate::lowerer::Lowerer;
 
 /// Expression lowering implementation
@@ -20,6 +20,104 @@ impl Lowerer {
                         value_type,
                     });
                     return Ok(val);
+                }
+
+                // Short-circuit logical AND: a && b
+                // If a == 0, result = 0; else result = b (with short-circuit)
+                if *op == BinaryOp::LogicalAnd {
+                    let lhs_val = self.lower_expr(left)?;
+                    let entry_bid = self.current_block.ok_or("LogicalAnd outside block")?;
+
+                    let rhs_id   = self.new_block();
+                    let false_id = self.new_block();
+                    let merge_id = self.new_block();
+
+                    self.blocks[entry_bid.0].terminator = Terminator::CondBr {
+                        cond: lhs_val,
+                        then_block: rhs_id,
+                        else_block: false_id,
+                    };
+
+                    // false_id: lhs was 0, emit 0
+                    self.sealed_blocks.insert(false_id);
+                    self.current_block = Some(false_id);
+                    let false_var = self.new_var();
+                    self.blocks[false_id.0].instructions.push(Instruction::Copy {
+                        dest: false_var,
+                        src: Operand::Constant(0),
+                    });
+                    self.blocks[false_id.0].terminator = Terminator::Br(merge_id);
+
+                    // rhs_id: lhs was truthy, evaluate rhs
+                    self.sealed_blocks.insert(rhs_id);
+                    self.current_block = Some(rhs_id);
+                    let rhs_val = self.lower_expr(right)?;
+                    let rhs_var = self.new_var();
+                    let rhs_bid = self.current_block.ok_or("LogicalAnd rhs outside block")?;
+                    self.blocks[rhs_bid.0].instructions.push(Instruction::Copy {
+                        dest: rhs_var,
+                        src: rhs_val,
+                    });
+                    self.blocks[rhs_bid.0].terminator = Terminator::Br(merge_id);
+
+                    // merge_id: phi result
+                    self.sealed_blocks.insert(merge_id);
+                    self.current_block = Some(merge_id);
+                    let result = self.new_var();
+                    self.blocks[merge_id.0].instructions.push(Instruction::Phi {
+                        dest: result,
+                        preds: vec![(false_id, false_var), (rhs_bid, rhs_var)],
+                    });
+                    return Ok(Operand::Var(result));
+                }
+
+                // Short-circuit logical OR: a || b
+                // If a != 0, result = 1; else result = b
+                if *op == BinaryOp::LogicalOr {
+                    let lhs_val = self.lower_expr(left)?;
+                    let entry_bid = self.current_block.ok_or("LogicalOr outside block")?;
+
+                    let rhs_id  = self.new_block();
+                    let true_id = self.new_block();
+                    let merge_id = self.new_block();
+
+                    self.blocks[entry_bid.0].terminator = Terminator::CondBr {
+                        cond: lhs_val,
+                        then_block: true_id,
+                        else_block: rhs_id,
+                    };
+
+                    // true_id: lhs was truthy, emit 1
+                    self.sealed_blocks.insert(true_id);
+                    self.current_block = Some(true_id);
+                    let true_var = self.new_var();
+                    self.blocks[true_id.0].instructions.push(Instruction::Copy {
+                        dest: true_var,
+                        src: Operand::Constant(1),
+                    });
+                    self.blocks[true_id.0].terminator = Terminator::Br(merge_id);
+
+                    // rhs_id: lhs was 0, evaluate rhs
+                    self.sealed_blocks.insert(rhs_id);
+                    self.current_block = Some(rhs_id);
+                    let rhs_val = self.lower_expr(right)?;
+                    let rhs_var = self.new_var();
+                    let rhs_bid = self.current_block.ok_or("LogicalOr rhs outside block")?;
+                    self.blocks[rhs_bid.0].instructions.push(Instruction::Copy {
+                        dest: rhs_var,
+                        src: rhs_val,
+                    });
+                    self.blocks[rhs_bid.0].terminator = Terminator::Br(merge_id);
+
+                    // merge_id: phi result
+                    self.sealed_blocks.insert(merge_id);
+                    self.current_block = Some(merge_id);
+                    let result = self.new_var();
+                    self.blocks[merge_id.0].instructions.push(Instruction::Phi {
+                        dest: result,
+                        preds: vec![(true_id, true_var), (rhs_bid, rhs_var)],
+                    });
+                    return Ok(Operand::Var(result));
                 }
 
                 // Handle compound assignments
@@ -267,8 +365,21 @@ impl Lowerer {
             AstExpr::Variable(name) => {
                 // Global variables or other variables not in allocas
                 if self.global_vars.contains(name) {
-                     let dest = self.new_var();
                      let value_type = self.get_expr_type(expr);
+                     // Global arrays decay to a pointer — return the address directly.
+                     if matches!(value_type, Type::Array(..)) {
+                         let dest = self.new_var();
+                         let elem_type = if let Type::Array(inner, _) = &value_type {
+                             Type::Pointer(inner.clone())
+                         } else { unreachable!() };
+                         self.var_types.insert(dest, elem_type);
+                         self.add_instruction(Instruction::Copy {
+                             dest,
+                             src: Operand::Global(name.clone()),
+                         });
+                         return Ok(Operand::Var(dest));
+                     }
+                     let dest = self.new_var();
                      self.var_types.insert(dest, value_type.clone());
                      self.add_instruction(Instruction::Load {
                         dest,
@@ -532,8 +643,6 @@ impl Lowerer {
                 Ok(Operand::Global(label))
             }
             AstExpr::Call { func, args } => {
-                let bid = self.current_block.ok_or("Call outside block")?;
-                
                 // Handle intrinsics that require l-value arguments (pass-by-reference semantics)
                 if let AstExpr::Variable(name) = func.as_ref() {
                     if name == "__builtin_va_start" {
@@ -547,6 +656,7 @@ impl Lowerer {
                                 return Err("__builtin_va_start second argument must be a variable name".to_string());
                             };
                             
+                            let bid = self.current_block.ok_or("VaStart outside block")?;
                             self.blocks[bid.0].instructions.push(Instruction::VaStart {
                                 list: Operand::Var(list_addr),
                                 arg_index,
@@ -556,6 +666,7 @@ impl Lowerer {
                     } else if name == "__builtin_va_end" {
                         if !args.is_empty() {
                             let list_addr = self.lower_to_addr(&args[0])?;
+                            let bid = self.current_block.ok_or("VaEnd outside block")?;
                             self.blocks[bid.0].instructions.push(Instruction::VaEnd {
                                 list: Operand::Var(list_addr),
                             });
@@ -565,6 +676,7 @@ impl Lowerer {
                         if args.len() >= 2 {
                             let dest_addr = self.lower_to_addr(&args[0])?;
                             let src_val = self.lower_expr(&args[1])?;
+                            let bid = self.current_block.ok_or("VaCopy outside block")?;
                             self.blocks[bid.0].instructions.push(Instruction::VaCopy {
                                 dest: Operand::Var(dest_addr),
                                 src: src_val,
@@ -579,6 +691,9 @@ impl Lowerer {
                     ir_args.push(self.lower_expr(arg)?);
                 }
                 
+                // Re-read current_block AFTER lowering args, since ternary expressions
+                // in arguments can create new basic blocks and change current_block
+                let bid = self.current_block.ok_or("Call outside block")?;
                 let dest = self.new_var();
                 
                 // Check if it's a direct call (function name) or indirect call (function pointer variable)
@@ -601,6 +716,7 @@ impl Lowerer {
                 } else {
                     // Indirect call through function pointer
                     let func_ptr = self.lower_expr(func)?;
+                    let bid = self.current_block.ok_or("IndirectCall outside block")?;
                     self.blocks[bid.0].instructions.push(Instruction::IndirectCall {
                         dest: Some(dest),
                         func_ptr,
@@ -650,9 +766,55 @@ impl Lowerer {
                 // just return the source value (no conversion needed in SSA form)
                 Ok(src_val)
             }
-            AstExpr::Conditional { .. } => {
-             // TODO: Implement ternary operator properly with phi nodes
-                Err("Ternary/conditional operator (? :) not yet supported".to_string())
+            AstExpr::Conditional { condition, then_expr, else_expr } => {
+                // Evaluate condition in the current block.
+                let cond_val = self.lower_expr(condition)?;
+                let entry_bid = self.current_block.ok_or("Ternary outside block")?;
+
+                let then_id  = self.new_block();
+                let else_id  = self.new_block();
+                let merge_id = self.new_block();
+
+                self.blocks[entry_bid.0].terminator = Terminator::CondBr {
+                    cond: cond_val,
+                    then_block: then_id,
+                    else_block: else_id,
+                };
+
+                // Then branch – evaluate then_expr and materialise it into a var.
+                self.sealed_blocks.insert(then_id);
+                self.current_block = Some(then_id);
+                let then_operand = self.lower_expr(then_expr)?;
+                let then_var = self.new_var();
+                let then_bid = self.current_block.ok_or("Ternary then outside block")?;
+                self.blocks[then_bid.0].instructions.push(Instruction::Copy {
+                    dest: then_var,
+                    src: then_operand,
+                });
+                self.blocks[then_bid.0].terminator = Terminator::Br(merge_id);
+
+                // Else branch – evaluate else_expr and materialise it into a var.
+                self.sealed_blocks.insert(else_id);
+                self.current_block = Some(else_id);
+                let else_operand = self.lower_expr(else_expr)?;
+                let else_var = self.new_var();
+                let else_bid = self.current_block.ok_or("Ternary else outside block")?;
+                self.blocks[else_bid.0].instructions.push(Instruction::Copy {
+                    dest: else_var,
+                    src: else_operand,
+                });
+                self.blocks[else_bid.0].terminator = Terminator::Br(merge_id);
+
+                // Merge block – Phi to select the result.
+                self.sealed_blocks.insert(merge_id);
+                self.current_block = Some(merge_id);
+                let result = self.new_var();
+                let merge_bid = merge_id; // already known
+                self.blocks[merge_bid.0].instructions.push(Instruction::Phi {
+                    dest: result,
+                    preds: vec![(then_bid, then_var), (else_bid, else_var)],
+                });
+                Ok(Operand::Var(result))
             }
         }
     }
@@ -679,10 +841,21 @@ impl Lowerer {
                 let array_type = self.get_expr_type(array);
                 let base_addr = match &array_type {
                     Type::Pointer(_) => {
-                        // For pointer indexing, we need the pointer's value, not its address
-                        match self.lower_expr(array)? {
+                        // For pointer indexing, we need the pointer's value, not its address.
+                        // The base may be a Var or a Global (e.g. string literal "..."[i]).
+                        let operand = self.lower_expr(array)?;
+                        match operand {
                             Operand::Var(v) => v,
-                            _ => return Err("Pointer indexing requires a variable".to_string()),
+                            // String literals and globals: materialise into a tmp var first.
+                            other => {
+                                let tmp = self.new_var();
+                                let bid = self.current_block.ok_or("Index outside of block")?;
+                                self.blocks[bid.0].instructions.push(Instruction::Copy {
+                                    dest: tmp,
+                                    src: other,
+                                });
+                                tmp
+                            }
                         }
                     }
                     _ => {
@@ -697,6 +870,7 @@ impl Lowerer {
                     Type::Pointer(inner) => *inner,
                     _ => Type::Int, // fallback
                 };
+                let bid = self.current_block.ok_or("Index outside of block")?;
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,
                     base: Operand::Var(base_addr),

@@ -145,8 +145,12 @@ impl Lowerer {
             }
             AstStmt::Block(b) => {
                 self.lower_block(b)?;
-            }
-            AstStmt::If { cond, then_branch, else_branch } => {
+            }            AstStmt::MultiDecl(stmts) => {
+                // Flat multi-variable declaration — lower each in the current scope.
+                for s in stmts {
+                    self.lower_stmt(s)?
+                }
+            }            AstStmt::If { cond, then_branch, else_branch } => {
                 let cond_val = self.lower_expr(cond)?;
                 let bid = self.current_block.ok_or("If outside of block")?;
 

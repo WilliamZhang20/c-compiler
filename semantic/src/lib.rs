@@ -163,8 +163,13 @@ impl SemanticAnalyzer {
                     self.analyze_stmt(s)?;
                 }
                 self.exit_scope();
-            }
-            Stmt::If { cond, then_branch, else_branch } => {
+            }            Stmt::MultiDecl(stmts) => {
+                // Flat multi-variable declaration — no new scope; all declared names
+                // are visible in the surrounding block.
+                for s in stmts {
+                    self.analyze_stmt(s)?
+                }
+            }            Stmt::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond)?;
                 self.analyze_stmt(then_branch)?;
                 if let Some(else_stmt) = else_branch {

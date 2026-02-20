@@ -16,6 +16,7 @@ pub struct Lowerer {
     pub(crate) global_strings: Vec<(String, String)>,
     pub(crate) variable_allocas: HashMap<String, VarId>,
     pub(crate) global_vars: HashSet<String>,
+    pub(crate) global_types: HashMap<String, Type>,
     pub(crate) function_names: HashSet<String>,
     // Stack of (continue_target, break_target) for nested loops
     pub(crate) loop_context: Vec<(BlockId, BlockId)>,
@@ -56,6 +57,7 @@ impl Lowerer {
             global_strings: Vec::new(),
             variable_allocas: HashMap::new(),
             global_vars: HashSet::new(),
+            global_types: HashMap::new(),
             function_names: HashSet::new(),
             loop_context: Vec::new(),
             struct_defs: HashMap::new(),
@@ -111,6 +113,8 @@ impl Lowerer {
             AstExpr::FloatConstant(_) => Type::Double,  // Default float literals to double
             AstExpr::Variable(name) => {
                 if let Some(ty) = self.symbol_table.get(name) {
+                    ty.clone()
+                } else if let Some(ty) = self.global_types.get(name) {
                     ty.clone()
                 } else {
                     Type::Int // Default to int for undeclared, should be caught by semantic
@@ -419,8 +423,10 @@ impl Lowerer {
             }
         }
         
+        self.global_types.clear();
         for g in &ast.globals {
             self.global_vars.insert(g.name.clone());
+            self.global_types.insert(g.name.clone(), g.r#type.clone());
         }
         // Add function names as globals (they can be used as function pointers)
         for f in &ast.functions {

@@ -238,6 +238,9 @@ pub enum Stmt {
     Default,
     Goto(String),  // label name
     Label(String), // label name
+    /// A comma-separated multi-variable declaration lowered as flat siblings,
+    /// sharing the scope of the enclosing block (no new scope created).
+    MultiDecl(Vec<Stmt>),
     InlineAsm {
         template: String,     // assembly template
         outputs: Vec<AsmOperand>,

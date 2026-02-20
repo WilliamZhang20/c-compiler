@@ -6,13 +6,28 @@ use std::collections::{HashMap, HashSet};
 /// Finds all simple copy instructions (x = y) and replaces uses of x with y
 /// throughout the function. This simplifies the code and enables further optimizations.
 pub fn copy_propagation(func: &mut Function) {
+    // Count definitions per variable to detect Phi-resolved copies
+    // (after phi removal, a phi with N preds becomes N copies to the same dest).
+    // Only propagate when there is exactly one definition — anything else means
+    // the variable carries different values on different control-flow paths.
+    let mut def_count: HashMap<VarId, usize> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::Copy { dest, .. } = inst {
+                *def_count.entry(*dest).or_insert(0) += 1;
+            }
+        }
+    }
+
     let mut copies: HashMap<VarId, Operand> = HashMap::new();
 
-    // Collect all copy instructions
+    // Collect copy instructions — only for singly-defined variables.
     for block in &func.blocks {
         for inst in &block.instructions {
             if let Instruction::Copy { dest, src } = inst {
-                copies.insert(*dest, src.clone());
+                if def_count.get(dest).copied().unwrap_or(0) == 1 {
+                    copies.insert(*dest, src.clone());
+                }
             }
         }
     }
@@ -100,6 +115,13 @@ pub fn copy_propagation(func: &mut Function) {
                 Instruction::Load { addr, .. } => {
                     replace_operand(addr, &copies);
                     collect_used_var(addr, &mut used_vars);
+                }
+                Instruction::Copy { src, .. } => {
+                    // Also propagate through the source of copy instructions and
+                    // track the (possibly updated) source as used so that DCE
+                    // doesn't remove its definition.
+                    replace_operand(src, &copies);
+                    collect_used_var(src, &mut used_vars);
                 }
                 _ => {}
             }

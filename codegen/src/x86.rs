@@ -85,6 +85,7 @@ pub enum X86Instr {
     Not(X86Operand),
     Shl(X86Operand, X86Operand),
     Shr(X86Operand, X86Operand),
+    Sar(X86Operand, X86Operand), // Arithmetic (signed) right shift
     Movsx(X86Operand, X86Operand), // Sign-extend smaller value into larger register
     Movzx(X86Operand, X86Operand), // Zero-extend
     // Float instructions
@@ -131,6 +132,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Not(d) => s.push_str(&format!("  not {}\n", d.to_string())),
             X86Instr::Shl(d, c) => s.push_str(&format!("  shl {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),
+            X86Instr::Sar(d, c) => s.push_str(&format!("  sar {}, {}\n", d.to_string(), c.to_string())),
             X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\n", d.to_string(), src.to_string())),
             X86Instr::Movzx(d, src) => s.push_str(&format!("  movzx {}, {}\n", d.to_string(), src.to_string())),
             // Float instructions

@@ -312,48 +312,68 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let name = match self.advance() {
-            Some(Token::Identifier { value }) => value.clone(),
-            other => return Err(format!("expected identifier after type, found {:?}", other)),
-        };
+        // base_type holds the type parsed so far (before any per-declarator array dims).
+        // We use it to reset for each declarator in a comma-separated list, e.g.
+        //   int a = 1, b = 2, c;
+        //   int arr[3], x;
+        let base_type = r#type;
+        let mut declarations: Vec<Stmt> = Vec::new();
 
-        // Check for array (supports multi-dimensional)
-        while self.match_token(|t| matches!(t, Token::OpenBracket)) {
-            // Check if array size is provided (empty brackets [] are allowed)
-            let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
-                0 // Use 0 to represent unsized array
-            } else {
-                match self.advance() {
-                    Some(Token::Constant { value }) => *value as usize,
-                    other => return Err(format!("[parse_declaration] expected constant array size, found {:?}", other)),
-                }
+        loop {
+            let mut decl_type = base_type.clone();
+
+            let name = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => return Err(format!("expected identifier after type, found {:?}", other)),
             };
-            self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
-            r#type = Type::Array(Box::new(r#type), size);
-        }
 
-        let init = if self.match_token(|t| matches!(t, Token::Equal)) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-        
-        // Infer array size from string literal initializer if size is unspecified
-        if let Type::Array(inner, 0) = &r#type {
-            if let Some(Expr::StringLiteral(s)) = &init {
-                // Set array size to string length + 1 (for null terminator)
-                r#type = Type::Array(inner.clone(), s.len() + 1);
+            // Check for array dimensions on this declarator (supports multi-dimensional)
+            while self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                // Check if array size is provided (empty brackets [] are allowed)
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
+                    0 // Use 0 to represent unsized array
+                } else {
+                    match self.advance() {
+                        Some(Token::Constant { value }) => *value as usize,
+                        other => return Err(format!("[parse_declaration] expected constant array size, found {:?}", other)),
+                    }
+                };
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                decl_type = Type::Array(Box::new(decl_type), size);
+            }
+
+            let init = if self.match_token(|t| matches!(t, Token::Equal)) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+
+            // Infer array size from string literal initializer if size is unspecified
+            if let Type::Array(inner, 0) = &decl_type {
+                if let Some(Expr::StringLiteral(s)) = &init {
+                    decl_type = Type::Array(inner.clone(), s.len() + 1);
+                }
+            }
+
+            declarations.push(Stmt::Declaration {
+                r#type: decl_type,
+                qualifiers: qualifiers.clone(),
+                name,
+                init,
+            });
+
+            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                break;
             }
         }
-        
+
         self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
 
-        Ok(Stmt::Declaration {
-            r#type,
-            qualifiers,
-            name,
-            init,
-        })
+        if declarations.len() == 1 {
+            Ok(declarations.remove(0))
+        } else {
+            Ok(Stmt::MultiDecl(declarations))
+        }
     }
 
     fn parse_inline_asm(&mut self) -> Result<Stmt, String> {

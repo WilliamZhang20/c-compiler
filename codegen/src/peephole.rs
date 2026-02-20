@@ -337,7 +337,7 @@ fn is_reg_used_after(instructions: &[X86Instr], start: usize, reg: &X86Reg) -> b
             X86Instr::Cvttss2si(dest, src) | X86Instr::And(dest, src) |
             X86Instr::Or(dest, src) | X86Instr::Xor(dest, src) |
             X86Instr::Lea(dest, src) | X86Instr::Shl(dest, src) |
-            X86Instr::Shr(dest, src) | X86Instr::Test(dest, src) => {
+            X86Instr::Shr(dest, src) | X86Instr::Sar(dest, src) | X86Instr::Test(dest, src) => {
                 if matches_reg(dest, reg) || matches_reg(src, reg) {
                     return true;
                 }

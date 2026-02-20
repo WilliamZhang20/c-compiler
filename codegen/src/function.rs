@@ -97,18 +97,14 @@ impl<'a> FunctionGenerator<'a> {
         
         self.allocate_stack_slots(func);
         
-        let saved_size = (self.current_saved_regs.len() * 8) as i32;
-        let locals_size = self.next_slot - saved_size;
+        // Insert a placeholder Sub(Rsp) instruction that will be backpatched
+        // after code generation, when the final stack size is known.
+        // This is necessary because resolve_phis and gen_instr may create
+        // additional stack slots beyond what allocate_stack_slots predicts.
+        let sub_rsp_index = self.asm.len();
+        self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rsp), X86Operand::Imm(0))); // placeholder
+
         let shadow_space = convention.shadow_space_size() as i32;
-        
-        // Align total stack frame to 16 bytes
-        let total_stack = saved_size + locals_size + shadow_space;
-        let aligned_total = (total_stack + 15) & !15;
-        let sub_amount = aligned_total - saved_size;
-        
-        if sub_amount > 0 {
-            self.asm.push(X86Instr::Sub(X86Operand::Reg(X86Reg::Rsp), X86Operand::Imm(sub_amount as i64)));
-        }
 
         // Spill register parameters to shadow space if variadic
         if uses_va_start {
@@ -287,6 +283,36 @@ impl<'a> FunctionGenerator<'a> {
                 self.gen_instr(inst);
             }
             self.gen_terminator(&block.terminator, &func.name, func);
+        }
+
+        // Backpatch the Sub(Rsp) placeholder with the final stack size,
+        // now that all stack slots have been allocated during code generation.
+        let saved_size = (self.current_saved_regs.len() * 8) as i32;
+        let locals_size = self.next_slot - saved_size;
+        let shadow_space = convention.shadow_space_size() as i32;
+        
+        // Compute maximum stack space needed for outgoing call arguments
+        let num_param_regs = convention.param_regs().len();
+        let max_call_stack_args = func.blocks.iter()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|inst| match inst {
+                IrInstruction::Call { args, .. } => Some(args.len()),
+                IrInstruction::IndirectCall { args, .. } => Some(args.len()),
+                _ => None,
+            })
+            .map(|n| if n > num_param_regs { ((n - num_param_regs) * 8) as i32 } else { 0 })
+            .max()
+            .unwrap_or(0);
+        
+        let total_stack = saved_size + locals_size + shadow_space + max_call_stack_args;
+        let aligned_total = (total_stack + 15) & !15;
+        let sub_amount = aligned_total - saved_size;
+        
+        if sub_amount > 0 {
+            self.asm[sub_rsp_index] = X86Instr::Sub(X86Operand::Reg(X86Reg::Rsp), X86Operand::Imm(sub_amount as i64));
+        } else {
+            // Replace with a no-op (empty raw string that produces nothing)
+            self.asm[sub_rsp_index] = X86Instr::Raw(String::new());
         }
 
         self.asm
@@ -573,7 +599,13 @@ impl<'a> FunctionGenerator<'a> {
                 };
 
                 let d_op = self.var_to_op(*dest);
-                InstructionGenerator::gen_binary_op(&mut self.asm, *dest, op, l_op, r_op, d_op);
+                // Determine signedness for shift direction: unsigned types use shr, signed use sar
+                let is_signed = if let Operand::Var(lv) = left {
+                    !matches!(self.var_types.get(lv), Some(model::Type::UnsignedInt | model::Type::UnsignedChar | model::Type::UnsignedShort | model::Type::UnsignedLong | model::Type::UnsignedLongLong))
+                } else {
+                    true // literals and globals default to signed
+                };
+                InstructionGenerator::gen_binary_op(&mut self.asm, *dest, op, l_op, r_op, d_op, is_signed);
             }
             IrInstruction::FloatBinary { dest, op, left, right } => {
                 gen_float_binary_op(self, *dest, op, left, right);

@@ -145,9 +145,7 @@ fn should_use_callee_saved(func: &IrFunction, target: &model::TargetConfig) -> b
 }
 
 fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
-    let mut intervals: HashMap<VarId, (usize, usize)> = HashMap::new();
     let mut alloca_vars: HashSet<VarId> = HashSet::new();
-    let mut position = 0;
     
     // First pass: identify alloca variables (pointers that shouldn't be in registers)
     for block in &func.blocks {
@@ -158,10 +156,30 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
         }
     }
     
-    // Assign positions to all instructions
-    for block in &func.blocks {
+    // Build block index: BlockId -> index into func.blocks
+    let block_index: HashMap<ir::BlockId, usize> = func.blocks.iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    
+    // Compute per-block use/def sets and successors
+    let num_blocks = func.blocks.len();
+    let mut block_use: Vec<HashSet<VarId>> = vec![HashSet::new(); num_blocks];
+    let mut block_def: Vec<HashSet<VarId>> = vec![HashSet::new(); num_blocks];
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
+    
+    for (bi, block) in func.blocks.iter().enumerate() {
+        // Process instructions: use before def matters
         for inst in &block.instructions {
-            // Record defs (skip alloca vars)
+            // Record uses (variables used before being defined in this block)
+            visit_operands(inst, |var| {
+                if !alloca_vars.contains(&var) && !block_def[bi].contains(&var) {
+                    block_use[bi].insert(var);
+                }
+            });
+            
+            // Record defs
             let def_var = match inst {
                 IrInstruction::Binary { dest, .. } |
                 IrInstruction::FloatBinary { dest, .. } |
@@ -175,43 +193,185 @@ fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::Call { dest, .. } => *dest,
                 IrInstruction::IndirectCall { dest, .. } => *dest,
                 IrInstruction::InlineAsm { outputs, .. } => {
-                    // InlineAsm can define multiple outputs, handle first one for now
                     outputs.first().copied()
                 }
                 IrInstruction::VaArg { dest, .. } => Some(*dest),
-                IrInstruction::Alloca { .. } | IrInstruction::Store { .. } 
+                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
+                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
+            };
+            if let Some(var) = def_var {
+                if !alloca_vars.contains(&var) {
+                    block_def[bi].insert(var);
+                }
+            }
+        }
+        
+        // Handle terminator uses
+        match &block.terminator {
+            IrTerminator::CondBr { cond, then_block, else_block } => {
+                if let Operand::Var(v) = cond {
+                    if !alloca_vars.contains(v) && !block_def[bi].contains(v) {
+                        block_use[bi].insert(*v);
+                    }
+                }
+                if let Some(&ti) = block_index.get(then_block) {
+                    successors[bi].push(ti);
+                    predecessors[ti].push(bi);
+                }
+                if let Some(&ei) = block_index.get(else_block) {
+                    successors[bi].push(ei);
+                    predecessors[ei].push(bi);
+                }
+            }
+            IrTerminator::Br(target) => {
+                if let Some(&ti) = block_index.get(target) {
+                    successors[bi].push(ti);
+                    predecessors[ti].push(bi);
+                }
+            }
+            IrTerminator::Ret(Some(Operand::Var(v))) => {
+                if !alloca_vars.contains(v) && !block_def[bi].contains(v) {
+                    block_use[bi].insert(*v);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Iterative dataflow liveness analysis
+    // live_in(B) = use(B) ∪ (live_out(B) - def(B))
+    // live_out(B) = ∪ live_in(S) for all successors S of B
+    let mut live_in: Vec<HashSet<VarId>> = vec![HashSet::new(); num_blocks];
+    let mut live_out: Vec<HashSet<VarId>> = vec![HashSet::new(); num_blocks];
+    
+    let mut changed = true;
+    while changed {
+        changed = false;
+        // Process blocks in reverse order for faster convergence
+        for bi in (0..num_blocks).rev() {
+            // live_out(B) = ∪ live_in(S) for all successors S
+            let mut new_live_out = HashSet::new();
+            for &si in &successors[bi] {
+                for v in &live_in[si] {
+                    new_live_out.insert(*v);
+                }
+            }
+            
+            // live_in(B) = use(B) ∪ (live_out(B) - def(B))
+            let mut new_live_in = block_use[bi].clone();
+            for v in &new_live_out {
+                if !block_def[bi].contains(v) {
+                    new_live_in.insert(*v);
+                }
+            }
+            
+            if new_live_in != live_in[bi] || new_live_out != live_out[bi] {
+                changed = true;
+                live_in[bi] = new_live_in;
+                live_out[bi] = new_live_out;
+            }
+        }
+    }
+    
+    // Now assign positions and compute intervals using both position-based
+    // local info and CFG-based liveness
+    let mut intervals: HashMap<VarId, (usize, usize)> = HashMap::new();
+    
+    // Compute position range for each block
+    let mut block_start_pos: Vec<usize> = Vec::with_capacity(num_blocks);
+    let mut block_end_pos: Vec<usize> = Vec::with_capacity(num_blocks);
+    let mut position = 0;
+    for block in &func.blocks {
+        block_start_pos.push(position);
+        position += block.instructions.len();
+        position += 1; // terminator
+        block_end_pos.push(position - 1);
+    }
+    
+    // First: record def/use positions within each block (local precision)
+    position = 0;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            let def_var = match inst {
+                IrInstruction::Binary { dest, .. } |
+                IrInstruction::FloatBinary { dest, .. } |
+                IrInstruction::Unary { dest, .. } |
+                IrInstruction::FloatUnary { dest, .. } |
+                IrInstruction::Phi { dest, .. } |
+                IrInstruction::Copy { dest, .. } |
+                IrInstruction::Cast { dest, .. } |
+                IrInstruction::Load { dest, .. } |
+                IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
+                IrInstruction::Call { dest, .. } => *dest,
+                IrInstruction::IndirectCall { dest, .. } => *dest,
+                IrInstruction::InlineAsm { outputs, .. } => {
+                    outputs.first().copied()
+                }
+                IrInstruction::VaArg { dest, .. } => Some(*dest),
+                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
                 | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
             };
             
             if let Some(var) = def_var {
                 if !alloca_vars.contains(&var) {
-                    intervals.entry(var).or_insert((position, position)).1 = position;
+                    let entry = intervals.entry(var).or_insert((position, position));
+                    if position < entry.0 { entry.0 = position; }
+                    if position > entry.1 { entry.1 = position; }
                 }
             }
             
-            // Record uses (skip alloca vars)
             visit_operands(inst, |var| {
                 if !alloca_vars.contains(&var) {
-                    intervals.entry(var).or_insert((position, position)).1 = position;
+                    let entry = intervals.entry(var).or_insert((position, position));
+                    if position < entry.0 { entry.0 = position; }
+                    if position > entry.1 { entry.1 = position; }
                 }
             });
             
             position += 1;
         }
         
-        // Handle terminator
-        if let IrTerminator::CondBr { cond, .. } = &block.terminator {
-            if let Operand::Var(v) = cond {
-                if !alloca_vars.contains(v) {
-                    intervals.entry(*v).or_insert((position, position)).1 = position;
+        // Handle terminator operands
+        match &block.terminator {
+            IrTerminator::CondBr { cond, .. } => {
+                if let Operand::Var(v) = cond {
+                    if !alloca_vars.contains(v) {
+                        let entry = intervals.entry(*v).or_insert((position, position));
+                        if position < entry.0 { entry.0 = position; }
+                        if position > entry.1 { entry.1 = position; }
+                    }
                 }
             }
-        } else if let IrTerminator::Ret(Some(Operand::Var(v))) = &block.terminator {
-            if !alloca_vars.contains(v) {
-                intervals.entry(*v).or_insert((position, position)).1 = position;
+            IrTerminator::Ret(Some(Operand::Var(v))) => {
+                if !alloca_vars.contains(v) {
+                    let entry = intervals.entry(*v).or_insert((position, position));
+                    if position < entry.0 { entry.0 = position; }
+                    if position > entry.1 { entry.1 = position; }
+                }
             }
+            _ => {}
         }
         position += 1;
+    }
+    
+    // Second: extend intervals for variables that are live-in or live-out of blocks
+    // If a variable is live-in to a block, it must be live from the start of that block
+    // If a variable is live-out of a block, it must be live through the end of that block
+    for bi in 0..num_blocks {
+        let bstart = block_start_pos[bi];
+        let bend = block_end_pos[bi];
+        
+        for v in &live_in[bi] {
+            let entry = intervals.entry(*v).or_insert((bstart, bstart));
+            if bstart < entry.0 { entry.0 = bstart; }
+            if bend > entry.1 { entry.1 = bend; }
+        }
+        
+        for v in &live_out[bi] {
+            let entry = intervals.entry(*v).or_insert((bstart, bstart));
+            if bstart < entry.0 { entry.0 = bstart; }
+            if bend > entry.1 { entry.1 = bend; }
+        }
     }
     
     intervals.into_iter()
@@ -366,7 +526,9 @@ fn compute_live_across_call(intervals: &[LiveInterval], func: &IrFunction) -> Ha
     let mut live_across_call = HashSet::new();
     let mut position = 0;
     
-    // Find all call instruction positions
+    // Find all call instruction positions.
+    // IMPORTANT: must use the SAME position numbering as compute_live_intervals,
+    // which increments position by 1 for terminators in addition to instructions.
     let mut call_positions = Vec::new();
     for block in &func.blocks {
         for inst in &block.instructions {
@@ -375,6 +537,7 @@ fn compute_live_across_call(intervals: &[LiveInterval], func: &IrFunction) -> Ha
             }
             position += 1;
         }
+        position += 1; // account for terminator (matching compute_live_intervals)
     }
     
     // Mark variables whose live ranges span any call position
@@ -412,35 +575,37 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
                 }
             }
         }
+
+        // Determine early whether this variable must survive function calls.
+        // Such variables cannot be in caller-saved registers.
+        let is_live_across_call = live_across_call.contains(&current_var);
+        let callee_saved_set: HashSet<PhysicalReg> = PhysicalReg::callee_saved(target).into_iter().collect();
         
         // Try parameter hint first (prefer incoming parameter registers)
+        // But only if the hinted register is safe (callee-saved, or var is not live-across-call)
         let mut assigned_reg: Option<PhysicalReg> = None;
         if let Some(&hint_reg) = param_hints.get(&current_var) {
-            // Check if we can use the hinted register (not used by neighbors and available)
-            if !used_colors.contains(&hint_reg) && available_regs.contains(&hint_reg) {
+            let reg_is_safe = !is_live_across_call || callee_saved_set.contains(&hint_reg);
+            if reg_is_safe && !used_colors.contains(&hint_reg) && available_regs.contains(&hint_reg) {
                 assigned_reg = Some(hint_reg);
             }
         }
         
         // Try to coalesce with copy hint if param hint didn't work
+        // Same safety restriction: don't coalesce into caller-saved if live-across-call
         if assigned_reg.is_none() {
             if let Some(hint_var) = copy_hints.get(&current_var) {
                 if let Some(hint_reg) = var_colors.get(hint_var) {
-                    // Check if we can use the same register (not interfering and not already used)
                     let interferes = interference.get(&current_var)
                         .map(|neighbors| neighbors.contains(hint_var))
                         .unwrap_or(false);
-                    
-                    if !interferes && !used_colors.contains(hint_reg) && available_regs.contains(hint_reg) {
+                    let reg_is_safe = !is_live_across_call || callee_saved_set.contains(hint_reg);
+                    if !interferes && reg_is_safe && !used_colors.contains(hint_reg) && available_regs.contains(hint_reg) {
                         assigned_reg = Some(*hint_reg);
                     }
                 }
             }
         }
-        
-        // Determine which registers are available for this variable
-        // Variables live across calls cannot use caller-saved registers
-        let is_live_across_call = live_across_call.contains(&current_var);
         
         // If coalescing didn't work, try to assign a register with caller-saved preference
         // BUT skip caller-saved if this variable is live across a call
@@ -465,16 +630,10 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // If live across call and no callee-saved available, must use ANY non-interfering register
-        // (including caller-saved as last resort, will require spill/restore)
-        if assigned_reg.is_none() && is_live_across_call {
-            for reg in &available_regs {
-                if !used_colors.contains(reg) {
-                    assigned_reg = Some(*reg);
-                    break;
-                }
-            }
-        }
+        // If live across call and no callee-saved available, do NOT fall back to a
+        // caller-saved register (it would be clobbered). Leave allocated register as None;
+        // var_to_op will assign a stack slot which survives calls.
+        // (This is conservative register spilling: prefer correctness over register pressure.)
         
         // Update interval and tracking map
         intervals[i].reg = assigned_reg;

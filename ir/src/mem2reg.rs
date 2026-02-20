@@ -27,6 +27,8 @@ struct Mem2RegPass<'a> {
     // Shared zero constants for uninitialized values
     zero_int: Option<VarId>,
     zero_float: Option<VarId>,
+    // Track phi_vars that were simplified away (phi_var -> replacement)
+    simplified: HashMap<VarId, VarId>,
 }
 
 impl<'a> Mem2RegPass<'a> {
@@ -44,6 +46,7 @@ impl<'a> Mem2RegPass<'a> {
             alloca_types: HashMap::new(),
             zero_int: None,
             zero_float: None,
+            simplified: HashMap::new(),
         }
     }
 
@@ -67,6 +70,7 @@ impl<'a> Mem2RegPass<'a> {
         }
         
         self.reconstruct_blocks();
+        self.fixup_simplified_phi_sources();
     }
     
     fn compute_preds(&mut self) {
@@ -248,6 +252,7 @@ impl<'a> Mem2RegPass<'a> {
         
         if all_same {
             self.incoming_cache.insert((block_id, var_id), first);
+            self.simplified.insert(phi_var, first);
             return first;
         }
         
@@ -278,6 +283,38 @@ impl<'a> Mem2RegPass<'a> {
                 }
                 final_insts.extend(insts);
                 block.instructions = final_insts;
+            }
+        }
+    }
+
+    /// Resolve a VarId through the simplification chain
+    fn resolve_simplified(&self, var: VarId) -> VarId {
+        let mut v = var;
+        let mut seen = HashSet::new();
+        while let Some(s) = self.simplified.get(&v) {
+            if !seen.insert(v) { break; } // avoid infinite loops
+            v = *s;
+        }
+        v
+    }
+
+    /// Fix up phi sources that reference simplified-away phi_vars
+    fn fixup_simplified_phi_sources(&mut self) {
+        if self.simplified.is_empty() { return; }
+        // Build full resolution map to avoid borrow issues
+        let mut resolved_map: HashMap<VarId, VarId> = HashMap::new();
+        for &var in self.simplified.keys() {
+            resolved_map.insert(var, self.resolve_simplified(var));
+        }
+        for block in &mut self.func.blocks {
+            for instr in &mut block.instructions {
+                if let Instruction::Phi { preds, .. } = instr {
+                    for (_, src) in preds.iter_mut() {
+                        if let Some(&resolved) = resolved_map.get(src) {
+                            *src = resolved;
+                        }
+                    }
+                }
             }
         }
     }

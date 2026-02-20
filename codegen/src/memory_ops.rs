@@ -3,13 +3,36 @@ use crate::x86::{X86Instr, X86Operand, X86Reg};
 use model::Type;
 use ir::{VarId, Operand};
 
+/// Returns (is_float, use_byte, use_word, use_dword, is_unsigned) for a type.
+/// use_byte=1-byte, use_word=2-byte, use_dword=4-byte, else 8-byte.
+fn type_load_info(value_type: &Type) -> (bool, bool, bool, bool, bool) {
+    match value_type {
+        Type::Float  => (true, false, false, true, false),
+        Type::Double => (true, false, false, false, false),
+        Type::Char   => (false, true, false, false, false),
+        Type::UnsignedChar => (false, true, false, false, true),
+        Type::Short  => (false, false, true, false, false),
+        Type::UnsignedShort => (false, false, true, false, true),
+        Type::Int | Type::UnsignedInt => (false, false, false, true, matches!(value_type, Type::UnsignedInt)),
+        Type::Typedef(name) => match name.as_str() {
+            "int8_t"  | "int8"  => (false, true, false, false, false),
+            "uint8_t" | "uint8" => (false, true, false, false, true),
+            "int16_t" | "int16" => (false, false, true, false, false),
+            "uint16_t"| "uint16"=> (false, false, true, false, true),
+            "int32_t" | "int32" => (false, false, false, true, false),
+            "uint32_t"| "uint32"=> (false, false, false, true, true),
+            _ => (false, false, false, false, false), // 8-byte default
+        },
+        _ => (false, false, false, false, false), // 8-byte / pointer
+    }
+}
+
 pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, value_type: &Type) {
     generator.var_types.insert(dest, value_type.clone());
     let d_op = generator.var_to_op(dest);
-    let is_float = matches!(value_type, Type::Float | Type::Double);
-    let use_dword = matches!(value_type, Type::Int | Type::Float);
-    let use_byte = matches!(value_type, Type::Char | Type::UnsignedChar);
-    let is_unsigned = matches!(value_type, Type::UnsignedChar);
+    let (is_float, use_byte, use_word, use_dword, is_unsigned) = type_load_info(value_type);
+    let _ = use_word; // word-size loads use the same dword path for now
+
     
     // Optimization: if loading directly from an alloca (stack slot), just read it
     if let Operand::Var(var) = addr {
@@ -94,9 +117,9 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
 }
 
 pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operand, value_type: &Type) {
-    let is_float = matches!(value_type, Type::Float | Type::Double);
-    let use_dword = matches!(value_type, Type::Int | Type::Float);
-    let use_byte = matches!(value_type, Type::Char | Type::UnsignedChar);
+    let (is_float, use_byte, _use_word, use_dword, _is_unsigned) = type_load_info(value_type);
+    let _ = _use_word;
+    let _ = _is_unsigned;
 
     // Load src into register
     if is_float {

@@ -133,7 +133,25 @@ impl Codegen {
                      }
                  } else {
                      // Uninitialized
-                     output.push_str(&format!("{}: .long 0\n", g.name));
+                     match &g.r#type {
+                         Type::Array(inner, size) => {
+                             let elem_bytes: usize = match inner.as_ref() {
+                                 Type::Char | Type::UnsignedChar => 1,
+                                 Type::Short | Type::UnsignedShort => 2,
+                                 Type::Int | Type::UnsignedInt | Type::Float => 4,
+                                 Type::Typedef(n) => match n.as_str() {
+                                     "int8_t" | "uint8_t" | "int8" => 1,
+                                     "int16_t" | "uint16_t" => 2,
+                                     "int32_t" | "uint32_t" => 4,
+                                     "int64_t" | "uint64_t" | "size_t" => 8,
+                                     _ => 4,
+                                 },
+                                 _ => 8,
+                             };
+                             output.push_str(&format!("{}: .zero {}\n", g.name, elem_bytes * size));
+                         }
+                         _ => output.push_str(&format!("{}: .long 0\n", g.name)),
+                     }
                  }
                  
                  // Switch back to .data section if we were in a custom section

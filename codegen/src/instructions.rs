@@ -13,6 +13,7 @@ impl InstructionGenerator {
         l_op: X86Operand,
         r_op: X86Operand,
         d_op: X86Operand,
+        is_signed: bool,
     ) {
         let is_32bit_op = |op: &X86Operand| -> bool {
             match op {
@@ -222,11 +223,19 @@ impl InstructionGenerator {
                 };
                 
                 if matches!(d_op, X86Operand::Reg(_)) && d_op == l_op {
-                    // Optimize: dest = dest >> count -> just shr
-                    asm.push(X86Instr::Shr(d_op, count_op));
+                    // Optimize: dest = dest >> count -> just shr/sar
+                    if is_signed {
+                        asm.push(X86Instr::Sar(d_op, count_op));
+                    } else {
+                        asm.push(X86Instr::Shr(d_op, count_op));
+                    }
                 } else {
                     asm.push(X86Instr::Mov(ax_op.clone(), l_op));
-                    asm.push(X86Instr::Shr(ax_op.clone(), count_op));
+                    if is_signed {
+                        asm.push(X86Instr::Sar(ax_op.clone(), count_op));
+                    } else {
+                        asm.push(X86Instr::Shr(ax_op.clone(), count_op));
+                    }
                     asm.push(X86Instr::Mov(d_op, ax_op));
                 }
             }

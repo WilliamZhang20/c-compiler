@@ -59,7 +59,14 @@ impl<'a> TypeCalculator<'a> {
                     4
                 }
             }
-            Type::Typedef(_) => 4,
+            Type::Typedef(name) => match name.as_str() {
+                "int8_t" | "uint8_t" | "int8" | "uint8" => 1,
+                "int16_t" | "uint16_t" | "int16" | "uint16" => 2,
+                "int32_t" | "uint32_t" | "int32" | "uint32" => 4,
+                "int64_t" | "uint64_t" | "int64" | "uint64"
+                | "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => 8,
+                _ => 4,
+            },
             Type::Void => 1,
         }
     }
@@ -119,7 +126,14 @@ impl<'a> TypeCalculator<'a> {
                     8
                 }
             }
-            Type::Typedef(_) => 8,
+            Type::Typedef(name) => match name.as_str() {
+                "int8_t" | "uint8_t" | "int8" | "uint8" => 1,
+                "int16_t" | "uint16_t" | "int16" | "uint16" => 2,
+                "int32_t" | "uint32_t" | "int32" | "uint32" => 4,
+                "int64_t" | "uint64_t" | "int64" | "uint64"
+                | "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => 8,
+                _ => 8,
+            },
         }
     }
 
