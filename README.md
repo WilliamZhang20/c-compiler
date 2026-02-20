@@ -15,12 +15,15 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 ### How to Run
 
-The most exciting part. Currently only works on Windows, Linux compatability is coming soon. Run `release.exe` and point to any C file. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP. The ultimate stress test may not necessarily be Linux, but rather `donut.c`.
+The most exciting part. The compiler now works on both **Windows** and **Linux**! On Windows, run `windows_release.exe` and point to any C file. On Linux, build and run `./linux_release`. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP. The ultimate stress test may not necessarily be Linux, but rather `donut.c`.
 
-To build a new release from the existing files, run the following and copy the created `target/run/driver.exe` into the home directory.
+To build a new release from the existing files, run the following:
 ```
 cargo build --bin driver --release
 ```
+
+- On Windows: Copy `target/release/driver.exe` to the home directory
+- On Linux: Copy `target/release/driver` to the home directory
 
 ### Architecture
 
@@ -77,7 +80,7 @@ The compiler supports a substantial subset of the C language including:
 - **Functions**: Definitions, declarations, and recursive calls
 - **Global variables**: Initialized and uninitialized globals with proper RIP-relative addressing
 
-The compiler generates position-independent x86-64 assembly compatible with Windows (MinGW) and targets modern Intel/AMD processors.
+The compiler generates position-independent x86-64 assembly compatible with **both Windows (MinGW) and Linux (System V ABI)**, targeting modern Intel/AMD processors.
 
 ## Testing
 

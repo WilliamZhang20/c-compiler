@@ -116,6 +116,7 @@ dependencies = [
  "codegen",
  "ir",
  "lexer",
+ "model",
  "optimizer",
  "parser",
  "semantic",

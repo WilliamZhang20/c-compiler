@@ -1,3 +1,7 @@
+// Target platform configuration
+mod target;
+pub use target::{Platform, CallingConvention, TargetConfig};
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum Token {
     Identifier { value: String },

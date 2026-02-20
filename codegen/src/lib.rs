@@ -7,6 +7,7 @@ mod function;
 mod float_ops;
 mod memory_ops;
 mod call_ops;
+mod calling_convention;
 
 use model::Type;
 use ir::IRProgram;
@@ -16,6 +17,7 @@ pub use x86::{X86Reg, X86Operand, X86Instr, emit_asm};
 pub use regalloc::{PhysicalReg, allocate_registers};
 use peephole::apply_peephole;
 use function::FunctionGenerator;
+pub use model::TargetConfig;
 
 pub struct Codegen {
     // Shared state
@@ -25,6 +27,7 @@ pub struct Codegen {
     next_float_const: usize,
     func_return_types: HashMap<String, Type>,
     enable_regalloc: bool,
+    target: TargetConfig,
 }
 
 impl Codegen {
@@ -36,6 +39,7 @@ impl Codegen {
             next_float_const: 0,
             func_return_types: HashMap::new(),
             enable_regalloc: true,
+            target: TargetConfig::host(),
         }
     }
 
@@ -86,7 +90,18 @@ impl Codegen {
                  let mut in_custom_section = false;
                  for attr in &g.attributes {
                      if let model::Attribute::Section(section_name) = attr {
-                         output.push_str(&format!(".section {}\n", section_name));
+                         // Generate platform-specific section directive
+                         match self.target.platform {
+                             model::Platform::Linux => {
+                                 // ELF format: section name, flags, type
+                                 // "aw" = allocatable, writable; @progbits = contains data
+                                 output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
+                             }
+                             model::Platform::Windows => {
+                                 // PE/COFF format: section name only (no @type syntax)
+                                 output.push_str(&format!(".section {}\n", section_name));
+                             }
+                         }
                          in_custom_section = true;
                      }
                  }
@@ -141,6 +156,7 @@ impl Codegen {
                 &mut self.float_constants,
                 &mut self.next_float_const,
                 self.enable_regalloc,
+                &self.target,
             );
             
             let mut func_asm = func_gen.gen_function(func);
@@ -163,6 +179,11 @@ impl Codegen {
                 let bits = f32_value.to_bits();
                 output.push_str(&format!("{}: .long 0x{:08x}\n", label, bits));
             }
+        }
+        
+        // Add .note.GNU-stack section for Linux to mark stack as non-executable
+        if matches!(self.target.platform, model::Platform::Linux) {
+            output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
         }
         
         output

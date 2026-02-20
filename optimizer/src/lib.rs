@@ -17,6 +17,7 @@ mod cse;
 mod dce;
 mod folding;
 mod utils;
+mod cfg_simplify;
 
 use ir::IRProgram;
 use algebraic::algebraic_simplification;
@@ -24,18 +25,21 @@ use strength::strength_reduce_function;
 use propagation::copy_propagation;
 use cse::common_subexpression_elimination;
 use folding::optimize_function;
+use cfg_simplify::simplify_cfg;
 
 /// Main optimization entry point
 ///
 /// Runs a series of optimization passes on each function in the program:
 /// 1. Mem2reg - promote memory allocations to SSA registers
-/// 2. Algebraic simplification - apply mathematical identities
-/// 3. Strength reduction - replace expensive ops with cheaper ones
-/// 4. Copy propagation - forward copy values
-/// 5. Load forwarding - eliminate redundant memory loads
-/// 6. Common subexpression elimination - remove redundant calculations
-/// 7. Constant folding - evaluate constant expressions at compile time
-/// 8. Dead code elimination - remove unused computations (integrated in folding)
+/// 2. CFG simplification - merge blocks and eliminate empty jumps
+/// 3. Algebraic simplification - apply mathematical identities
+/// 4. Strength reduction - replace expensive ops with cheaper ones
+/// 5. Copy propagation - forward copy values
+/// 6. Load forwarding - eliminate redundant memory loads
+/// 7. Common subexpression elimination - remove redundant calculations
+/// 8. Constant folding - evaluate constant expressions at compile time
+/// 9. Dead code elimination - remove unused computations (integrated in folding)
+/// 10. CFG simplification (again) - clean up after optimizations
 ///
 /// # Arguments
 /// * `program` - The IR program to optimize
@@ -51,6 +55,7 @@ pub fn optimize(mut program: IRProgram) -> IRProgram {
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
         ir::remove_phis(func);
+        simplify_cfg(func);  // Run AFTER phi removal (only uses remove_empty_blocks now)
     }
     program
 }

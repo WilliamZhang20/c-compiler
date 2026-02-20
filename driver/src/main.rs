@@ -183,8 +183,9 @@ fn preprocess(input_path: &str, input_file: &Path) -> String {
 }
 
 fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
+    let platform = model::Platform::host();
     let mut executable_file = input_file.file_stem().unwrap().to_string_lossy().into_owned();
-    executable_file.push_str(".exe");
+    executable_file.push_str(platform.executable_extension());
 
     let mut args = vec![asm_path.to_string()];
     let mut temp_malloc_o = None;
@@ -224,7 +225,11 @@ fn run_linker(input_file: &Path, asm_path: &str, use_safe_malloc: bool) {
     
     args.push("-o".to_string());
     args.push(executable_file.clone());
-    args.push("-mconsole".to_string());
+    
+    // Add platform-specific linker flags
+    if platform.needs_console_flag() {
+        args.push("-mconsole".to_string());
+    }
 
     let exit_code = Command::new("gcc")
         .args(&args)

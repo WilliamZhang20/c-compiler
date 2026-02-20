@@ -380,8 +380,13 @@ pub fn remove_phis(func: &mut Function) {
         }
     }
     
-    // Apply insertions
+    // Apply insertions (skip unreachable blocks)
     for block in &mut func.blocks {
+        // Don't add phi-resolution copies to unreachable blocks
+        if matches!(block.terminator, Terminator::Unreachable) && block.instructions.is_empty() {
+            continue;
+        }
+        
         if let Some(copies) = insertions.remove(&block.id) {
             block.instructions.extend(copies);
         }

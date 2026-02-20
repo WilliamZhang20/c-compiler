@@ -17,4 +17,4 @@
 *.exe
 
 # …except this one
-!release.exe
+!windows_release.exe

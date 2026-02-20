@@ -28,25 +28,54 @@ impl PhysicalReg {
         }
     }
     
-    // Caller-saved registers (volatile in Windows x64)
-    pub fn caller_saved() -> Vec<PhysicalReg> {
-        vec![Self::Rax, Self::Rcx, Self::Rdx, Self::R8, Self::R9, Self::R10, Self::R11]
+    // Caller-saved registers (volatile) - platform-specific
+    pub fn caller_saved(target: &model::TargetConfig) -> Vec<PhysicalReg> {
+        match target.calling_convention {
+            model::CallingConvention::WindowsX64 => {
+                vec![Self::Rax, Self::Rcx, Self::Rdx, Self::R8, Self::R9, Self::R10, Self::R11]
+            }
+            model::CallingConvention::SystemV => {
+                // System V: Rax, Rcx, Rdx, Rsi, Rdi, R8-R11 are caller-saved
+                vec![Self::Rax, Self::Rcx, Self::Rdx, Self::Rsi, Self::Rdi, Self::R8, Self::R9, Self::R10, Self::R11]
+            }
+        }
     }
     
-    // Callee-saved registers (non-volatile in Windows x64)
-    pub fn callee_saved() -> Vec<PhysicalReg> {
-        vec![Self::Rbx, Self::Rsi, Self::Rdi, Self::R12, Self::R13, Self::R14, Self::R15]
+    // Callee-saved registers (non-volatile) - platform-specific
+    pub fn callee_saved(target: &model::TargetConfig) -> Vec<PhysicalReg> {
+        match target.calling_convention {
+            model::CallingConvention::WindowsX64 => {
+                // Windows x64: Rbx, Rsi, Rdi, Rbp, R12-R15 are callee-saved
+                vec![Self::Rbx, Self::Rsi, Self::Rdi, Self::R12, Self::R13, Self::R14, Self::R15]
+            }
+            model::CallingConvention::SystemV => {
+                // System V: Rbx, Rbp, R12-R15 are callee-saved (Rsi, Rdi are caller-saved!)
+                vec![Self::Rbx, Self::R12, Self::R13, Self::R14, Self::R15]
+            }
+        }
     }
     
-    // All allocatable registers
+    // All allocatable registers - platform-specific
     // Exclude Rax, Rcx, Rdx as they are used as scratch registers in codegen
     // Exclude R10, R11 as they are used as scratch for address loading
-    pub fn allocatable() -> Vec<PhysicalReg> {
-        vec![
-            Self::Rbx, Self::Rsi, Self::Rdi, 
-            Self::R8, Self::R9, 
-            Self::R12, Self::R13, Self::R14, Self::R15,
-        ]
+    pub fn allocatable(target: &model::TargetConfig) -> Vec<PhysicalReg> {
+        match target.calling_convention {
+            model::CallingConvention::WindowsX64 => {
+                vec![
+                    Self::Rbx, Self::Rsi, Self::Rdi, 
+                    Self::R8, Self::R9, 
+                    Self::R12, Self::R13, Self::R14, Self::R15,
+                ]
+            }
+            model::CallingConvention::SystemV => {
+                // System V: Can use more registers since Rsi, Rdi are caller-saved
+                vec![
+                    Self::Rbx, Self::Rsi, Self::Rdi, 
+                    Self::R8, Self::R9, 
+                    Self::R12, Self::R13, Self::R14, Self::R15,
+                ]
+            }
+        }
     }
 }
 
@@ -61,7 +90,7 @@ pub struct LiveInterval {
 }
 
 /// allocate_registers performs graph-coloring register allocation with copy coalescing
-pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
+pub fn allocate_registers(func: &IrFunction, target: &model::TargetConfig) -> HashMap<VarId, PhysicalReg> {
     // 1. Compute live intervals for each variable
     let mut intervals = compute_live_intervals(func);
     
@@ -74,14 +103,21 @@ pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     // 3. Collect copy hints for coalescing (maps dest -> src for Copy instructions)
     let copy_hints = collect_copy_hints(func);
     
-    // 4. Determine if we should allow callee-saved registers
+    // 4. Build parameter register hints to prefer incoming registers
+    let param_hints = build_param_hints(func, target);
+    
+    // 5. Determine if we should allow callee-saved registers
     // For small functions, avoid callee-saved to eliminate push/pop overhead
-    let use_callee_saved = should_use_callee_saved(func);
+    let use_callee_saved = should_use_callee_saved(func, target);
     
-    // 5. Graph coloring with copy coalescing
-    color_graph(&mut intervals, &interference, &copy_hints, use_callee_saved);
+    // 6. Identify variables that are live across function calls
+    // These variables cannot use caller-saved registers
+    let live_across_call = compute_live_across_call(&intervals, func);
     
-    // 6. Build result map
+    // 7. Graph coloring with copy coalescing and parameter hints
+    color_graph(&mut intervals, &interference, &copy_hints, &param_hints, use_callee_saved, &live_across_call, target);
+    
+    // 8. Build result map
     let mut reg_alloc = HashMap::new();
     for interval in &intervals {
         if let Some(reg) = interval.reg {
@@ -92,7 +128,7 @@ pub fn allocate_registers(func: &IrFunction) -> HashMap<VarId, PhysicalReg> {
     reg_alloc
 }
 
-fn should_use_callee_saved(func: &IrFunction) -> bool {
+fn should_use_callee_saved(func: &IrFunction, target: &model::TargetConfig) -> bool {
     // Heuristic: for small functions with few blocks and instructions,
     // prefer to spill to stack rather than use callee-saved registers
     // This avoids the push/pop overhead which can be significant
@@ -103,6 +139,8 @@ fn should_use_callee_saved(func: &IrFunction) -> bool {
         .sum();
     
     // Allow callee-saved only for larger functions (>5 blocks or >30 instructions)
+    // Note: target is available for future platform-specific heuristics
+    let _ = target; // Silence unused warning
     num_blocks > 5 || num_instructions > 30
 }
 
@@ -277,6 +315,31 @@ fn collect_copy_hints(func: &IrFunction) -> HashMap<VarId, VarId> {
     hints
 }
 
+/// Build hints for parameter variables to prefer their incoming registers
+fn build_param_hints(func: &IrFunction, target: &model::TargetConfig) -> HashMap<VarId, PhysicalReg> {
+    let mut hints = HashMap::new();
+    
+    // Map System V parameter registers to PhysicalReg
+    let param_physical_regs: Vec<PhysicalReg> = match target.calling_convention {
+        model::CallingConvention::WindowsX64 => {
+            vec![PhysicalReg::Rcx, PhysicalReg::Rdx, PhysicalReg::R8, PhysicalReg::R9]
+        }
+        model::CallingConvention::SystemV => {
+            vec![PhysicalReg::Rdi, PhysicalReg::Rsi, PhysicalReg::Rdx, 
+                 PhysicalReg::Rcx, PhysicalReg::R8, PhysicalReg::R9]
+        }
+    };
+    
+    // Hint each parameter to prefer its incoming register
+    for (i, (_, var_id)) in func.params.iter().enumerate() {
+        if i < param_physical_regs.len() {
+            hints.insert(*var_id, param_physical_regs[i]);
+        }
+    }
+    
+    hints
+}
+
 fn build_interference_graph(intervals: &[LiveInterval]) -> HashMap<VarId, HashSet<VarId>> {
     let mut graph: HashMap<VarId, HashSet<VarId>> = HashMap::new();
     
@@ -297,11 +360,41 @@ fn build_interference_graph(intervals: &[LiveInterval]) -> HashMap<VarId, HashSe
     graph
 }
 
-fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>, copy_hints: &HashMap<VarId, VarId>, use_callee_saved: bool) {
+/// Compute which variables are live across function calls
+/// These variables cannot be allocated to caller-saved registers
+fn compute_live_across_call(intervals: &[LiveInterval], func: &IrFunction) -> HashSet<VarId> {
+    let mut live_across_call = HashSet::new();
+    let mut position = 0;
+    
+    // Find all call instruction positions
+    let mut call_positions = Vec::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if matches!(inst, IrInstruction::Call { .. } | IrInstruction::IndirectCall { .. }) {
+                call_positions.push(position);
+            }
+            position += 1;
+        }
+    }
+    
+    // Mark variables whose live ranges span any call position
+    for interval in intervals {
+        for &call_pos in &call_positions {
+            if interval.start < call_pos && call_pos < interval.end {
+                live_across_call.insert(interval.var);
+                break;
+            }
+        }
+    }
+    
+    live_across_call
+}
+
+fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>, copy_hints: &HashMap<VarId, VarId>, param_hints: &HashMap<VarId, PhysicalReg>, use_callee_saved: bool, live_across_call: &HashSet<VarId>, target: &model::TargetConfig) {
     // Sort by spill cost heuristic (shorter intervals = higher priority)
     intervals.sort_by_key(|i| i.end - i.start);
     
-    let available_regs = PhysicalReg::allocatable();
+    let available_regs = PhysicalReg::allocatable(target);
     
     // Build a map of var -> register for already colored intervals
     let mut var_colors: HashMap<VarId, PhysicalReg> = HashMap::new();
@@ -320,24 +413,39 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // Try to coalesce with copy hint first (if they don't interfere)
+        // Try parameter hint first (prefer incoming parameter registers)
         let mut assigned_reg: Option<PhysicalReg> = None;
-        if let Some(hint_var) = copy_hints.get(&current_var) {
-            if let Some(hint_reg) = var_colors.get(hint_var) {
-                // Check if we can use the same register (not interfering and not already used)
-                let interferes = interference.get(&current_var)
-                    .map(|neighbors| neighbors.contains(hint_var))
-                    .unwrap_or(false);
-                
-                if !interferes && !used_colors.contains(hint_reg) && available_regs.contains(hint_reg) {
-                    assigned_reg = Some(*hint_reg);
+        if let Some(&hint_reg) = param_hints.get(&current_var) {
+            // Check if we can use the hinted register (not used by neighbors and available)
+            if !used_colors.contains(&hint_reg) && available_regs.contains(&hint_reg) {
+                assigned_reg = Some(hint_reg);
+            }
+        }
+        
+        // Try to coalesce with copy hint if param hint didn't work
+        if assigned_reg.is_none() {
+            if let Some(hint_var) = copy_hints.get(&current_var) {
+                if let Some(hint_reg) = var_colors.get(hint_var) {
+                    // Check if we can use the same register (not interfering and not already used)
+                    let interferes = interference.get(&current_var)
+                        .map(|neighbors| neighbors.contains(hint_var))
+                        .unwrap_or(false);
+                    
+                    if !interferes && !used_colors.contains(hint_reg) && available_regs.contains(hint_reg) {
+                        assigned_reg = Some(*hint_reg);
+                    }
                 }
             }
         }
         
+        // Determine which registers are available for this variable
+        // Variables live across calls cannot use caller-saved registers
+        let is_live_across_call = live_across_call.contains(&current_var);
+        
         // If coalescing didn't work, try to assign a register with caller-saved preference
-        if assigned_reg.is_none() {
-            for reg in PhysicalReg::caller_saved() {
+        // BUT skip caller-saved if this variable is live across a call
+        if assigned_reg.is_none() && !is_live_across_call {
+            for reg in PhysicalReg::caller_saved(target) {
                 if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                     assigned_reg = Some(reg);
                     break;
@@ -345,11 +453,22 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
             }
         }
         
-        // Fall back to callee-saved if caller-saved are exhausted (and allowed)
+        // Fall back to callee-saved if caller-saved are exhausted/forbidden (and allowed)
         if assigned_reg.is_none() && use_callee_saved {
-            for reg in PhysicalReg::callee_saved() {
+            for reg in PhysicalReg::callee_saved(target) {
                 if !used_colors.contains(&reg) && available_regs.contains(&reg) {
                     assigned_reg = Some(reg);
+                    break;
+                }
+            }
+        }
+        
+        // If live across call and no callee-saved available, must use ANY non-interfering register
+        // (including caller-saved as last resort, will require spill/restore)
+        if assigned_reg.is_none() && is_live_across_call {
+            for reg in &available_regs {
+                if !used_colors.contains(reg) {
+                    assigned_reg = Some(*reg);
                     break;
                 }
             }

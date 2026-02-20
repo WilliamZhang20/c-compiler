@@ -367,6 +367,9 @@ impl Lowerer {
                 // Create a new block for the label
                 let label_block = self.new_block();
                 
+                // Mark this block as a label target (should not be merged by CFG optimizations)
+                self.blocks[label_block.0].is_label_target = true;
+                
                 // Jump from current block to label block (if current block exists)
                 if let Some(bid) = self.current_block {
                     // Only add branch if the current block doesn't already have a terminator

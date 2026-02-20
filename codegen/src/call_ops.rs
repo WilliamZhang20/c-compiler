@@ -1,11 +1,14 @@
 use crate::function::FunctionGenerator;
 use crate::x86::{X86Instr, X86Operand, X86Reg};
+use crate::calling_convention::get_convention;
 use model::Type;
 use ir::{VarId, Operand};
 
 pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &str, args: &[Operand]) {
-    let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-    let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
+    let convention = get_convention(generator.target.calling_convention);
+    let param_regs = convention.param_regs();
+    let float_regs = convention.float_param_regs();
+    let shadow_space = convention.shadow_space_size();
     
     for (i, arg) in args.iter().enumerate() {
         let is_float = match arg {
@@ -16,11 +19,11 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
             _ => false,
         };
         
-        if i < 4 {
-            if is_float {
+        if i < param_regs.len() {
+            if is_float && i < float_regs.len() {
                 let label = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
-            } else {
+            } else if !is_float {
                 let mut handled = false;
                 if let Operand::Var(var) = arg {
                      if let Some(off) = generator.alloca_buffers.get(var) {
@@ -38,7 +41,7 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
                 }
             }
         } else {
-            let offset = 32 + (i - 4) * 8;
+            let offset = shadow_space + (i - param_regs.len()) * 8;
             if is_float {
                 let label = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
@@ -84,8 +87,10 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
 }
 
 pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, func_ptr: &Operand, args: &[Operand]) {
-    let param_regs = [X86Reg::Rcx, X86Reg::Rdx, X86Reg::R8, X86Reg::R9];
-    let float_regs = [X86Reg::Xmm0, X86Reg::Xmm1, X86Reg::Xmm2, X86Reg::Xmm3];
+    let convention = get_convention(generator.target.calling_convention);
+    let param_regs = convention.param_regs();
+    let float_regs = convention.float_param_regs();
+    let shadow_space = convention.shadow_space_size();
     
     let fp_op = generator.operand_to_op(func_ptr);
     generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
@@ -99,16 +104,16 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
             _ => false,
         };
 
-        if i < 4 {
-            if is_float {
+        if i < param_regs.len() {
+            if is_float && i < float_regs.len() {
                 let label = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
-            } else {
+            } else if !is_float {
                 let val = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
             }
         } else {
-            let offset = 32 + (i - 4) * 8;
+            let offset = shadow_space + (i - param_regs.len()) * 8;
             if is_float {
                 let label = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
