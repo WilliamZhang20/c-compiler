@@ -8,6 +8,8 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
     let d_op = generator.var_to_op(dest);
     let is_float = matches!(value_type, Type::Float | Type::Double);
     let use_dword = matches!(value_type, Type::Int | Type::Float);
+    let use_byte = matches!(value_type, Type::Char | Type::UnsignedChar);
+    let is_unsigned = matches!(value_type, Type::UnsignedChar);
     
     // Optimization: if loading directly from an alloca (stack slot), just read it
     if let Operand::Var(var) = addr {
@@ -15,6 +17,13 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
              if is_float {
                  generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset)));
                  generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+             } else if use_byte {
+                 if is_unsigned {
+                     generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rbp, *buffer_offset)));
+                 } else {
+                     generator.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rbp, *buffer_offset)));
+                 }
+                 generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
              } else {
                  if use_dword {
                      generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rbp, *buffer_offset)));
@@ -66,6 +75,13 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
     if is_float {
         generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
         generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+    } else if use_byte {
+         if is_unsigned {
+             generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rax, 0)));
+         } else {
+             generator.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rax, 0)));
+         }
+         generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
     } else {
          if use_dword {
              generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::DwordMem(X86Reg::Rax, 0)));
@@ -80,6 +96,7 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
 pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operand, value_type: &Type) {
     let is_float = matches!(value_type, Type::Float | Type::Double);
     let use_dword = matches!(value_type, Type::Int | Type::Float);
+    let use_byte = matches!(value_type, Type::Char | Type::UnsignedChar);
 
     // Load src into register
     if is_float {
@@ -126,6 +143,8 @@ pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operan
     // Store
     if is_float {
         generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
+    } else if use_byte {
+        generator.asm.push(X86Instr::Mov(X86Operand::ByteMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Cl)));
     } else if use_dword {
         generator.asm.push(X86Instr::Mov(X86Operand::DwordMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Ecx)));
     } else {

@@ -6,7 +6,7 @@ pub enum X86Reg {
     R8, R9, R10, R11, R12, R13, R14, R15,
     Eax, Ecx, Edx, Ebx, Ebp, Esi, Edi, Esp, // 32-bit registers
     R8d, R9d, R10d, R11d, R12d, R13d, R14d, R15d, // 32-bit extended
-    Al, // 8-bit rax
+    Al, Cl, // 8-bit low bytes of rax, rcx
     Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7, // SSE float registers
 }
 
@@ -21,7 +21,7 @@ impl X86Reg {
             Self::Ebp => "ebp", Self::Esi => "esi", Self::Edi => "edi", Self::Esp => "esp",
             Self::R8d => "r8d", Self::R9d => "r9d", Self::R10d => "r10d", Self::R11d => "r11d",
             Self::R12d => "r12d", Self::R13d => "r13d", Self::R14d => "r14d", Self::R15d => "r15d",
-            Self::Al => "al",
+            Self::Al => "al", Self::Cl => "cl",
             Self::Xmm0 => "xmm0", Self::Xmm1 => "xmm1", Self::Xmm2 => "xmm2", Self::Xmm3 => "xmm3",
             Self::Xmm4 => "xmm4", Self::Xmm5 => "xmm5", Self::Xmm6 => "xmm6", Self::Xmm7 => "xmm7",
         }
@@ -33,6 +33,7 @@ pub enum X86Operand {
     Reg(X86Reg),
     Mem(X86Reg, i32), // [reg + offset] - QWORD PTR
     DwordMem(X86Reg, i32), // [reg + offset] - DWORD PTR (32-bit)
+    ByteMem(X86Reg, i32), // [reg + offset] - BYTE PTR (8-bit)
     Imm(i64),
     Label(String),
     GlobalMem(String), // RIP-relative global: label[rip]
@@ -46,6 +47,7 @@ impl X86Operand {
             Self::Reg(r) => r.to_str().to_string(),
             Self::Mem(r, offset) => format!("QWORD PTR [{}{:+}]", r.to_str(), offset),
             Self::DwordMem(r, offset) => format!("DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::ByteMem(r, offset) => format!("BYTE PTR [{}{:+}]", r.to_str(), offset),
             Self::Imm(i) => i.to_string(),
             Self::Label(s) => s.clone(), // Just emit the label as-is (for LEA)
             Self::GlobalMem(name) => format!("DWORD PTR {}[rip]", name), // RIP-relative 32-bit int access
