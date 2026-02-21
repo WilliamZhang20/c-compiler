@@ -298,7 +298,7 @@ impl<'a> Mem2RegPass<'a> {
         v
     }
 
-    /// Fix up phi sources that reference simplified-away phi_vars
+    /// Fix up all references to simplified-away phi_vars across all instructions
     fn fixup_simplified_phi_sources(&mut self) {
         if self.simplified.is_empty() { return; }
         // Build full resolution map to avoid borrow issues
@@ -306,15 +306,87 @@ impl<'a> Mem2RegPass<'a> {
         for &var in self.simplified.keys() {
             resolved_map.insert(var, self.resolve_simplified(var));
         }
+        
+        let resolve_operand = |op: &mut Operand, map: &HashMap<VarId, VarId>| {
+            if let Operand::Var(v) = op {
+                if let Some(&resolved) = map.get(v) {
+                    *v = resolved;
+                }
+            }
+        };
+        
         for block in &mut self.func.blocks {
             for instr in &mut block.instructions {
-                if let Instruction::Phi { preds, .. } = instr {
-                    for (_, src) in preds.iter_mut() {
-                        if let Some(&resolved) = resolved_map.get(src) {
-                            *src = resolved;
+                match instr {
+                    Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
+                        resolve_operand(left, &resolved_map);
+                        resolve_operand(right, &resolved_map);
+                    }
+                    Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
+                        resolve_operand(src, &resolved_map);
+                    }
+                    Instruction::Copy { src, .. } | Instruction::Cast { src, .. } => {
+                        resolve_operand(src, &resolved_map);
+                    }
+                    Instruction::Load { addr, .. } => {
+                        resolve_operand(addr, &resolved_map);
+                    }
+                    Instruction::Store { addr, src, .. } => {
+                        resolve_operand(addr, &resolved_map);
+                        resolve_operand(src, &resolved_map);
+                    }
+                    Instruction::GetElementPtr { base, index, .. } => {
+                        resolve_operand(base, &resolved_map);
+                        resolve_operand(index, &resolved_map);
+                    }
+                    Instruction::Call { args, .. } => {
+                        for arg in args.iter_mut() {
+                            resolve_operand(arg, &resolved_map);
                         }
                     }
+                    Instruction::IndirectCall { func_ptr, args, .. } => {
+                        resolve_operand(func_ptr, &resolved_map);
+                        for arg in args.iter_mut() {
+                            resolve_operand(arg, &resolved_map);
+                        }
+                    }
+                    Instruction::Phi { preds, .. } => {
+                        for (_, src) in preds.iter_mut() {
+                            if let Some(&resolved) = resolved_map.get(src) {
+                                *src = resolved;
+                            }
+                        }
+                    }
+                    Instruction::VaStart { list, .. } => {
+                        resolve_operand(list, &resolved_map);
+                    }
+                    Instruction::VaEnd { list } => {
+                        resolve_operand(list, &resolved_map);
+                    }
+                    Instruction::VaCopy { dest, src } => {
+                        resolve_operand(dest, &resolved_map);
+                        resolve_operand(src, &resolved_map);
+                    }
+                    Instruction::VaArg { list, .. } => {
+                        resolve_operand(list, &resolved_map);
+                    }
+                    Instruction::InlineAsm { inputs, .. } => {
+                        for input in inputs.iter_mut() {
+                            resolve_operand(input, &resolved_map);
+                        }
+                    }
+                    Instruction::Alloca { .. } => {}
                 }
+            }
+            // Also fix terminators
+            match &mut block.terminator {
+                Terminator::CondBr { cond, .. } => {
+                    resolve_operand(cond, &resolved_map);
+                }
+                Terminator::Ret(Some(val)) => {
+                    resolve_operand(val, &resolved_map);
+                }
+                _ => {}
             }
         }
     }
