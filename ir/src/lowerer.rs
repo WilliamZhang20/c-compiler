@@ -391,6 +391,10 @@ impl Lowerer {
              if matches!(self.blocks[bid.0].terminator, Terminator::Unreachable) {
                 if f.return_type == Type::Void {
                     self.blocks[bid.0].terminator = Terminator::Ret(None);
+                } else {
+                    // Non-void function fell off the end — insert implicit return 0
+                    // (matches GCC/Clang behavior for missing return in non-void functions)
+                    self.blocks[bid.0].terminator = Terminator::Ret(Some(Operand::Constant(0)));
                 }
              }
         }

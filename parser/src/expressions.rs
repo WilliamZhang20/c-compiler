@@ -58,8 +58,8 @@ fn const_eval_expr(expr: &Expr) -> Option<i64> {
                 BinaryOp::Mul => Some(l * r),
                 BinaryOp::Div => if r != 0 { Some(l / r) } else { None },
                 BinaryOp::Mod => if r != 0 { Some(l % r) } else { None },
-                BinaryOp::ShiftLeft => Some(l << r),
-                BinaryOp::ShiftRight => Some(l >> r),
+                BinaryOp::ShiftLeft => if r >= 0 && r < 64 { Some(l << r) } else { None },
+                BinaryOp::ShiftRight => if r >= 0 && r < 64 { Some(l >> r) } else { None },
                 BinaryOp::BitwiseAnd => Some(l & r),
                 BinaryOp::BitwiseOr => Some(l | r),
                 BinaryOp::BitwiseXor => Some(l ^ r),
@@ -90,7 +90,8 @@ fn const_sizeof(ty: &Type) -> i64 {
         Type::Char | Type::UnsignedChar | Type::Bool => 1,
         Type::Short | Type::UnsignedShort => 2,
         Type::Int | Type::UnsignedInt | Type::Float => 4,
-        Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) => 8,
+        Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
+            | Type::Double | Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
         Type::Array(inner, n) => const_sizeof(inner) * (*n as i64),
         Type::Void => 1, // GCC extension
         _ => 4, // Default fallback
@@ -103,7 +104,8 @@ fn const_alignof(ty: &Type) -> i64 {
         Type::Char | Type::UnsignedChar | Type::Bool => 1,
         Type::Short | Type::UnsignedShort => 2,
         Type::Int | Type::UnsignedInt | Type::Float => 4,
-        Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) => 8,
+        Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
+            | Type::Double | Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
         _ => 4,
     }
 }

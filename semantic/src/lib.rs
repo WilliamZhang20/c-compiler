@@ -189,6 +189,7 @@ impl SemanticAnalyzer {
                 self.analyze_expr(cond)?;
             }
             Stmt::For { init, cond, post, body } => {
+                self.enter_scope(); // for(int i=...) creates its own scope
                 if let Some(stmt) = init {
                     self.analyze_stmt(stmt)?;
                 }
@@ -201,6 +202,7 @@ impl SemanticAnalyzer {
                 self.loop_depth += 1;
                 self.analyze_stmt(body)?;
                 self.loop_depth -= 1;
+                self.exit_scope();
             }
             Stmt::Break => {
                 if self.loop_depth == 0 && !self.in_switch {
@@ -356,5 +358,151 @@ impl SemanticAnalyzer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: parse source and run semantic analysis
+    fn analyze(src: &str) -> Result<(), String> {
+        let tokens = lexer::lex(src).unwrap();
+        let program = parser::parse_tokens(&tokens).unwrap();
+        let mut analyzer = SemanticAnalyzer::new();
+        analyzer.analyze(&program)
+    }
+
+    // ─── Positive tests (should pass) ───────────────────────────
+    #[test]
+    fn valid_simple_program() {
+        assert!(analyze("int main() { return 0; }").is_ok());
+    }
+
+    #[test]
+    fn valid_variable_usage() {
+        assert!(analyze("int main() { int x = 5; return x; }").is_ok());
+    }
+
+    #[test]
+    fn valid_nested_scopes() {
+        assert!(analyze("int main() { int x = 1; { int y = x; } return x; }").is_ok());
+    }
+
+    #[test]
+    fn valid_variable_shadowing() {
+        assert!(analyze("int main() { int x = 1; { int x = 2; } return x; }").is_ok());
+    }
+
+    #[test]
+    fn valid_loop_with_break() {
+        assert!(analyze("int main() { while (1) { break; } return 0; }").is_ok());
+    }
+
+    #[test]
+    fn valid_loop_with_continue() {
+        assert!(analyze("int main() { int i = 0; while (i < 10) { i = i + 1; continue; } return 0; }").is_ok());
+    }
+
+    #[test]
+    fn valid_switch() {
+        assert!(analyze("int main() { int x = 1; switch (x) { case 1: break; default: break; } return 0; }").is_ok());
+    }
+
+    #[test]
+    fn valid_const_variable_read() {
+        assert!(analyze("int main() { const int x = 5; return x; }").is_ok());
+    }
+
+    #[test]
+    fn valid_global_variable() {
+        assert!(analyze("int g = 10; int main() { return g; }").is_ok());
+    }
+
+    #[test]
+    fn valid_enum_usage() {
+        assert!(analyze("enum Color { RED, GREEN, BLUE }; int main() { return RED; }").is_ok());
+    }
+
+    #[test]
+    fn valid_for_loop() {
+        assert!(analyze("int main() { for (int i = 0; i < 10; i = i + 1) { } return 0; }").is_ok());
+    }
+
+    // ─── Negative tests (should fail) ───────────────────────────
+    #[test]
+    fn error_undeclared_variable() {
+        let result = analyze("int main() { return x; }");
+        assert!(result.is_err(), "Should fail: undeclared variable x");
+    }
+
+    #[test]
+    fn error_const_assignment() {
+        let result = analyze("int main() { const int x = 5; x = 10; return x; }");
+        assert!(result.is_err(), "Should fail: assignment to const");
+    }
+
+    #[test]
+    fn error_const_increment() {
+        let result = analyze("int main() { const int x = 5; x++; return x; }");
+        assert!(result.is_err(), "Should fail: increment of const");
+    }
+
+    #[test]
+    fn error_break_outside_loop() {
+        let result = analyze("int main() { break; return 0; }");
+        assert!(result.is_err(), "Should fail: break outside loop");
+    }
+
+    #[test]
+    fn error_continue_outside_loop() {
+        let result = analyze("int main() { continue; return 0; }");
+        assert!(result.is_err(), "Should fail: continue outside loop");
+    }
+
+    #[test]
+    fn error_case_outside_switch() {
+        let result = analyze("int main() { case 1: return 0; }");
+        assert!(result.is_err(), "Should fail: case outside switch");
+    }
+
+    #[test]
+    fn error_default_outside_switch() {
+        let result = analyze("int main() { default: return 0; }");
+        assert!(result.is_err(), "Should fail: default outside switch");
+    }
+
+    #[test]
+    fn error_duplicate_enum_constants() {
+        let result = analyze("enum E { A, A }; int main() { return 0; }");
+        assert!(result.is_err(), "Should fail: duplicate enum constant A");
+    }
+
+    // ─── Scope boundary tests ───────────────────────────────────
+    #[test]
+    fn error_variable_out_of_scope() {
+        let result = analyze("int main() { { int x = 5; } return x; }");
+        assert!(result.is_err(), "Should fail: x is out of scope");
+    }
+
+    #[test]
+    fn valid_multiple_functions() {
+        assert!(analyze("int foo() { return 1; } int main() { return 0; }").is_ok());
+    }
+
+    #[test]
+    fn valid_volatile_variable() {
+        assert!(analyze("int main() { volatile int x = 5; x = 10; return x; }").is_ok());
+    }
+
+    #[test]
+    fn error_for_loop_var_leaks_scope() {
+        let result = analyze("int main() { for (int i = 0; i < 10; i = i + 1) { } return i; }");
+        assert!(result.is_err(), "Should fail: for-loop variable i should not be visible after loop");
+    }
+
+    #[test]
+    fn valid_two_for_loops_same_var() {
+        assert!(analyze("int main() { for (int i = 0; i < 5; i = i + 1) { } for (int i = 0; i < 10; i = i + 1) { } return 0; }").is_ok());
     }
 }

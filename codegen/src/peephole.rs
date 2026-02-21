@@ -227,8 +227,8 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
             if std::mem::discriminant(temp_reg) == std::mem::discriminant(temp_reg2) {
                 if !is_reg_used_after(instructions, i + 2, temp_reg) {
                     // Check if this would create a memory-to-memory move (illegal in x86)
-                    let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
-                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
                     
                     if !is_src_mem || !is_dest_mem {
                         // Safe to optimize: at least one operand is not memory
@@ -353,6 +353,8 @@ fn matches_reg(operand: &X86Operand, reg: &X86Reg) -> bool {
         X86Operand::Reg(r) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         X86Operand::Mem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         X86Operand::DwordMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
+        X86Operand::WordMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
+        X86Operand::ByteMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         X86Operand::FloatMem(r, _) => std::mem::discriminant(r) == std::mem::discriminant(reg),
         _ => false,
     }

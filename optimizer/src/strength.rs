@@ -91,33 +91,15 @@ fn reduce_mul(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instru
     None
 }
 
-fn reduce_div(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instruction> {
-    // x / (power of 2) → x >> log2(power)
-    if let Operand::Constant(c) = right {
-        if is_power_of_two(*c) {
-            return Some(Instruction::Binary {
-                dest,
-                op: BinaryOp::ShiftRight,
-                left: left.clone(),
-                right: Operand::Constant(log2(*c)),
-            });
-        }
-    }
+fn reduce_div(_left: &Operand, _right: &Operand, _dest: ir::VarId) -> Option<Instruction> {
+    // x / (power of 2) → x >> log2(power) is WRONG for signed negative values
+    // (-7 / 2 == -3 but -7 >> 1 == -4). Disabled until we track signedness.
     None
 }
 
-fn reduce_mod(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instruction> {
-    // x % (power of 2) → x & (power - 1)
-    if let Operand::Constant(c) = right {
-        if is_power_of_two(*c) {
-            return Some(Instruction::Binary {
-                dest,
-                op: BinaryOp::BitwiseAnd,
-                left: left.clone(),
-                right: Operand::Constant(c - 1),
-            });
-        }
-    }
+fn reduce_mod(_left: &Operand, _right: &Operand, _dest: ir::VarId) -> Option<Instruction> {
+    // x % (power of 2) → x & (power - 1) is WRONG for signed negative values
+    // (-7 % 4 == -3 but -7 & 3 == 1). Disabled until we track signedness.
     None
 }
 

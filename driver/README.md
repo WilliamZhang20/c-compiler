@@ -1,49 +1,65 @@
 # Driver
 
-The **Driver** crate is the entry point of the compiler CLI. It coordinates the entire compilation pipeline, orchestrating the execution of the lexer, parser, semantic analyzer, optimizer, and code generator. It also interfaces with external tools like `gcc` for preprocessing and linking.
+The **Driver** is the compiler's CLI entry point. It orchestrates the full compilation pipeline (preprocess → lex → parse → semantic analysis → IR lowering → optimization → codegen → assemble/link) and provides flags to stop at any intermediate stage.
 
-This component parses command-line arguments provided by the user and determines which actions to perform. It manages input and output files, handles intermediate files (like `.i` preprocessed source or `.s` assembly), and drives the flow of data between the various compiler stages.
+## Usage
 
-## Command Line Arguments Example as Run from Home Directory
-
-- Generate assembly only (creates hello_world.s)
-```
-cargo run -- hello_world.c -S
-```
-
-- Compile to executable (creates hello_world on Linux, hello_world.exe on Windows)
-```
+```bash
+# Full compilation (produces executable)
 cargo run -- hello_world.c
-```
 
-- Compile with custom output name
-```
+# Custom output name
 cargo run -- hello_world.c -o my_program
-```
 
-- See tokens only
-```
+# Emit assembly only (.s file, no assemble/link)
+cargo run -- hello_world.c -S
+
+# Stop after lexing (prints tokens to stdout)
 cargo run -- hello_world.c --lex
-```
 
-- See AST only  
-```
+# Stop after parsing (prints AST to stdout)
 cargo run -- hello_world.c --parse
-```
 
-- Run through codegen without assembling/linking
-```
+# Stop after codegen (prints IR to stdout, no .s file)
 cargo run -- hello_world.c --codegen
-```
 
-- Keep intermediate files (.i preprocessed, .s assembly)
-```
+# Keep intermediate files (.i preprocessed, .s assembly)
 cargo run -- hello_world.c --keep-intermediates
-```
 
-- Enable debug logging
-```
+# Debug logging (prints each pipeline stage to stderr + debug_driver.log)
 cargo run -- hello_world.c --debug
+
+# Multiple source files
+cargo run -- file1.c file2.c -o output
 ```
 
-One of the driver's key roles is to invoke the C preprocessor (via `gcc -E`) before passing the code to the lexer. This handles `#include`, `#define`, and other preprocessor directives. The driver also calls `gcc` at the end to assemble the generated assembly code and link it into an executable. This design simplifies the compiler by leveraging existing system tools for preprocessing and linking.
+## How it works
+
+1. **Preprocessing** — invokes `gcc -E -P -Iinclude` on each input file, producing a `.i` file with all `#include` and `#define` directives expanded.
+2. **Lexing** — `lexer::lex()` tokenizes the preprocessed source.
+3. **Parsing** — `parser::parse_tokens()` builds the AST. Global variable names are deduplicated (handles `extern` forward declarations).
+4. **Semantic analysis** — `SemanticAnalyzer::analyze()` validates the AST.
+5. **IR lowering** — `Lowerer::lower_program()` translates AST to SSA-form IR.
+6. **Optimization** — `optimizer::optimize()` runs the full pass pipeline.
+7. **Code generation** — `Codegen::gen_program()` emits x86-64 assembly text, written to a `.s` file.
+8. **Linking** — invokes `gcc` to assemble and link all `.s` files into the final executable.
+
+At any step, `--lex`, `--parse`, `--codegen`, or `-S` will stop the pipeline and output the intermediate result.
+
+## Platform detection
+
+The driver uses `model::Platform::host()` to auto-detect the OS at compile time:
+- **Linux**: no executable extension, System V calling convention
+- **Windows**: `.exe` extension, `-mconsole` linker flag, Windows x64 convention
+
+## CLI implementation
+
+Built with [clap](https://docs.rs/clap) for argument parsing. The `Args` struct defines all flags with derive macros. Debug logging uses an `OnceLock<bool>` + custom `log!` macro that writes to both stderr and `debug_driver.log`.
+
+## Source files
+
+### `src/main.rs`
+The entire driver is a single file (~250 lines). Contains `main()`, `Args` struct, `preprocess()` (GCC invocation), and `run_linker()` (GCC invocation for assemble+link). Intermediate `.i` and `.s` files are cleaned up unless `--keep-intermediates` or `-S` is specified.
+
+### `tests/integration_tests.rs`
+The integration test harness. `run_all_c_tests()` discovers all `.c` files in `testing/`, compiles each one using the driver binary, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the first line of the source file. Currently exercises 142 test programs covering the full feature set.

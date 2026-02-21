@@ -218,8 +218,8 @@ pub fn fold_binary(op: BinaryOp, l: i64, r: i64) -> Option<i64> {
         BinaryOp::BitwiseAnd => Some(l & r),
         BinaryOp::BitwiseOr => Some(l | r),
         BinaryOp::BitwiseXor => Some(l ^ r),
-        BinaryOp::ShiftLeft => Some(l << r),
-        BinaryOp::ShiftRight => Some(l >> r),
+        BinaryOp::ShiftLeft => if r >= 0 && r < 64 { Some(l << r) } else { None },
+        BinaryOp::ShiftRight => if r >= 0 && r < 64 { Some(l >> r) } else { None },
         BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::Assign => None,
         _ => None,
     }

@@ -165,7 +165,9 @@ name = "optimizer"
 version = "0.1.0"
 dependencies = [
  "ir",
+ "lexer",
  "model",
+ "parser",
 ]
 
 [[package]]
@@ -198,7 +200,9 @@ dependencies = [
 name = "semantic"
 version = "0.1.0"
 dependencies = [
+ "lexer",
  "model",
+ "parser",
 ]
 
 [[package]]

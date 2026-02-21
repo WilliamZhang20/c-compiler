@@ -7,6 +7,7 @@ pub enum X86Reg {
     Eax, Ecx, Edx, Ebx, Ebp, Esi, Edi, Esp, // 32-bit registers
     R8d, R9d, R10d, R11d, R12d, R13d, R14d, R15d, // 32-bit extended
     Al, Cl, // 8-bit low bytes of rax, rcx
+    Ax, Cx, // 16-bit registers
     Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7, // SSE float registers
 }
 
@@ -22,6 +23,7 @@ impl X86Reg {
             Self::R8d => "r8d", Self::R9d => "r9d", Self::R10d => "r10d", Self::R11d => "r11d",
             Self::R12d => "r12d", Self::R13d => "r13d", Self::R14d => "r14d", Self::R15d => "r15d",
             Self::Al => "al", Self::Cl => "cl",
+            Self::Ax => "ax", Self::Cx => "cx",
             Self::Xmm0 => "xmm0", Self::Xmm1 => "xmm1", Self::Xmm2 => "xmm2", Self::Xmm3 => "xmm3",
             Self::Xmm4 => "xmm4", Self::Xmm5 => "xmm5", Self::Xmm6 => "xmm6", Self::Xmm7 => "xmm7",
         }
@@ -33,6 +35,7 @@ pub enum X86Operand {
     Reg(X86Reg),
     Mem(X86Reg, i32), // [reg + offset] - QWORD PTR
     DwordMem(X86Reg, i32), // [reg + offset] - DWORD PTR (32-bit)
+    WordMem(X86Reg, i32), // [reg + offset] - WORD PTR (16-bit)
     ByteMem(X86Reg, i32), // [reg + offset] - BYTE PTR (8-bit)
     Imm(i64),
     Label(String),
@@ -47,6 +50,7 @@ impl X86Operand {
             Self::Reg(r) => r.to_str().to_string(),
             Self::Mem(r, offset) => format!("QWORD PTR [{}{:+}]", r.to_str(), offset),
             Self::DwordMem(r, offset) => format!("DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::WordMem(r, offset) => format!("WORD PTR [{}{:+}]", r.to_str(), offset),
             Self::ByteMem(r, offset) => format!("BYTE PTR [{}{:+}]", r.to_str(), offset),
             Self::Imm(i) => i.to_string(),
             Self::Label(s) => s.clone(), // Just emit the label as-is (for LEA)
@@ -149,4 +153,214 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Register naming ────────────────────────────────────────
+    #[test]
+    fn reg_names_64bit() {
+        assert_eq!(X86Reg::Rax.to_str(), "rax");
+        assert_eq!(X86Reg::Rdi.to_str(), "rdi");
+        assert_eq!(X86Reg::R15.to_str(), "r15");
+    }
+
+    #[test]
+    fn reg_names_32bit() {
+        assert_eq!(X86Reg::Eax.to_str(), "eax");
+        assert_eq!(X86Reg::R8d.to_str(), "r8d");
+    }
+
+    #[test]
+    fn reg_names_8bit() {
+        assert_eq!(X86Reg::Al.to_str(), "al");
+        assert_eq!(X86Reg::Cl.to_str(), "cl");
+    }
+
+    #[test]
+    fn reg_names_xmm() {
+        assert_eq!(X86Reg::Xmm0.to_str(), "xmm0");
+        assert_eq!(X86Reg::Xmm7.to_str(), "xmm7");
+    }
+
+    // ─── Operand formatting ─────────────────────────────────────
+    #[test]
+    fn operand_reg() {
+        let op = X86Operand::Reg(X86Reg::Rax);
+        assert_eq!(op.to_string(), "rax");
+    }
+
+    #[test]
+    fn operand_imm() {
+        assert_eq!(X86Operand::Imm(42).to_string(), "42");
+        assert_eq!(X86Operand::Imm(-1).to_string(), "-1");
+    }
+
+    #[test]
+    fn operand_mem_positive_offset() {
+        let op = X86Operand::Mem(X86Reg::Rbp, -8);
+        assert_eq!(op.to_string(), "QWORD PTR [rbp-8]");
+    }
+
+    #[test]
+    fn operand_dword_mem() {
+        let op = X86Operand::DwordMem(X86Reg::Rbp, -4);
+        assert_eq!(op.to_string(), "DWORD PTR [rbp-4]");
+    }
+
+    #[test]
+    fn operand_word_mem() {
+        let op = X86Operand::WordMem(X86Reg::Rbp, -6);
+        assert_eq!(op.to_string(), "WORD PTR [rbp-6]");
+    }
+
+    #[test]
+    fn operand_byte_mem() {
+        let op = X86Operand::ByteMem(X86Reg::Rsp, 0);
+        assert_eq!(op.to_string(), "BYTE PTR [rsp+0]");
+    }
+
+    #[test]
+    fn operand_label() {
+        let op = X86Operand::Label(".L1".to_string());
+        assert_eq!(op.to_string(), ".L1");
+    }
+
+    #[test]
+    fn operand_global_mem() {
+        let op = X86Operand::GlobalMem("my_global".to_string());
+        assert_eq!(op.to_string(), "DWORD PTR my_global[rip]");
+    }
+
+    #[test]
+    fn operand_rip_rel() {
+        let op = X86Operand::RipRelLabel("str_0".to_string());
+        assert_eq!(op.to_string(), "str_0[rip]");
+    }
+
+    #[test]
+    fn operand_float_mem() {
+        let op = X86Operand::FloatMem(X86Reg::Rbp, -16);
+        assert_eq!(op.to_string(), "DWORD PTR [rbp-16]");
+    }
+
+    // ─── emit_asm ───────────────────────────────────────────────
+    #[test]
+    fn emit_mov() {
+        let instrs = vec![X86Instr::Mov(
+            X86Operand::Reg(X86Reg::Rax),
+            X86Operand::Imm(42),
+        )];
+        assert_eq!(emit_asm(&instrs), "  mov rax, 42\n");
+    }
+
+    #[test]
+    fn emit_add_sub() {
+        let instrs = vec![
+            X86Instr::Add(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(1)),
+            X86Instr::Sub(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(2)),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("add rax, 1"));
+        assert!(asm.contains("sub rax, 2"));
+    }
+
+    #[test]
+    fn emit_label() {
+        let instrs = vec![X86Instr::Label(".Lentry".to_string())];
+        assert_eq!(emit_asm(&instrs), ".Lentry:\n");
+    }
+
+    #[test]
+    fn emit_push_pop() {
+        let instrs = vec![
+            X86Instr::Push(X86Reg::Rbp),
+            X86Instr::Pop(X86Reg::Rbp),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("push rbp"));
+        assert!(asm.contains("pop rbp"));
+    }
+
+    #[test]
+    fn emit_ret() {
+        let instrs = vec![X86Instr::Ret];
+        assert_eq!(emit_asm(&instrs), "  ret\n");
+    }
+
+    #[test]
+    fn emit_call() {
+        let instrs = vec![X86Instr::Call("printf".to_string())];
+        assert_eq!(emit_asm(&instrs), "  call printf\n");
+    }
+
+    #[test]
+    fn emit_jmp_jcc() {
+        let instrs = vec![
+            X86Instr::Jmp(".L1".to_string()),
+            X86Instr::Jcc("e".to_string(), ".L2".to_string()),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("jmp .L1"));
+        assert!(asm.contains("je .L2"));
+    }
+
+    #[test]
+    fn emit_cmp_set() {
+        let instrs = vec![
+            X86Instr::Cmp(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(0)),
+            X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("cmp rax, 0"));
+        assert!(asm.contains("sete al"));
+    }
+
+    #[test]
+    fn emit_shift_ops() {
+        let instrs = vec![
+            X86Instr::Shl(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(3)),
+            X86Instr::Shr(X86Operand::Reg(X86Reg::Rax), X86Operand::Imm(1)),
+            X86Instr::Sar(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Cl)),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("shl rax, 3"));
+        assert!(asm.contains("shr rax, 1"));
+        assert!(asm.contains("sar rax, cl"));
+    }
+
+    #[test]
+    fn emit_float_instrs() {
+        let instrs = vec![
+            X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)),
+            X86Instr::Addss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)),
+        ];
+        let asm = emit_asm(&instrs);
+        assert!(asm.contains("movss xmm0, xmm1"));
+        assert!(asm.contains("addss xmm0, xmm1"));
+    }
+
+    #[test]
+    fn emit_raw() {
+        let instrs = vec![X86Instr::Raw("nop".to_string())];
+        assert_eq!(emit_asm(&instrs), "  nop\n");
+    }
+
+    #[test]
+    fn emit_neg() {
+        let instrs = vec![X86Instr::Neg(X86Operand::Reg(X86Reg::Rax))];
+        assert_eq!(emit_asm(&instrs), "  neg rax\n");
+    }
+
+    #[test]
+    fn emit_leave() {
+        assert_eq!(emit_asm(&[X86Instr::Leave]), "  leave\n");
+    }
+
+    #[test]
+    fn emit_empty() {
+        assert_eq!(emit_asm(&[]), "");
+    }
 }

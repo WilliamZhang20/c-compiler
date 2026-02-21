@@ -1,87 +1,97 @@
 # Code Generator
 
-The **Codegen** crate is the final stage of the compilation pipeline. It translates the optimized, phi-free IR into x86-64 assembly text (Intel syntax) that can be assembled and linked by an external tool such as `gcc`. The public entry point is `Codegen::gen_program(prog) -> String`.
+The **Codegen** crate is the final compilation stage. It translates the optimized, phi-free IR into x86-64 assembly text in Intel syntax, ready for `gcc` to assemble and link.
 
-## Architecture
+**Public API**: `Codegen::new()` then `codegen.gen_program(&ir_program) -> String`
 
-Code generation proceeds in two layers:
+## How it works
 
-1. **IR → internal `X86Instr` representation** — each IR instruction is lowered to one or more `X86Instr` values, a typed enum that models the x86-64 instruction set.
-2. **`X86Instr` → assembly text** — the `emit_asm()` function serializes the instruction buffer to a string in Intel syntax.
+Code generation proceeds in three layers:
 
-Between these layers, a peephole optimizer simplifies the instruction stream. Register allocation is performed per-function before instruction selection begins. The codegen targets the **System V AMD64 ABI** (Linux) by default but abstracts calling conventions to also support Windows x64.
+1. **Register allocation** — graph-coloring allocator assigns physical registers to SSA variables, with spill slots for overflow
+2. **IR → x86 instruction selection** — each IR instruction maps to one or more `X86Instr` values
+3. **Peephole optimization + emission** — simplify the instruction stream, then serialize to Intel-syntax assembly text
 
-## Source Files
+The codegen targets the **System V AMD64 ABI** (Linux) by default. Windows x64 support is also implemented via a calling convention abstraction layer.
 
-### `lib.rs`
-Program-level driver. The `Codegen` struct holds shared state (float constants, target configuration). `gen_program()` emits the `.data` section (global strings as `.asciz`, global variables with alignment and optional custom section directives), then the `.text` section (one `FunctionGenerator` per IR function), followed by float constant data and a `.note.GNU-stack` marker for non-executable stacks. Global initializer list emission has been extracted to `globals.rs`.
+## Source files
 
-### `function.rs`
-Per-function code generation orchestrator. `FunctionGenerator` manages stack layout, register-allocation results, variable-to-operand mappings, and alloca buffer tracking. Key operations:
+### `lib.rs` — Program-level driver
+The `Codegen` struct holds shared state: struct/union definitions, float constant pool, function return type map, and target configuration. `gen_program()` emits:
+1. `.data` section — global strings (`.asciz`), global variables with alignment, optional custom `section` directives
+2. `.text` section — one `FunctionGenerator` per IR function
+3. Float constant data (labeled `.LC*` values)
+4. `.note.GNU-stack` marker for non-executable stacks
+5. `.init_array` / `.fini_array` entries for `__attribute__((constructor/destructor))`
 
-- **`gen_function()`** — seeds `var_types` from the IR-level type annotations (e.g. `Float`/`Double` annotations on mem2reg phi vars), runs register allocation, emits the prologue (callee-saved pushes, frame pointer setup, stack reservation with a placeholder that is **backpatched** after codegen completes to account for late-created spill slots), moves parameters from ABI registers to their assigned locations (with cycle detection to avoid overwrites), walks all blocks emitting instructions and terminators, and appends the epilogue. Stack frame calculation includes space for locals, callee-saved registers, shadow space, and **stack-passed call arguments** (for functions with more than 6 arguments).
-- **`gen_instr()`** — dispatches each IR instruction to the appropriate specialized generator.
-- **`var_to_op()` / `operand_to_op()`** — translates IR variables and operands to `X86Operand`, consulting register allocation, stack slots, and alloca buffers.
-- **Cast handling** — covers int↔float (`cvtsi2ss`/`cvttss2si`), pointer casts, and 32/64-bit width mismatches.
+### `function.rs` — Per-function code generation
+`FunctionGenerator` manages stack layout, register allocation results, var-to-operand mappings, and alloca buffer tracking. Key operations:
 
-Terminator handling and inline assembly have been extracted to `control_flow.rs` and `inline_asm.rs` respectively.
+- **`gen_function()`** — runs register allocation, emits prologue (callee-saved pushes, frame pointer, stack reservation with **backpatch placeholder** for late spill slots), parameter moves from ABI registers with **cycle detection** to avoid overwrites, block-by-block instruction emission, and epilogue
+- **`gen_instr()`** — dispatches each IR instruction to the appropriate generator
+- **`var_to_op()` / `operand_to_op()`** — translates IR operands to `X86Operand` using register allocation results, stack slots, and alloca buffers
+- **Cast handling** — int↔float (`cvtsi2ss`/`cvttss2si`), pointer casts, 32/64-bit width mismatches
 
-### `control_flow.rs`
-Implements control flow methods on `FunctionGenerator`: `gen_terminator()` handles `Ret` (with callee-saved restore), `Br` (unconditional jump), and `CondBr` (test + conditional jump). Both branch variants resolve remaining phi copies at block transitions via `resolve_phis()`. Also provides `get_current_block_id()` helper.
+Stack frame calculation accounts for locals, callee-saved registers, shadow space (Windows), and stack-passed call arguments (>6 args).
 
-### `inline_asm.rs`
-Implements `gen_inline_asm()` on `FunctionGenerator`. Handles inline assembly template expansion, mapping IR variables/operands to assembly operand syntax (`%n` for numbered operands).
+### `instructions.rs` — Integer/pointer arithmetic
+`gen_binary_op()` handles `Add`, `Sub`, `Mul`, `Div`/`Mod` (via `cdq`/`cqo` + `idiv`), all six comparisons (`cmp` + `set*`), bitwise ops, and shifts. Automatically selects 32-bit vs 64-bit register variants based on operand types. Optimizes the case where the destination already holds one operand.
 
-### `instructions.rs`
-Integer/pointer arithmetic and logic. `gen_binary_op()` handles `Add`, `Sub`, `Mul`, `Div`/`Mod` (via `cdq`/`cqo` + `idiv`), all six comparisons (`cmp` + `set*`), bitwise ops, and shifts. `gen_unary_op()` covers negation, bitwise not, logical not, and identity. Automatically selects 32-bit vs 64-bit register variants based on operand types and optimizes the common case where the destination already holds one operand.
+### `float_ops.rs` — SSE floating-point
+`gen_float_binary_op()` emits `addss`/`subss`/`mulss`/`divss` for arithmetic, `ucomiss` + `set*` for comparisons, with automatic `cvtsi2ss` for mixed int/float operands. `gen_float_unary_op()` handles negation (sign-bit XOR via `xorps`) and logical not.
 
-### `float_ops.rs`
-SSE scalar single-precision code generation. `gen_float_binary_op()` emits `addss`/`subss`/`mulss`/`divss` for arithmetic and `ucomiss` + `set*` for comparisons, with automatic `cvtsi2ss` for integer operands. `gen_float_unary_op()` handles negation (sign-bit XOR via `xorps`) and logical not.
+### `memory_ops.rs` — Load, store, GEP
+`gen_load()` emits correctly-sized memory reads: `BYTE` (with `movsx`/`movzx`), `DWORD`, `QWORD`, or `movss` for floats — from allocas, globals (RIP-relative), or general pointers. `gen_store()` writes with matching size logic. `gen_gep()` computes `base + index * element_size` using `imul` + `add`/`lea`.
 
-### `memory_ops.rs`
-Load, store, and address arithmetic. `gen_load()` emits correctly-sized memory reads — `BYTE` (with `movsx`/`movzx`), `DWORD`, `QWORD`, or `movss` for floats — from allocas, globals (RIP-relative), or general pointers. `gen_store()` writes values to memory with matching size logic. `gen_gep()` computes `base + index * element_size` using `imul` and `add`/`lea`, supporting alloca, global, and pointer base operands.
+### `call_ops.rs` — Function calls
+`gen_call()` and `gen_indirect_call()` route integer arguments to GP registers and float arguments to XMM registers per the active ABI, spilling excess to the stack. Return values move from `RAX` (int) or `XMM0` (float). Handles `Alloca` buffers (passes address via `LEA`), global operands, and variadic setup. Indirect calls stash the function pointer in `R10` before argument setup.
 
-### `call_ops.rs`
-Function call code generation. `gen_call()` and `gen_indirect_call()` route integer arguments to GP registers and float arguments to XMM registers per the active calling convention, spilling excess arguments to the stack. Return values are moved from `RAX` (int) or `XMM0` (float) to the destination. Handles `Alloca` buffers (passes address via `LEA`), global operands, and variadic call setup. Indirect calls stash the function pointer in `R10` before argument setup.
+### `calling_convention.rs` — ABI abstraction
+The `CallingConvention` trait exposes parameter registers, return registers, shadow space, and callee-saved sets. Two implementations:
 
-### `calling_convention.rs`
-Platform ABI abstraction. The `CallingConvention` trait exposes parameter registers, return registers, shadow space size, and callee-saved register sets. Two implementations: `SystemVConvention` (6 GP + 8 XMM param regs, no shadow space) and `WindowsX64Convention` (4 GP + 4 XMM, 32-byte shadow space). `host_convention()` selects the correct one at compile time.
+| | System V | Windows x64 |
+|---|---|---|
+| GP param regs | RDI, RSI, RDX, RCX, R8, R9 | RCX, RDX, R8, R9 |
+| XMM param regs | XMM0–XMM7 | XMM0–XMM3 |
+| Shadow space | 0 bytes | 32 bytes |
+| Callee-saved | RBX, R12–R15 | RBX, RSI, RDI, R12–R15 |
 
-### `regalloc.rs`
-**Graph-coloring register allocator.** `allocate_registers()` runs these phases:
+`host_convention()` selects the correct one at compile time.
 
-1. Compute live intervals (via `liveness.rs`).
-2. Build an interference graph from overlapping intervals.
-3. Collect copy and parameter hints for coalescing.
-4. Determine which variables are live across calls (must prefer callee-saved registers).
-5. Color the graph greedily: try parameter hint → copy hint → caller-saved → callee-saved → any available.
+### `regalloc.rs` — Graph-coloring register allocator
+`allocate_registers()` runs these phases:
+1. Compute live intervals (via `liveness.rs`)
+2. Build interference graph from overlapping intervals
+3. Collect copy and parameter hints for coalescing
+4. Determine call-crossing variables (prefer callee-saved registers)
+5. Color greedily: parameter hint → copy hint → caller-saved → callee-saved → any
 
-Nine GP registers are allocatable (`RBX, RSI, RDI, R8, R9, R12–R15`); `RAX`, `RCX`, `RDX`, `R10`, `R11` are reserved as scratch. Variables that don't receive a register are spilled to stack slots. Exports the `PhysicalReg` enum and `LiveInterval` struct.
+9 GP registers are allocatable (`RBX`, `RSI`, `RDI`, `R8`, `R9`, `R12`–`R15`). `RAX`, `RCX`, `RDX`, `R10`, `R11` are reserved as scratch. Variables that don't receive a register spill to stack slots.
 
-### `liveness.rs`
-Standalone liveness analysis. `compute_live_intervals()` performs **iterative dataflow analysis** — computes per-block use/def sets, then iterates `live_in(B) = use(B) ∪ (live_out(B) - def(B))` and `live_out(B) = ∪ live_in(S)` to a fixed point, ensuring correct liveness across CFG back-edges. Returns a `Vec<LiveInterval>` with position ranges for each variable. `visit_operands()` helper walks all operand positions in an instruction.
+### `liveness.rs` — Dataflow liveness analysis
+`compute_live_intervals()` performs iterative dataflow: per-block use/def sets, then `live_in(B) = use(B) ∪ (live_out(B) - def(B))` and `live_out(B) = ∪ live_in(S)` to fixed point. Handles CFG back-edges correctly.
 
-### `globals.rs`
-Implements global variable initializer emission methods on `Codegen`: `emit_init_list_data()`, `find_init_item()`, `emit_scalar_data()`, `emit_zero_data()`, `type_size()`, `type_alignment()`, and `struct_size()`. Handles array and struct initializer lists with designated initializers, padding, and alignment calculations.
+### `globals.rs` — Global initializer emission
+Emits `.byte`/`.long`/`.quad`/`.float` directives for global variable initializers. Handles array and struct initializer lists with designated initializers, padding, alignment, and nested structs.
 
-### `peephole.rs`
-Assembly-level peephole optimizations applied after instruction selection:
+### `peephole.rs` — Assembly-level peephole optimizations
+Applied after instruction selection:
+- **Jump chain elimination** — transitive jump resolution, dead label+jump removal
+- **Comparison fusion** — multi-instruction `cmp`/`set`/`test`/`jcc` → direct `cmp` + `jcc`
+- **Redundant move removal** — `mov reg, reg` elimination, `mov reg, X; mov Y, reg` → `mov Y, X`
+- **Identity removal** — `add/sub X, 0`, `imul X, 1`
+- **LEA formation** — `mov reg, imm; add reg, reg2` → `lea reg, [reg2 + imm]`
 
-- **Jump chain elimination** — resolves transitive jumps and removes dead label+jump pairs.
-- **Comparison fusion** — collapses multi-instruction compare-set-test-jump patterns into direct `cmp` + `jcc`.
-- **Redundant move removal** — eliminates `mov reg, reg` and coalesces `mov reg, X; mov Y, reg` into `mov Y, X` when legal.
-- **Identity operation removal** — drops `add/sub X, 0` and `imul X, 1`.
-- **LEA formation** — converts `mov reg, imm; add reg, reg2` into `lea reg, [reg2 + imm]`.
+Uses conservative `is_reg_used_after()` liveness checks.
 
-Uses a conservative `is_reg_used_after()` liveness check to ensure replaced registers are dead.
+### `types.rs` — Type size/alignment calculator
+`TypeCalculator` computes byte sizes for all C types including arrays, structs (with field padding and `__attribute__((packed))`), and unions (max-field-size).
 
-### `types.rs`
-Type size and alignment calculation. `TypeCalculator` computes byte sizes for all C types including arrays, structs (with field padding and `__attribute__((packed))` support), and unions (max-field-size). Used by stack allocation, GEP scaling, and struct layout throughout the codegen.
+### `x86.rs` — x86-64 instruction representation
+- `X86Reg` — 42 register variants (64/32/8-bit GP + XMM0–XMM7)
+- `X86Operand` — register, memory (byte/dword/qword/float), immediate, label, RIP-relative
+- `X86Instr` — 40-variant enum modeling integer ALU, SSE float, control flow, stack, sign-extension, raw inline assembly
+- `emit_asm(instrs) -> String` — serializes to Intel-syntax assembly text
 
-### `x86.rs`
-The x86-64 instruction representation layer. Defines:
-
-- **`X86Reg`** — 42 register variants covering 64-bit, 32-bit, and 8-bit GP registers plus `XMM0`–`XMM7`.
-- **`X86Operand`** — register, memory (byte/dword/qword/float), immediate, label, and RIP-relative addressing modes.
-- **`X86Instr`** — 40-variant enum modeling integer ALU, SSE float, control flow, stack, sign-extension, and raw inline assembly instructions.
-- **`emit_asm()`** — serializes a `Vec<X86Instr>` to Intel-syntax assembly text.
+### `control_flow.rs` / `inline_asm.rs`
+Extracted helpers for terminator code generation (`Ret`, `Br`, `CondBr` with phi resolution) and inline assembly template expansion.

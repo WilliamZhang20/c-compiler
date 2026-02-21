@@ -451,17 +451,33 @@ impl Lowerer {
                 self.current_default = old_default;
             }
             AstStmt::Case(expr) => {
-                if let AstExpr::Constant(val) = expr {
-                    let case_block = self.new_block();
-                    if let Some(bid) = self.current_block {
-                        self.blocks[bid.0].terminator = Terminator::Br(case_block);
+                // Resolve the case value: must be a compile-time constant
+                let val = match expr {
+                    AstExpr::Constant(v) => *v,
+                    AstExpr::Variable(name) => {
+                        // Check if it's an enum constant
+                        if let Some(&v) = self.enum_constants.get(name) {
+                            v
+                        } else {
+                            return Err(format!("Case label '{}' is not a constant", name));
+                        }
                     }
-                    self.current_switch_cases.push((*val, case_block));
-                    self.seal_block(case_block);
-                    self.current_block = Some(case_block);
-                } else {
-                    return Err("Case label must be a constant".to_string());
+                    AstExpr::Unary { op: model::UnaryOp::Minus, expr } => {
+                        if let AstExpr::Constant(v) = expr.as_ref() {
+                            -v
+                        } else {
+                            return Err("Case label must be a constant".to_string());
+                        }
+                    }
+                    _ => return Err("Case label must be a constant".to_string()),
+                };
+                let case_block = self.new_block();
+                if let Some(bid) = self.current_block {
+                    self.blocks[bid.0].terminator = Terminator::Br(case_block);
                 }
+                self.current_switch_cases.push((val, case_block));
+                self.seal_block(case_block);
+                self.current_block = Some(case_block);
             }
             AstStmt::Default => {
                 let default_block = self.new_block();

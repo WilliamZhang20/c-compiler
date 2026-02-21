@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 ir = { path = "../ir" }
 model = { path = "../model" }
+
+[dev-dependencies]
+lexer = { path = "../lexer" }
+parser = { path = "../parser" }

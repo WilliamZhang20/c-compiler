@@ -144,4 +144,326 @@ mod tests {
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.functions[0].name, "main");
     }
+
+    // ─── Type parsing tests ────────────────────────────────────
+    #[test]
+    fn parse_unsigned_int() {
+        let src = "int main() { unsigned int x = 1; return x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, .. } = &stmts[0] {
+            assert_eq!(*r#type, model::Type::UnsignedInt);
+        } else {
+            panic!("Expected Declaration");
+        }
+    }
+
+    #[test]
+    fn parse_long_long() {
+        let src = "int main() { long long x = 0; return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, .. } = &stmts[0] {
+            assert_eq!(*r#type, model::Type::LongLong);
+        } else {
+            panic!("Expected Declaration");
+        }
+    }
+
+    #[test]
+    fn parse_unsigned_long_long() {
+        let src = "int main() { unsigned long long x = 0; return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, .. } = &stmts[0] {
+            assert_eq!(*r#type, model::Type::UnsignedLongLong);
+        } else {
+            panic!("Expected Declaration");
+        }
+    }
+
+    #[test]
+    fn parse_bool_type() {
+        let src = "int main() { _Bool b = 1; return b; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, .. } = &stmts[0] {
+            assert_eq!(*r#type, model::Type::Bool);
+        } else {
+            panic!("Expected Declaration");
+        }
+    }
+
+    #[test]
+    fn parse_pointer_type() {
+        let src = "int main() { int *p; return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, .. } = &stmts[0] {
+            assert_eq!(*r#type, model::Type::Pointer(Box::new(model::Type::Int)));
+        } else {
+            panic!("Expected Declaration");
+        }
+    }
+
+    // ─── Expression parsing tests ───────────────────────────────
+    #[test]
+    fn parse_ternary() {
+        let src = "int main() { return 1 ? 2 : 3; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[0] {
+            assert!(matches!(expr, model::Expr::Conditional { .. }));
+        } else {
+            panic!("Expected Return with Conditional");
+        }
+    }
+
+    #[test]
+    fn parse_sizeof_type() {
+        let src = "int main() { return sizeof(int); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[0] {
+            assert!(matches!(expr, model::Expr::SizeOf(model::Type::Int)));
+        } else {
+            panic!("Expected Return with SizeOf");
+        }
+    }
+
+    #[test]
+    fn parse_alignof() {
+        let src = "int main() { return _Alignof(int); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[0] {
+            assert!(matches!(expr, model::Expr::AlignOf(model::Type::Int)));
+        } else {
+            panic!("Expected Return with AlignOf");
+        }
+    }
+
+    #[test]
+    fn parse_cast() {
+        let src = "int main() { return (int)3.14; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[0] {
+            assert!(matches!(expr, model::Expr::Cast(model::Type::Int, _)));
+        } else {
+            panic!("Expected Return with Cast");
+        }
+    }
+
+    #[test]
+    fn parse_comma_expression() {
+        let src = "int main() { return (1, 2, 3); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[0] {
+            if let model::Expr::Comma(exprs) = expr {
+                assert_eq!(exprs.len(), 3);
+            } else {
+                panic!("Expected Comma, got {:?}", expr);
+            }
+        } else {
+            panic!("Expected Return");
+        }
+    }
+
+    #[test]
+    fn parse_index_expression() {
+        let src = "int main() { int arr[3]; return arr[0]; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.statements[1] {
+            assert!(matches!(expr, model::Expr::Index { .. }));
+        } else {
+            panic!("Expected Return with Index");
+        }
+    }
+
+    #[test]
+    fn parse_member_access() {
+        let src = "struct S { int x; }; int main() { struct S s; return s.x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        // Find the return statement
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Return(Some(expr)) = &stmts[stmts.len() - 1] {
+            assert!(matches!(expr, model::Expr::Member { member, .. } if member == "x"));
+        } else {
+            panic!("Expected Return with Member");
+        }
+    }
+
+    // ─── Statement parsing tests ────────────────────────────────
+    #[test]
+    fn parse_do_while() {
+        let src = "void main() { int x = 0; do { x = x + 1; } while (x < 5); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(matches!(program.functions[0].body.statements[1], Stmt::DoWhile { .. }));
+    }
+
+    #[test]
+    fn parse_switch() {
+        let src = "void main() { int x = 1; switch (x) { case 1: break; default: break; } }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(matches!(program.functions[0].body.statements[1], Stmt::Switch { .. }));
+    }
+
+    #[test]
+    fn parse_goto_and_label() {
+        let src = "void main() { goto end; end: return; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        assert!(matches!(&stmts[0], Stmt::Goto(label) if label == "end"));
+        assert!(matches!(&stmts[1], Stmt::Label(label) if label == "end"));
+    }
+
+    #[test]
+    fn parse_nested_blocks() {
+        let src = "void main() { { int x = 1; { int y = 2; } } }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(matches!(program.functions[0].body.statements[0], Stmt::Block(_)));
+    }
+
+    // ─── Declaration tests ──────────────────────────────────────
+    #[test]
+    fn parse_multi_variable_declaration() {
+        let src = "void main() { int a = 1, b = 2, c = 3; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        // Multi-decl should produce a MultiDecl node or flatten
+        assert!(!stmts.is_empty());
+    }
+
+    #[test]
+    fn parse_string_literal_expr() {
+        let src = r#"int main() { char *s = "hello"; return 0; }"#;
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { init: Some(expr), .. } = &stmts[0] {
+            assert!(matches!(expr, model::Expr::StringLiteral(_)));
+        } else {
+            panic!("Expected Declaration with StringLiteral init");
+        }
+    }
+
+    #[test]
+    fn parse_enum_definition() {
+        let src = "enum Color { RED, GREEN, BLUE }; int main() { return RED; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.enums.len(), 1);
+        assert_eq!(program.enums[0].name, "Color");
+        assert_eq!(program.enums[0].constants.len(), 3);
+    }
+
+    #[test]
+    fn parse_struct_definition() {
+        let src = "struct Point { int x; int y; }; int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.structs.len(), 1);
+        assert_eq!(program.structs[0].name, "Point");
+        assert_eq!(program.structs[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn parse_function_pointer_local() {
+        // Function pointer as local variable (parser supports this)
+        let src = "int main() { int (*fp)(int, int); return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let stmts = &program.functions[0].body.statements;
+        if let Stmt::Declaration { r#type, name, .. } = &stmts[0] {
+            assert_eq!(name, "fp");
+            assert!(matches!(r#type, model::Type::FunctionPointer { .. }));
+        } else {
+            panic!("Expected FunctionPointer declaration");
+        }
+    }
+
+    #[test]
+    fn parse_const_qualifier() {
+        let src = "int main() { const int x = 5; return x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Declaration { qualifiers, .. } = &program.functions[0].body.statements[0] {
+            assert!(qualifiers.is_const);
+        } else {
+            panic!("Expected Declaration with const qualifier");
+        }
+    }
+
+    #[test]
+    fn parse_typedef_usage() {
+        let src = "typedef int my_int; int main() { my_int x = 42; return x; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Declaration { r#type, .. } = &program.functions[0].body.statements[0] {
+            assert_eq!(*r#type, model::Type::Typedef("my_int".to_string()));
+        } else {
+            panic!("Expected Declaration with typedef type");
+        }
+    }
+
+    // ─── Attribute tests ────────────────────────────────────────
+    #[test]
+    fn parse_packed_attribute() {
+        let src = "struct __attribute__((packed)) S { int x; char y; }; int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(program.structs[0].attributes.contains(&model::Attribute::Packed));
+    }
+
+    #[test]
+    fn parse_constructor_attribute() {
+        let src = "__attribute__((constructor)) void init() { } int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let init_fn = program.functions.iter().find(|f| f.name == "init").unwrap();
+        assert!(init_fn.attributes.contains(&model::Attribute::Constructor));
+    }
+
+    // ─── Edge cases ─────────────────────────────────────────────
+    #[test]
+    fn parse_empty_function_body() {
+        let src = "void noop() { }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.functions[0].body.statements.len(), 0);
+    }
+
+    #[test]
+    fn parse_multiple_functions() {
+        let src = "int foo() { return 1; } int bar() { return 2; } int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 3);
+    }
+
+    #[test]
+    fn parse_nested_function_calls() {
+        let src = "int f(int x) { return x; } int main() { return f(f(1)); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        if let Stmt::Return(Some(model::Expr::Call { args, .. })) = &program.functions[1].body.statements[0] {
+            assert!(matches!(&args[0], model::Expr::Call { .. }));
+        } else {
+            panic!("Expected nested Call");
+        }
+    }
 }
