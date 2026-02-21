@@ -102,7 +102,7 @@ pub enum X86Instr {
     Raw(String), // Raw assembly string (for inline asm)
 }
 
-/// emit_asm converts X86 instructions to AT&T syntax assembly
+/// emit_asm converts X86 instructions to Intel syntax assembly
 pub fn emit_asm(instructions: &[X86Instr]) -> String {
     let mut s = String::new();
     for instr in instructions {

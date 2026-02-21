@@ -19,7 +19,7 @@ Program-level driver. The `Codegen` struct holds shared state (float constants, 
 ### `function.rs`
 Per-function code generation orchestrator and the largest file in the module. `FunctionGenerator` manages stack layout, register-allocation results, variable-to-operand mappings, and alloca buffer tracking. Key operations:
 
-- **`gen_function()`** — runs register allocation, emits the prologue (callee-saved pushes, frame pointer setup, stack reservation), moves parameters from ABI registers to their assigned locations (with cycle detection to avoid overwrites), walks all blocks emitting instructions and terminators, and appends the epilogue.
+- **`gen_function()`** — runs register allocation, emits the prologue (callee-saved pushes, frame pointer setup, stack reservation with a placeholder that is **backpatched** after codegen completes to account for late-created spill slots), moves parameters from ABI registers to their assigned locations (with cycle detection to avoid overwrites), walks all blocks emitting instructions and terminators, and appends the epilogue. Stack frame calculation includes space for locals, callee-saved registers, shadow space, and **stack-passed call arguments** (for functions with more than 6 arguments).
 - **`gen_instr()`** — dispatches each IR instruction to the appropriate specialized generator (see below).
 - **`gen_terminator()`** — handles `Ret` (with callee-saved restore), `Br` (unconditional jump), and `CondBr` (test + conditional jump). Both branch variants resolve remaining phi copies at block transitions via `resolve_phis()`.
 - **`var_to_op()` / `operand_to_op()`** — translates IR variables and operands to `X86Operand`, consulting register allocation, stack slots, and alloca buffers.
@@ -43,7 +43,7 @@ Platform ABI abstraction. The `CallingConvention` trait exposes parameter regist
 ### `regalloc.rs`
 **Graph-coloring register allocator.** `allocate_registers()` runs these phases:
 
-1. Compute live intervals (def/use positions for each variable).
+1. Compute live intervals using **iterative dataflow liveness analysis** — computes per-block use/def sets, then iterates `live_in(B) = use(B) ∪ (live_out(B) - def(B))` and `live_out(B) = ∪ live_in(S)` to a fixed point, ensuring correct liveness across CFG back-edges.
 2. Build an interference graph from overlapping intervals.
 3. Collect copy and parameter hints for coalescing.
 4. Determine which variables are live across calls (must prefer callee-saved registers).
@@ -68,7 +68,7 @@ Type size and alignment calculation. `TypeCalculator` computes byte sizes for al
 ### `x86.rs`
 The x86-64 instruction representation layer. Defines:
 
-- **`X86Reg`** — 44 register variants covering 64-bit, 32-bit, and 8-bit GP registers plus `XMM0`–`XMM7`.
+- **`X86Reg`** — 42 register variants covering 64-bit, 32-bit, and 8-bit GP registers plus `XMM0`–`XMM7`.
 - **`X86Operand`** — register, memory (byte/dword/qword/float), immediate, label, and RIP-relative addressing modes.
-- **`X86Instr`** — 39-variant enum modeling integer ALU, SSE float, control flow, stack, sign-extension, and raw inline assembly instructions.
+- **`X86Instr`** — 40-variant enum modeling integer ALU, SSE float, control flow, stack, sign-extension, and raw inline assembly instructions.
 - **`emit_asm()`** — serializes a `Vec<X86Instr>` to Intel-syntax assembly text.

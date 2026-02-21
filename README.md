@@ -15,7 +15,7 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 ### How to Run
 
-The most exciting part. The compiler now works on both **Windows** and **Linux**! On Windows, run `windows_release.exe` and point to any C file. On Linux, build and run `./linux_release`. The compiler appears to still be rather buggy so only primitive programs work, despite the massive chunk of "features," so it is a big WIP. The ultimate stress test may not necessarily be Linux, but rather `donut.c`.
+The most exciting part. The compiler now works on both **Windows** and **Linux**! On Windows, run `windows_release.exe` and point to any C file. On Linux, build and run `./linux_release`. The compiler successfully compiles and runs complex programs including the classic `donut.c` spinning donut animation, matching GCC's output exactly. The next milestone is expanding language coverage and using the compiler on larger real-world projects.
 
 To build a new release from the existing files, run the following:
 ```
@@ -49,7 +49,7 @@ Converts AST to Static Single Assignment (SSA) form with basic blocks and phi no
 Applies optimization passes including constant folding, dead code elimination, and strength reduction. Key functions: `strength_reduce_function()` replaces expensive operations with cheaper equivalents (e.g., multiply by power-of-2 becomes shift), `optimize_function()` performs constant propagation and DCE.
 
 #### **Code Generator** (`codegen/src/lib.rs`, `regalloc.rs`, `x86.rs`)
-Generates x86-64 assembly with register allocation using graph coloring. Key functions: `allocate_registers()` assigns physical registers to SSA variables via interference graph coloring, `gen_program()` emits AT&T syntax assembly from IR.
+Generates x86-64 assembly with register allocation using graph coloring. Key functions: `allocate_registers()` assigns physical registers to SSA variables via interference graph coloring, `gen_program()` emits Intel syntax assembly from IR.
 
 ### Features
 
