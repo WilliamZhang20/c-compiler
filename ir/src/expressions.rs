@@ -816,10 +816,103 @@ impl Lowerer {
                 });
                 Ok(Operand::Var(result))
             }
+            AstExpr::CompoundLiteral { r#type, init } => {
+                // Compound literal: allocate anonymous local, initialize it,
+                // and return either a pointer (for aggregates) or the value.
+                let bid = self.current_block.ok_or("CompoundLiteral outside block")?;
+                let alloca = self.new_var();
+                let ty = r#type.clone();
+                self.blocks[bid.0].instructions.push(Instruction::Alloca {
+                    dest: alloca,
+                    r#type: ty.clone(),
+                });
+
+                // Dispatch to the correct init-list helper based on type.
+                match &ty {
+                    Type::Array(inner, _) => {
+                        let elem_size = self.get_type_size(inner);
+                        self.lower_init_list_to_stores(alloca, init, inner, elem_size, bid)?;
+                    }
+                    Type::Struct(_) | Type::Union(_) => {
+                        self.lower_struct_init_list(alloca, &ty, init, bid)?;
+                    }
+                    _ => {
+                        // Scalar compound literal, e.g. (int){42}
+                        if let Some(item) = init.first() {
+                            let val = self.lower_expr(&item.value)?;
+                            self.blocks[bid.0].instructions.push(Instruction::Store {
+                                addr: Operand::Var(alloca),
+                                src: val,
+                                value_type: ty.clone(),
+                            });
+                        }
+                    }
+                }
+
+                // For aggregates, the compound literal evaluates to the
+                // address of the temporary (like an array name).  For scalars,
+                // load the value back out.
+                match &ty {
+                    Type::Array(..) | Type::Struct(_) | Type::Union(_) => {
+                        Ok(Operand::Var(alloca))
+                    }
+                    _ => {
+                        let result = self.new_var();
+                        self.blocks[bid.0].instructions.push(Instruction::Load {
+                            dest: result,
+                            addr: Operand::Var(alloca),
+                            value_type: ty,
+                        });
+                        Ok(Operand::Var(result))
+                    }
+                }
+            }
+            AstExpr::Comma(exprs) => {
+                // Comma operator: evaluate each sub-expression left to right,
+                // discarding all results except the last one.
+                if exprs.is_empty() {
+                    return Err("Empty comma expression".to_string());
+                }
+                let mut result = Operand::Constant(0);
+                for e in exprs {
+                    result = self.lower_expr(e)?;
+                }
+                Ok(result)
+            }
+            AstExpr::StmtExpr(stmts) => {
+                // GNU statement expression: lower all statements, and the
+                // value is the last expression-statement's value.
+                if stmts.is_empty() {
+                    return Ok(Operand::Constant(0));
+                }
+                // Lower all statements except the last one
+                for stmt in &stmts[..stmts.len() - 1] {
+                    self.lower_stmt(stmt)?;
+                }
+                // The last statement must be an expression statement
+                match stmts.last().unwrap() {
+                    model::Stmt::Expr(expr) => self.lower_expr(expr),
+                    other => {
+                        // Not an expression statement — lower it and return 0
+                        self.lower_stmt(other)?;
+                        Ok(Operand::Constant(0))
+                    }
+                }
+            }
             AstExpr::InitList(_) => {
                 // InitList is handled specially during declaration lowering,
                 // not as a standalone expression.
                 Err("InitList expression cannot be lowered standalone; it must appear as a declaration initializer".to_string())
+            }
+            AstExpr::BuiltinOffsetof { r#type, member } => {
+                // __builtin_offsetof(type, member) → constant offset
+                let struct_name = match r#type {
+                    Type::Struct(name) => name.clone(),
+                    Type::Union(name) => name.clone(),
+                    _ => return Err(format!("__builtin_offsetof requires struct/union type, got {:?}", r#type)),
+                };
+                let (offset, _field_type) = self.get_member_offset(&struct_name, member);
+                Ok(Operand::Constant(offset))
             }
         }
     }

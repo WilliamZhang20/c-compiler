@@ -324,10 +324,28 @@ impl SemanticAnalyzer {
                 self.analyze_expr(then_expr)?;
                 self.analyze_expr(else_expr)?;
             }
+            Expr::CompoundLiteral { init, .. } => {
+                for item in init {
+                    self.analyze_expr(&item.value)?;
+                }
+            }
+            Expr::StmtExpr(stmts) => {
+                for stmt in stmts {
+                    self.analyze_stmt(stmt)?;
+                }
+            }
+            Expr::Comma(exprs) => {
+                for e in exprs {
+                    self.analyze_expr(e)?;
+                }
+            }
             Expr::InitList(items) => {
                 for item in items {
                     self.analyze_expr(&item.value)?;
                 }
+            }
+            Expr::BuiltinOffsetof { .. } => {
+                // Compile-time constant, nothing to analyze
             }
         }
         Ok(())

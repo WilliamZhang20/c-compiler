@@ -170,6 +170,7 @@ impl Codegen {
                 } else { 4 }
             }
             Type::Typedef(_) => 4,
+            Type::TypeofExpr(_) => 8, // Should be resolved before codegen
         }
     }
 

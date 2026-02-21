@@ -81,6 +81,19 @@ impl<'a> AttributeParser for Parser<'a> {
                         self.advance();
                         attributes.push(Attribute::AlwaysInline);
                     }
+                    Some(Token::Identifier { value }) if value == "weak" || value == "__weak__" => {
+                        self.advance();
+                        attributes.push(Attribute::Weak);
+                    }
+                    Some(Token::Identifier { value }) if value == "unused" || value == "__unused__" => {
+                        self.advance();
+                        attributes.push(Attribute::Unused);
+                    }
+                    Some(Token::Identifier { value }) if value == "used" || value == "__used__" => {
+                        self.advance();
+                        // 'used' just means "don't GC this symbol" — we keep everything anyway
+                        attributes.push(Attribute::Unused); // treat similarly
+                    }
                     _ => {
                         // Skip unknown attributes
                         self.advance();

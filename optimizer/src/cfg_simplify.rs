@@ -1,5 +1,5 @@
 // CFG simplification: merge basic blocks and eliminate unnecessary jumps
-use ir::{Function, Terminator, BlockId, Instruction};
+use ir::{Function, Terminator, BlockId, Instruction, Operand};
 use std::collections::{HashMap, HashSet};
 
 /// Simplify the control flow graph by removing empty blocks (jump threading)
@@ -12,13 +12,30 @@ pub fn simplify_cfg(func: &mut Function) {
             break;
         }
         
-        // Run both optimizations - merge_blocks is now safe with label tracking
+        // Run optimizations in sequence
+        let changed0 = fold_constant_branches(func);
         let changed1 = merge_blocks(func);
         let changed2 = remove_empty_blocks(func);
-        if !changed1 && !changed2 {
+        if !changed0 && !changed1 && !changed2 {
             break;
         }
     }
+}
+
+/// Replace conditional branches with constant conditions by unconditional jumps.
+/// e.g. `br cond=1, then_bb, else_bb` → `br then_bb`
+fn fold_constant_branches(func: &mut Function) -> bool {
+    let mut changed = false;
+    for block in &mut func.blocks {
+        if let Terminator::CondBr { cond, then_block, else_block } = &block.terminator {
+            if let Operand::Constant(val) = cond {
+                let target = if *val != 0 { *then_block } else { *else_block };
+                block.terminator = Terminator::Br(target);
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// Merge blocks where a block has only one predecessor and that predecessor has only one successor

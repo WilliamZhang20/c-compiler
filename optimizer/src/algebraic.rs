@@ -1,5 +1,5 @@
 use ir::{Function, Instruction, Operand};
-use model::BinaryOp;
+use model::{BinaryOp, UnaryOp};
 
 /// Algebraic simplification: apply algebraic identities to simplify expressions
 ///
@@ -9,6 +9,22 @@ use model::BinaryOp;
 /// - x & 0 = 0, x | 0 = x
 /// - x ^ 0 = x, x << 0 = x, x >> 0 = x
 pub fn algebraic_simplification(func: &mut Function) {
+    // First pass: build a map from VarId to its defining instruction
+    // so we can detect double-negation patterns like ~~x, -(-x),
+    // and chain add/sub constants like (x+a)+b → x+(a+b).
+    let mut var_def: std::collections::HashMap<ir::VarId, Instruction> = std::collections::HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                Instruction::Unary { dest, .. } | Instruction::Copy { dest, .. }
+                | Instruction::Binary { dest, .. } => {
+                    var_def.insert(*dest, inst.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
     for block in &mut func.blocks {
         let mut new_instructions = Vec::new();
 
@@ -20,7 +36,7 @@ pub fn algebraic_simplification(func: &mut Function) {
                     left,
                     right,
                 } => {
-                    if let Some(simplified) = try_simplify_binary(&op, &left, &right, dest) {
+                    if let Some(simplified) = try_simplify_binary(&op, &left, &right, dest, &var_def) {
                         new_instructions.push(simplified);
                     } else {
                         new_instructions.push(Instruction::Binary {
@@ -29,6 +45,13 @@ pub fn algebraic_simplification(func: &mut Function) {
                             left,
                             right,
                         });
+                    }
+                }
+                Instruction::Unary { dest, op, src } => {
+                    if let Some(simplified) = try_simplify_unary(&op, &src, dest, &var_def) {
+                        new_instructions.push(simplified);
+                    } else {
+                        new_instructions.push(Instruction::Unary { dest, op, src });
                     }
                 }
                 other => new_instructions.push(other),
@@ -44,8 +67,10 @@ fn try_simplify_binary(
     left: &Operand,
     right: &Operand,
     dest: ir::VarId,
+    var_def: &std::collections::HashMap<ir::VarId, Instruction>,
 ) -> Option<Instruction> {
-    match op {
+    // First try basic simplifications
+    let basic = match op {
         BinaryOp::Mul => simplify_mul(left, right, dest),
         BinaryOp::Div => simplify_div(left, right, dest),
         BinaryOp::Mod => simplify_mod(left, right, dest),
@@ -55,9 +80,53 @@ fn try_simplify_binary(
         BinaryOp::BitwiseOr => simplify_or(left, right, dest),
         BinaryOp::BitwiseXor => simplify_xor(left, right, dest),
         BinaryOp::ShiftLeft | BinaryOp::ShiftRight => simplify_shift(op, left, right, dest),
-        BinaryOp::EqualEqual | BinaryOp::NotEqual => simplify_comparison(op, left, right, dest),
+        BinaryOp::EqualEqual | BinaryOp::NotEqual
+        | BinaryOp::Less | BinaryOp::LessEqual
+        | BinaryOp::Greater | BinaryOp::GreaterEqual => simplify_comparison(op, left, right, dest),
         _ => None,
+    };
+    if basic.is_some() {
+        return basic;
     }
+    
+    // Chain add/sub constants: (x + a) + b → x + (a + b)
+    if let Operand::Constant(c2) = right {
+        if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+            if let Operand::Var(src_var) = left {
+                if let Some(Instruction::Binary {
+                    op: prev_op,
+                    left: orig_left,
+                    right: Operand::Constant(c1),
+                    ..
+                }) = var_def.get(src_var) {
+                    if matches!(prev_op, BinaryOp::Add | BinaryOp::Sub) {
+                        // Combine: (x +/- a) +/- b
+                        let effective_c1 = if *prev_op == BinaryOp::Sub { -c1 } else { *c1 };
+                        let effective_c2 = if *op == BinaryOp::Sub { -c2 } else { *c2 };
+                        let combined = effective_c1 + effective_c2;
+                        
+                        if combined >= 0 {
+                            return Some(Instruction::Binary {
+                                dest,
+                                op: BinaryOp::Add,
+                                left: orig_left.clone(),
+                                right: Operand::Constant(combined),
+                            });
+                        } else {
+                            return Some(Instruction::Binary {
+                                dest,
+                                op: BinaryOp::Sub,
+                                left: orig_left.clone(),
+                                right: Operand::Constant(-combined),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 fn simplify_mul(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instruction> {
@@ -280,14 +349,74 @@ fn simplify_comparison(
     right: &Operand,
     dest: ir::VarId,
 ) -> Option<Instruction> {
-    // x == x is always true, x != x is always false (for same variable)
+    // For same-variable comparisons, apply identity rules:
+    //   x == x → 1,  x != x → 0
+    //   x <  x → 0,  x <= x → 1
+    //   x >  x → 0,  x >= x → 1
     if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
         if v1 == v2 {
-            let result = if matches!(op, BinaryOp::EqualEqual) { 1 } else { 0 };
+            let result = match op {
+                BinaryOp::EqualEqual | BinaryOp::LessEqual | BinaryOp::GreaterEqual => 1,
+                BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::Greater => 0,
+                _ => return None,
+            };
             return Some(Instruction::Copy {
                 dest,
                 src: Operand::Constant(result),
             });
+        }
+    }
+    
+    // Constant comparison folding: both sides are constants
+    if let (Operand::Constant(a), Operand::Constant(b)) = (left, right) {
+        let result = match op {
+            BinaryOp::EqualEqual => if a == b { 1 } else { 0 },
+            BinaryOp::NotEqual => if a != b { 1 } else { 0 },
+            BinaryOp::Less => if a < b { 1 } else { 0 },
+            BinaryOp::LessEqual => if a <= b { 1 } else { 0 },
+            BinaryOp::Greater => if a > b { 1 } else { 0 },
+            BinaryOp::GreaterEqual => if a >= b { 1 } else { 0 },
+            _ => return None,
+        };
+        return Some(Instruction::Copy {
+            dest,
+            src: Operand::Constant(result),
+        });
+    }
+    
+    None
+}
+
+/// Simplify unary operations using algebraic identities:
+/// - `~~x` → `x`           (double bitwise NOT)
+/// - `-(-x)` → `x`         (double arithmetic negation)
+/// These patterns appear in kernel macros and get generated by macro expansion.
+fn try_simplify_unary(
+    op: &UnaryOp,
+    src: &Operand,
+    dest: ir::VarId,
+    var_def: &std::collections::HashMap<ir::VarId, Instruction>,
+) -> Option<Instruction> {
+    // Check if `src` is itself defined by the same unary op → double application
+    if let Operand::Var(src_var) = src {
+        if let Some(Instruction::Unary { op: inner_op, src: inner_src, .. }) = var_def.get(src_var) {
+            match (op, inner_op) {
+                // ~~x → x
+                (UnaryOp::BitwiseNot, UnaryOp::BitwiseNot) => {
+                    return Some(Instruction::Copy {
+                        dest,
+                        src: inner_src.clone(),
+                    });
+                }
+                // -(-x) → x
+                (UnaryOp::Minus, UnaryOp::Minus) => {
+                    return Some(Instruction::Copy {
+                        dest,
+                        src: inner_src.clone(),
+                    });
+                }
+                _ => {}
+            }
         }
     }
     None

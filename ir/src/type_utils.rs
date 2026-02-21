@@ -79,6 +79,10 @@ impl Lowerer {
                     4
                 }
             }
+            Type::TypeofExpr(expr) => {
+                let resolved = self.get_expr_type(expr);
+                self.get_type_size(&resolved)
+            }
         };
         
         // Cache the result
@@ -139,6 +143,10 @@ impl Lowerer {
                 }
             }
             Type::Void => 1,
+            Type::TypeofExpr(expr) => {
+                let resolved = self.get_expr_type(expr);
+                self.get_alignment(&resolved)
+            }
         }
     }
 

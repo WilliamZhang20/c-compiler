@@ -18,6 +18,7 @@ mod dce;
 mod folding;
 mod utils;
 mod cfg_simplify;
+mod load_forwarding;
 
 use ir::IRProgram;
 use algebraic::algebraic_simplification;
@@ -26,6 +27,7 @@ use propagation::copy_propagation;
 use cse::common_subexpression_elimination;
 use folding::optimize_function;
 use cfg_simplify::simplify_cfg;
+use load_forwarding::load_forwarding;
 
 /// Main optimization entry point
 ///
@@ -52,6 +54,7 @@ pub fn optimize(mut program: IRProgram) -> IRProgram {
         algebraic_simplification(func);
         strength_reduce_function(func);
         copy_propagation(func);
+        load_forwarding(func);
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
         ir::remove_phis(func);

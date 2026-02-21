@@ -1,6 +1,7 @@
-use ir::{Function, Instruction, Operand};
+use ir::{Function, Instruction, Operand, VarId};
 use model::BinaryOp;
 use crate::utils::{is_power_of_two, log2};
+use std::collections::HashMap;
 
 /// Strength reduction: replace expensive operations with cheaper equivalents
 ///
@@ -37,6 +38,9 @@ pub fn strength_reduce_function(func: &mut Function) {
 
         block.instructions = new_instructions;
     }
+
+    // Second pass: combine consecutive shifts
+    combine_consecutive_shifts(func);
 }
 
 fn try_reduce_binary(
@@ -107,4 +111,48 @@ fn reduce_mod(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instru
         }
     }
     None
+}
+
+/// Combine consecutive shifts in the same direction.
+/// If `t1 = x << a` and `t2 = t1 << b`, replace the second with `t2 = x << (a+b)`.
+/// Same for `>>`. This is useful after strength reduction converts multiplies to shifts.
+fn combine_consecutive_shifts(func: &mut Function) {
+    // Build a map of VarId → (shift_op, source_operand, shift_amount)
+    // for all shift-by-constant instructions
+    let mut shift_defs: HashMap<VarId, (BinaryOp, Operand, i64)> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::Binary { dest, op, left, right: Operand::Constant(amt) } = inst {
+                if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+                    shift_defs.insert(*dest, (op.clone(), left.clone(), *amt));
+                }
+            }
+        }
+    }
+
+    // Now look for shifts whose source was also a shift in the same direction
+    for block in &mut func.blocks {
+        for inst in &mut block.instructions {
+            if let Instruction::Binary { dest, op, left: Operand::Var(src_var), right: Operand::Constant(amt) } = inst {
+                if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+                    if let Some((prev_op, orig_src, prev_amt)) = shift_defs.get(src_var) {
+                        if prev_op == op {
+                            // Combine: (x << a) << b → x << (a + b)
+                            let combined = prev_amt + *amt;
+                            if combined < 64 {
+                                let d = *dest;
+                                let o = op.clone();
+                                *inst = Instruction::Binary {
+                                    dest: d,
+                                    op: o,
+                                    left: orig_src.clone(),
+                                    right: Operand::Constant(combined),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

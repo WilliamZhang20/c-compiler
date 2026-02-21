@@ -1,5 +1,5 @@
 use ir::{Function, Instruction, Operand, VarId};
-use model::{BinaryOp, UnaryOp};
+use model::{BinaryOp, UnaryOp, Type};
 use std::collections::HashMap;
 
 /// Constant folding and propagation
@@ -75,7 +75,19 @@ pub fn optimize_function(func: &mut Function) {
                     }
                     Instruction::Cast { dest, src, r#type } => {
                         let s = resolve_operand(&src, &constants);
-                        // TODO: Constant folding for casts
+                        // Constant folding for casts: if the source is a
+                        // constant, truncate/extend at compile time.
+                        if let Operand::Constant(val) = &s {
+                            if let Some(folded) = fold_cast(*val, &r#type) {
+                                constants.insert(dest, folded);
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::Constant(folded),
+                                });
+                                changed = true;
+                                continue;
+                            }
+                        }
                         new_instructions.push(Instruction::Cast { dest, src: s, r#type });
                     }
                     Instruction::Call { dest, name, args } => {
@@ -220,5 +232,21 @@ pub fn fold_unary(op: UnaryOp, s: i64) -> Option<i64> {
         UnaryOp::LogicalNot => Some((s == 0) as i64),
         UnaryOp::BitwiseNot => Some(!s),
         UnaryOp::AddrOf | UnaryOp::Deref => None,
+    }
+}
+
+/// Fold a cast of a constant integer to a target type at compile time.
+/// Simulates the truncation/extension that would happen at runtime.
+fn fold_cast(val: i64, target: &Type) -> Option<i64> {
+    match target {
+        Type::Char          => Some(val as i8 as i64),
+        Type::UnsignedChar  => Some(val as u8 as i64),
+        Type::Short         => Some(val as i16 as i64),
+        Type::UnsignedShort => Some(val as u16 as i64),
+        Type::Int           => Some(val as i32 as i64),
+        Type::UnsignedInt   => Some(val as u32 as i64),
+        Type::Long | Type::LongLong => Some(val),          // same width on x86-64
+        Type::UnsignedLong | Type::UnsignedLongLong => Some(val), // bit pattern preserved
+        _ => None, // Pointer, float, struct, etc. — don't fold
     }
 }

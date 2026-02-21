@@ -106,6 +106,16 @@ impl Lowerer {
         }
     }
 
+    /// Resolve a type that may contain `TypeofExpr` to a concrete type.
+    pub(crate) fn resolve_type(&self, ty: &Type) -> Type {
+        match ty {
+            Type::TypeofExpr(expr) => self.get_expr_type(expr),
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_type(inner))),
+            Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
+            other => other.clone(),
+        }
+    }
+
     /// Get the type of an expression
     pub(crate) fn get_expr_type(&self, expr: &AstExpr) -> Type {
         match expr {
@@ -223,9 +233,30 @@ impl Lowerer {
                 // (In C, both branches should have compatible types)
                 self.get_expr_type(then_expr)
             }
+            AstExpr::CompoundLiteral { r#type, .. } => r#type.clone(),
+            AstExpr::StmtExpr(stmts) => {
+                // Statement expression type is the type of the last expr stmt
+                if let Some(model::Stmt::Expr(expr)) = stmts.last() {
+                    self.get_expr_type(expr)
+                } else {
+                    Type::Int
+                }
+            }
+            AstExpr::Comma(exprs) => {
+                // Comma expression type is the type of the last sub-expression
+                if let Some(last) = exprs.last() {
+                    self.get_expr_type(last)
+                } else {
+                    Type::Int
+                }
+            }
             AstExpr::InitList(_) => {
                 // InitList type is context-dependent (resolved during lowering)
                 Type::Int
+            }
+            AstExpr::BuiltinOffsetof { .. } => {
+                // offsetof always returns an integer (size_t, effectively)
+                Type::Long
             }
         }
     }
@@ -352,6 +383,7 @@ impl Lowerer {
             blocks: self.blocks.clone(),
             entry_block: entry_id,
             var_types: self.var_types.clone(),
+            attributes: f.attributes.clone(),
         })
     }
 

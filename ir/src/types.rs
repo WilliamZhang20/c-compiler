@@ -146,6 +146,8 @@ pub struct Function {
     pub entry_block: BlockId,
     /// Type annotations for IR variables (used to distinguish float/int in codegen)
     pub var_types: HashMap<VarId, Type>,
+    /// Function attributes (weak, section, noreturn, etc.)
+    pub attributes: Vec<model::Attribute>,
 }
 
 /// Complete IR program

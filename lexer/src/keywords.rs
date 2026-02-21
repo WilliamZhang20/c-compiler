@@ -61,6 +61,11 @@ pub fn keyword_or_identifier(value: &str) -> Token {
         "__pure__" => Token::Extension,
         "__const__" => Token::Const,
         "sizeof" => Token::SizeOf,
+        "typeof" => Token::Typeof,
+        "__typeof" => Token::Typeof,
+        "__typeof__" => Token::Typeof,
+        "_Static_assert" => Token::StaticAssert,
+        "static_assert" => Token::StaticAssert,
         _ => Token::Identifier { value: value.to_string() },
     }
 }

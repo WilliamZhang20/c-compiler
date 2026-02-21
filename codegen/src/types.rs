@@ -68,6 +68,7 @@ impl<'a> TypeCalculator<'a> {
                 _ => 4,
             },
             Type::Void => 1,
+            Type::TypeofExpr(_) => 8, // Should be resolved before codegen
         }
     }
 
@@ -134,6 +135,7 @@ impl<'a> TypeCalculator<'a> {
                 | "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => 8,
                 _ => 8,
             },
+            Type::TypeofExpr(_) => 8, // Should be resolved before codegen
         }
     }
 

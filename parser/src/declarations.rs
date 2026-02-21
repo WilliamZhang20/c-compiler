@@ -12,6 +12,7 @@ pub(crate) trait DeclarationParser {
     fn parse_function(&mut self) -> Result<Function, String>;
     fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String>;
     fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String>;
+    fn parse_static_assert(&mut self) -> Result<(), String>;
 }
 
 impl<'a> DeclarationParser for Parser<'a> {
@@ -24,7 +25,10 @@ impl<'a> DeclarationParser for Parser<'a> {
         let mut enums = Vec::new();
 
         while !self.is_at_end() {
-             if self.match_token(|t| matches!(t, Token::Typedef)) {
+             if self.match_token(|t| matches!(t, Token::StaticAssert)) {
+                // _Static_assert(expr, "message") or _Static_assert(expr)
+                self.parse_static_assert()?;
+            } else if self.match_token(|t| matches!(t, Token::Typedef)) {
                 // Try to parse typedef, but skip if it fails (complex header typedef)
                 if self.parse_typedef().is_err() {
                     let _ = self.skip_top_level_item();
@@ -452,7 +456,9 @@ impl<'a> DeclarationParser for Parser<'a> {
                 if self.check(|t| matches!(t, Token::OpenBrace)) {
                     Some(self.parse_init_list()?)
                 } else {
-                    Some(self.parse_expr()?)
+                    // Use parse_assignment (not parse_expr) so commas
+                    // are treated as separators for multi-var declarations.
+                    Some(self.parse_assignment()?)
                 }
             } else {
                 None
@@ -482,5 +488,39 @@ impl<'a> DeclarationParser for Parser<'a> {
         self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
 
         Ok(globals)
+    }
+
+    /// Parse _Static_assert(expr, "message") or _Static_assert(expr)
+    /// The _Static_assert token has already been consumed.
+    fn parse_static_assert(&mut self) -> Result<(), String> {
+        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+        
+        // Parse the constant expression
+        let expr = self.parse_assignment()?;
+        
+        // Check if there's a message (optional in C23)
+        let _message = if self.match_token(|t| matches!(t, Token::Comma)) {
+            // Consume the string literal message
+            match self.advance() {
+                Some(Token::StringLiteral { value }) => Some(value.clone()),
+                _ => return Err("Expected string literal in _Static_assert".to_string()),
+            }
+        } else {
+            None
+        };
+        
+        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        
+        // Evaluate the expression at compile time if it's a constant
+        // For non-constant expressions, we skip the check (best-effort)
+        if let model::Expr::Constant(val) = &expr {
+            if *val == 0 {
+                let msg = _message.unwrap_or_else(|| "static assertion failed".to_string());
+                return Err(format!("_Static_assert failed: {}", msg));
+            }
+        }
+        
+        Ok(())
     }
 }

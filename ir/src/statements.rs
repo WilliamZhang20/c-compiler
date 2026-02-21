@@ -58,6 +58,8 @@ impl Lowerer {
                 self.current_block = None; // Dead code after return
             }
             AstStmt::Declaration { r#type, qualifiers: _, name, init } => {
+                // Resolve typeof expressions to concrete types
+                let r#type = &self.resolve_type(r#type);
                 self.symbol_table.insert(name.clone(), r#type.clone());
                 let bid = self.current_block.ok_or("Declaration outside of block")?;
                 
@@ -112,6 +114,19 @@ impl Lowerer {
                                 let elem_size = self.get_type_size(&elem_type);
                                 self.lower_init_list_to_stores(var, items, &elem_type, elem_size, bid)?;
                             }
+                            AstExpr::CompoundLiteral { init, r#type: cl_type } => {
+                                // Compound literal used as array initializer
+                                let elem_type = match cl_type {
+                                    Type::Array(inner, _) => inner.as_ref().clone(),
+                                    _ => if let Type::Array(inner, _) = r#type {
+                                        inner.as_ref().clone()
+                                    } else {
+                                        unreachable!()
+                                    },
+                                };
+                                let elem_size = self.get_type_size(&elem_type);
+                                self.lower_init_list_to_stores(var, init, &elem_type, elem_size, bid)?;
+                            }
                             _ => {
                                 // Other init expressions for arrays not supported
                             }
@@ -131,6 +146,10 @@ impl Lowerer {
                         match init_expr {
                             AstExpr::InitList(items) => {
                                 self.lower_struct_init_list(alloca_var, r#type, items, bid)?;
+                            }
+                            AstExpr::CompoundLiteral { init, .. } => {
+                                // Compound literal with struct type: treat as init list
+                                self.lower_struct_init_list(alloca_var, r#type, init, bid)?;
                             }
                             _ => {
                                 // Scalar init for struct (e.g., copy from another struct)

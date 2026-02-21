@@ -60,6 +60,8 @@ pub enum Token {
     Extension, // __extension__
     Restrict, // restrict
     SizeOf, // sizeof
+    Typeof, // typeof / __typeof__
+    StaticAssert, // _Static_assert
     // Operators
     Plus,
     Minus,
@@ -111,6 +113,8 @@ pub enum Attribute {
     Section(String),
     NoReturn,
     AlwaysInline,
+    Weak,
+    Unused,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -137,6 +141,9 @@ pub enum Type {
         return_type: Box<Type>,
         param_types: Vec<Type>,
     },
+    /// `typeof(expr)` — resolved to the concrete type of the expression
+    /// during IR lowering.
+    TypeofExpr(Box<Expr>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -299,8 +306,25 @@ pub enum Expr {
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
+    /// Comma operator: `(a, b, c)` — evaluates each sub-expression
+    /// left-to-right, discarding all results except the last one.
+    Comma(Vec<Expr>),
+    /// Compound literal: `(type){init_list}` — creates a temporary with
+    /// the given type and initializer.
+    CompoundLiteral {
+        r#type: Type,
+        init: Vec<InitItem>,
+    },
+    /// GNU statement expression: `({ stmt; stmt; expr; })` — evaluates
+    /// a block of statements and returns the value of the last expression.
+    StmtExpr(Vec<Stmt>),
     /// Brace-enclosed initializer list: `{1, 2, 3}` or `{.x = 1, [0] = 2}`
     InitList(Vec<InitItem>),
+    /// __builtin_offsetof(type, member) — compile-time offset of field in struct
+    BuiltinOffsetof {
+        r#type: Type,
+        member: String,
+    },
 }
 
 /// A single item inside a brace-enclosed initializer list.

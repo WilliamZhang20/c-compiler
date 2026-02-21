@@ -1,6 +1,8 @@
-use model::{Token, Type, TypeQualifiers};
+use model::{Token, Type, TypeQualifiers, Expr};
 use crate::parser::Parser;
 use crate::attributes::AttributeParser;
+use crate::expressions::ExpressionParser;
+use crate::utils::ParserUtils;
 
 /// Type parsing functionality
 pub(crate) trait TypeParser {
@@ -155,6 +157,23 @@ impl<'a> TypeParser for Parser<'a> {
                     self.advance();
                     let (enum_type, _) = self.parse_enum_type()?;
                     return Ok((enum_type, qualifiers));
+                }
+                Some(Token::Typeof) => {
+                    if is_unsigned || is_signed || long_count > 0 || is_short {
+                        return Err("Cannot modify typeof type".to_string());
+                    }
+                    self.advance();
+                    self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                    // Peek ahead: if it looks like a type, parse as typeof(type)
+                    // otherwise parse as typeof(expr)
+                    let ty = if self.check_is_type() {
+                        self.parse_type()?
+                    } else {
+                        let expr = self.parse_expr()?;
+                        Type::TypeofExpr(Box::new(expr))
+                    };
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                    return Ok((ty, qualifiers));
                 }
                 Some(Token::Identifier { value }) if self.typedefs.contains(value) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {

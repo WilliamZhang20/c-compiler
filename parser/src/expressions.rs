@@ -1,6 +1,7 @@
 use model::{BinaryOp, Expr, Token, UnaryOp};
 use crate::parser::Parser;
 use crate::types::TypeParser;
+use crate::statements::StatementParser;
 use crate::utils::ParserUtils;
 
 /// Expression parsing functionality using precedence climbing
@@ -10,7 +11,16 @@ pub(crate) trait ExpressionParser {
 
 impl<'a> ExpressionParser for Parser<'a> {
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_assignment()
+        let first = self.parse_assignment()?;
+        if self.check(|t| matches!(t, Token::Comma)) {
+            let mut exprs = vec![first];
+            while self.match_token(|t| matches!(t, Token::Comma)) {
+                exprs.push(self.parse_assignment()?);
+            }
+            Ok(Expr::Comma(exprs))
+        } else {
+            Ok(first)
+        }
     }
 }
 
@@ -68,7 +78,14 @@ impl<'a> Parser<'a> {
         let condition = self.parse_logical_or()?;
 
         if self.match_token(|t| matches!(t, Token::Question)) {
-            let then_expr = self.parse_expr()?;
+            // GNU extension: `a ?: b` — omitted middle operand
+            // means `a ? a : b` (condition evaluated only once)
+            let then_expr = if self.check(|t| matches!(t, Token::Colon)) {
+                // Omitted middle: reuse the condition expression
+                condition.clone()
+            } else {
+                self.parse_expr()?
+            };
             self.expect(|t| matches!(t, Token::Colon), "':' in conditional expression")?;
             let else_expr = self.parse_conditional()?;
             Ok(Expr::Conditional {
@@ -300,12 +317,25 @@ impl<'a> Parser<'a> {
             self.parse_sizeof()
         } else if self.check(|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1)
         {
-            // Cast: (type)expr
+            // Cast or compound literal: (type)expr  or  (type){init}
             self.advance(); // consume '('
             let ty = self.parse_type()?;
             self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-            let expr = self.parse_unary()?;
-            Ok(Expr::Cast(ty, Box::new(expr)))
+            if self.check(|t| matches!(t, Token::OpenBrace)) {
+                // Compound literal: (type){init_list}
+                let init_expr = self.parse_init_list()?;
+                let items = match init_expr {
+                    Expr::InitList(items) => items,
+                    _ => unreachable!(),
+                };
+                // Compound literals can appear in postfix position
+                // (e.g., (struct foo){...}.member), so wrap via parse_postfix_on
+                let lit = Expr::CompoundLiteral { r#type: ty, init: items };
+                Ok(lit)
+            } else {
+                let expr = self.parse_unary()?;
+                Ok(Expr::Cast(ty, Box::new(expr)))
+            }
         } else {
             self.parse_postfix()
         }
@@ -342,11 +372,12 @@ impl<'a> Parser<'a> {
                     index: Box::new(index),
                 };
             } else if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
-                // Function call
+                // Function call – each argument is an assignment-expression,
+                // NOT an expression (which would greedily eat commas).
                 let mut args = Vec::new();
                 if !self.check(|t| matches!(t, Token::CloseParenthesis)) {
                     loop {
-                        args.push(self.parse_expr()?);
+                        args.push(self.parse_assignment()?);
                         if !self.match_token(|t| matches!(t, Token::Comma)) {
                             break;
                         }
@@ -396,11 +427,87 @@ impl<'a> Parser<'a> {
     // Primary (literals, identifiers, parenthesized expressions)
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.advance() {
-            Some(Token::Identifier { value }) => Ok(Expr::Variable(value.clone())),
+            Some(Token::Identifier { value }) => {
+                // Handle GCC builtins at parse time
+                match value.as_str() {
+                    "__builtin_expect" | "__builtin_expect_with_probability" => {
+                        // __builtin_expect(expr, expected_val) → expr
+                        // Used by likely()/unlikely() macros in the kernel.
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let expr = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        // Consume and discard the expected value (and any extra args)
+                        let _ = self.parse_assignment()?;
+                        // Handle __builtin_expect_with_probability extra arg
+                        if self.check(|t| matches!(t, Token::Comma)) {
+                            self.advance();
+                            let _ = self.parse_assignment()?;
+                        }
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        Ok(expr)
+                    }
+                    "__builtin_constant_p" => {
+                        // __builtin_constant_p(expr) → 0 at runtime
+                        // (we're a simple compiler, nothing is provably constant)
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let _ = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        Ok(Expr::Constant(0))
+                    }
+                    "__builtin_offsetof" => {
+                        // __builtin_offsetof(type, member) → constant offset
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let ty = self.parse_type()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        let member = match self.advance() {
+                            Some(Token::Identifier { value }) => value.clone(),
+                            other => return Err(format!("expected member name in __builtin_offsetof, found {:?}", other)),
+                        };
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        Ok(Expr::BuiltinOffsetof { r#type: ty, member })
+                    }
+                    "__builtin_types_compatible_p" => {
+                        // __builtin_types_compatible_p(type1, type2) → 1 if compatible, 0 otherwise
+                        // Used in kernel's __same_type() macro
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let type1 = self.parse_type()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        let type2 = self.parse_type()?;
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        let compatible = if type1 == type2 { 1 } else { 0 };
+                        Ok(Expr::Constant(compatible))
+                    }
+                    "__builtin_choose_expr" => {
+                        // __builtin_choose_expr(const_expr, expr1, expr2)
+                        // → expr1 if const_expr is nonzero, expr2 otherwise
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let cond = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        let expr1 = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        let expr2 = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        // Evaluate at compile time
+                        match cond {
+                            Expr::Constant(v) if v != 0 => Ok(expr1),
+                            Expr::Constant(_) => Ok(expr2),
+                            _ => Ok(expr1), // Default to first if not constant
+                        }
+                    }
+                    _ => Ok(Expr::Variable(value.clone())),
+                }
+            }
             Some(Token::Constant { value }) => Ok(Expr::Constant(*value)),
             Some(Token::FloatLiteral { value }) => Ok(Expr::FloatConstant(*value)),
             Some(Token::StringLiteral { value }) => Ok(Expr::StringLiteral(value.clone())),
             Some(Token::OpenParenthesis) => {
+                // Check for statement expression: ({ ... })
+                if self.check(|t| matches!(t, Token::OpenBrace)) {
+                    // GNU statement expression
+                    let block = self.parse_block()?;
+                    self.expect(|t| matches!(t, Token::CloseParenthesis), "')' after statement expression")?;
+                    return Ok(Expr::StmtExpr(block.statements));
+                }
                 let expr = self.parse_expr()?;
                 self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
                 Ok(expr)

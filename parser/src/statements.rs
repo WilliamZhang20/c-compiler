@@ -2,6 +2,7 @@ use model::{Block, Expr, InitItem, Designator, Stmt, Token, Type};
 use crate::parser::Parser;
 use crate::types::TypeParser;
 use crate::expressions::ExpressionParser;
+use crate::declarations::DeclarationParser;
 use crate::utils::ParserUtils;
 
 /// Statement parsing functionality
@@ -93,6 +94,12 @@ impl<'a> StatementParser for Parser<'a> {
         if self.check(|t| matches!(t, Token::OpenBrace)) {
             let block = self.parse_block()?;
             return Ok(Stmt::Block(block));
+        }
+
+        // _Static_assert
+        if self.match_token(|t| matches!(t, Token::StaticAssert)) {
+            self.parse_static_assert()?;
+            return Ok(Stmt::Block(Block { statements: vec![] })); // No-op statement
         }
 
         // Variable declaration
@@ -294,7 +301,7 @@ impl<'a> Parser<'a> {
                 };
 
                 let init = if self.match_token(|t| matches!(t, Token::Equal)) {
-                    Some(self.parse_expr()?)
+                    Some(self.parse_assignment()?)
                 } else {
                     None
                 };
@@ -346,7 +353,9 @@ impl<'a> Parser<'a> {
                 if self.check(|t| matches!(t, Token::OpenBrace)) {
                     Some(self.parse_init_list()?)
                 } else {
-                    Some(self.parse_expr()?)
+                    // Use parse_assignment so commas act as multi-decl
+                    // separators, not comma operators.
+                    Some(self.parse_assignment()?)
                 }
             } else {
                 None
@@ -502,11 +511,11 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            // Parse the value — may be a nested init list or a regular expression
+            // Parse the value — may be a nested init list or an assignment expr
             let value = if self.check(|t| matches!(t, Token::OpenBrace)) {
                 self.parse_init_list()?
             } else {
-                self.parse_expr()?
+                self.parse_assignment()?
             };
 
             items.push(InitItem { designator, value });

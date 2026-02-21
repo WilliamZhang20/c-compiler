@@ -189,6 +189,20 @@ impl Codegen {
             // Emit .globl directive for all functions (for linking)
             output.push_str(&format!(".globl {}\n", func.name));
             
+            // Check for weak attribute
+            if func.attributes.iter().any(|a| matches!(a, model::Attribute::Weak)) {
+                output.push_str(&format!(".weak {}\n", func.name));
+            }
+            
+            // Check for section attribute on functions
+            let mut func_in_custom_section = false;
+            for attr in &func.attributes {
+                if let model::Attribute::Section(section_name) = attr {
+                    output.push_str(&format!(".section {}, \"ax\", @progbits\n", section_name));
+                    func_in_custom_section = true;
+                }
+            }
+            
             let func_gen = FunctionGenerator::new(
                 &self.structs,
                 &self.unions,
@@ -205,6 +219,11 @@ impl Codegen {
             apply_peephole(&mut func_asm);
             
             output.push_str(&emit_asm(&func_asm));
+            
+            // Switch back to .text if we were in a custom section
+            if func_in_custom_section {
+                output.push_str(".text\n");
+            }
         }
         
         // Emit float constants in .data section
