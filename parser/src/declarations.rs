@@ -33,12 +33,32 @@ impl<'a> DeclarationParser for Parser<'a> {
                 if self.parse_typedef().is_err() {
                     let _ = self.skip_top_level_item();
                 }
-            } else if self.match_token(|t| matches!(t, Token::Extension | Token::Attribute)) {
-                // Skip attributes/extensions at top level
-                if self.check(|t| matches!(t, Token::OpenParenthesis)) {
-                    let _ = self.skip_parentheses();
+            } else if self.check(|t| matches!(t, Token::Extension | Token::Attribute)) {
+                // Parse top-level attributes (e.g., __attribute__((constructor)))
+                // and apply them to the next declaration
+                let attrs = self.parse_attributes()?;
+                if !attrs.is_empty() {
+                    // Look for the function or global that follows and attach attributes
+                    if self.is_function_definition() {
+                        match self.parse_function() {
+                            Ok(mut f) => {
+                                f.attributes.extend(attrs);
+                                functions.push(f);
+                            }
+                            Err(_) => { let _ = self.skip_top_level_item(); }
+                        }
+                    } else if self.check_is_type() || self.check(|t| matches!(t, Token::Identifier { .. })) {
+                        match self.parse_globals() {
+                            Ok(mut gvars) => {
+                                for g in &mut gvars {
+                                    g.attributes.extend(attrs.clone());
+                                }
+                                globals.extend(gvars);
+                            }
+                            Err(_) => { let _ = self.skip_top_level_item(); }
+                        }
+                    }
                 }
-                // Continue to next iteration without skipping the whole item
                 continue;
             } else if self.check(|t| matches!(t, Token::Enum))
                 && self.check_at(2, &|t: &Token| matches!(t, Token::OpenBrace))
@@ -392,10 +412,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                 let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
-                    match self.advance() {
-                        Some(Token::Constant { value }) => *value as usize,
-                        other => return Err(format!("expected constant array size in parameter, found {:?}", other)),
-                    }
+                    self.parse_array_size()?
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                 p_type = model::Type::Array(Box::new(p_type), size);
@@ -443,10 +460,7 @@ impl<'a> DeclarationParser for Parser<'a> {
                 let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
-                    match self.advance() {
-                        Some(Token::Constant { value }) => *value as usize,
-                        other => return Err(format!("[parse_global] expected constant array size, found {:?}", other)),
-                    }
+                    self.parse_array_size()?
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                 var_type = model::Type::Array(Box::new(var_type), size);

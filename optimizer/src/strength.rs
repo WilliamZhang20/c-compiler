@@ -68,6 +68,14 @@ fn reduce_mul(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Instru
                 right: Operand::Constant(log2(*c)),
             });
         }
+        // x * (2^n - 1)  →  (x << n) - x  (e.g., x*3, x*7, x*15)
+        if *c > 2 && is_power_of_two(*c + 1) {
+            return None; // Could decompose but needs temp var; skip for now
+        }
+        // x * (2^n + 1)  →  (x << n) + x  (e.g., x*3=x*2+x, x*5=x*4+x, x*9=x*8+x)
+        if *c > 2 && is_power_of_two(*c - 1) {
+            return None; // Would need temp var; covered by strength reduction + algebraic combo
+        }
     }
     // (power of 2) * x → x << log2(power)
     if let Operand::Constant(c) = left {

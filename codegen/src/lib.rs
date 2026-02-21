@@ -240,6 +240,20 @@ impl Codegen {
             }
         }
         
+        // Emit .init_array / .fini_array entries for constructor/destructor functions
+        for func in &prog.functions {
+            if func.attributes.iter().any(|a| matches!(a, model::Attribute::Constructor)) {
+                output.push_str(&format!("\n.section .init_array,\"aw\",@init_array\n"));
+                output.push_str(".align 8\n");
+                output.push_str(&format!(".quad {}\n", func.name));
+            }
+            if func.attributes.iter().any(|a| matches!(a, model::Attribute::Destructor)) {
+                output.push_str(&format!("\n.section .fini_array,\"aw\",@fini_array\n"));
+                output.push_str(".align 8\n");
+                output.push_str(&format!(".quad {}\n", func.name));
+            }
+        }
+        
         // Add .note.GNU-stack section for Linux to mark stack as non-executable
         if matches!(self.target.platform, model::Platform::Linux) {
             output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");

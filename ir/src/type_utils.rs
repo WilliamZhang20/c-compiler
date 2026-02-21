@@ -18,6 +18,7 @@ impl Lowerer {
         // Compute size
         let size = match ty {
             Type::Int | Type::UnsignedInt => 4,  // 32-bit int
+            Type::Bool => 1,  // _Bool is 1 byte
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Long | Type::UnsignedLong => 8,  // 64-bit on x64
@@ -93,6 +94,7 @@ impl Lowerer {
     /// Get the natural alignment of a type in bytes
     pub(crate) fn get_alignment(&self, ty: &Type) -> i64 {
         match ty {
+            Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Int | Type::UnsignedInt => 4,
@@ -185,5 +187,28 @@ impl Lowerer {
             }
         }
         (0, Type::Int)
+    }
+
+    /// Check if two types are compatible for _Generic matching
+    pub(crate) fn types_compatible(&self, a: &Type, b: &Type) -> bool {
+        match (a, b) {
+            (Type::Int, Type::Int) => true,
+            (Type::Char, Type::Char) => true,
+            (Type::Short, Type::Short) => true,
+            (Type::Long, Type::Long) => true,
+            (Type::Float, Type::Float) => true,
+            (Type::Double, Type::Double) => true,
+            (Type::Bool, Type::Bool) => true,
+            (Type::Void, Type::Void) => true,
+            (Type::UnsignedChar, Type::UnsignedChar) => true,
+            (Type::UnsignedShort, Type::UnsignedShort) => true,
+            (Type::UnsignedInt, Type::UnsignedInt) => true,
+            (Type::UnsignedLong, Type::UnsignedLong) => true,
+            (Type::Pointer(a_inner), Type::Pointer(b_inner)) => self.types_compatible(a_inner, b_inner),
+            (Type::Array(a_inner, _), Type::Array(b_inner, _)) => self.types_compatible(a_inner, b_inner),
+            (Type::Struct(a_name), Type::Struct(b_name)) => a_name == b_name,
+            (Type::Union(a_name), Type::Union(b_name)) => a_name == b_name,
+            _ => false,
+        }
     }
 }

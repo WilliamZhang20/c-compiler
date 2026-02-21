@@ -94,6 +94,28 @@ impl<'a> AttributeParser for Parser<'a> {
                         // 'used' just means "don't GC this symbol" — we keep everything anyway
                         attributes.push(Attribute::Unused); // treat similarly
                     }
+                    Some(Token::Identifier { value }) if value == "constructor" || value == "__constructor__" => {
+                        self.advance();
+                        // Skip optional priority: constructor(priority)
+                        if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                            while !self.check(|t| matches!(t, Token::CloseParenthesis)) && !self.is_at_end() {
+                                self.advance();
+                            }
+                            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        }
+                        attributes.push(Attribute::Constructor);
+                    }
+                    Some(Token::Identifier { value }) if value == "destructor" || value == "__destructor__" => {
+                        self.advance();
+                        // Skip optional priority: destructor(priority)
+                        if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
+                            while !self.check(|t| matches!(t, Token::CloseParenthesis)) && !self.is_at_end() {
+                                self.advance();
+                            }
+                            self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        }
+                        attributes.push(Attribute::Destructor);
+                    }
                     _ => {
                         // Skip unknown attributes
                         self.advance();

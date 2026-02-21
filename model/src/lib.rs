@@ -62,6 +62,10 @@ pub enum Token {
     SizeOf, // sizeof
     Typeof, // typeof / __typeof__
     StaticAssert, // _Static_assert
+    Bool, // _Bool
+    AlignOf, // _Alignof / __alignof__
+    Register, // register
+    Generic, // _Generic
     // Operators
     Plus,
     Minus,
@@ -115,6 +119,8 @@ pub enum Attribute {
     AlwaysInline,
     Weak,
     Unused,
+    Constructor,
+    Destructor,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -141,6 +147,7 @@ pub enum Type {
         return_type: Box<Type>,
         param_types: Vec<Type>,
     },
+    Bool,
     /// `typeof(expr)` — resolved to the concrete type of the expression
     /// during IR lowering.
     TypeofExpr(Box<Expr>),
@@ -292,6 +299,7 @@ pub enum Expr {
     },
     SizeOf(Type),
     SizeOfExpr(Box<Expr>),
+    AlignOf(Type),
     Cast(Type, Box<Expr>),
     Member {
         expr: Box<Expr>,
@@ -324,6 +332,12 @@ pub enum Expr {
     BuiltinOffsetof {
         r#type: Type,
         member: String,
+    },
+    /// _Generic(expr, type1: expr1, type2: expr2, ..., default: exprN)
+    /// C11 generic selection — resolved at compile time based on type of controlling expr.
+    Generic {
+        controlling: Box<Expr>,
+        associations: Vec<(Option<Type>, Expr)>,  // None = default
     },
 }
 

@@ -66,6 +66,19 @@ pub fn keyword_or_identifier(value: &str) -> Token {
         "__typeof__" => Token::Typeof,
         "_Static_assert" => Token::StaticAssert,
         "static_assert" => Token::StaticAssert,
+        "_Bool" => Token::Bool,
+        "bool" => Token::Bool,
+        "_Alignof" => Token::AlignOf,
+        "__alignof" => Token::AlignOf,
+        "__alignof__" => Token::AlignOf,
+        "alignof" => Token::AlignOf,
+        "register" => Token::Register,
+        "_Generic" => Token::Generic,
+        "_Noreturn" => Token::Register,  // Treat _Noreturn like a skippable qualifier
+        "__noreturn__" => Token::Register,
+        "noreturn" => Token::Register,   // C23 noreturn keyword
+        "__label__" => Token::Extension,  // GCC local label declaration
+        "__auto_type" => Token::Extension, // GCC auto type deduction
         _ => Token::Identifier { value: value.to_string() },
     }
 }

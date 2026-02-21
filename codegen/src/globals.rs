@@ -149,6 +149,7 @@ impl Codegen {
     /// Get the size of a type in bytes.
     pub(crate) fn type_size(&self, ty: &Type) -> usize {
         match ty {
+            Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Int | Type::UnsignedInt | Type::Float => 4,
@@ -177,6 +178,7 @@ impl Codegen {
     /// Get the alignment of a type in bytes.
     pub(crate) fn type_alignment(&self, ty: &Type) -> usize {
         match ty {
+            Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Int | Type::UnsignedInt | Type::Float => 4,

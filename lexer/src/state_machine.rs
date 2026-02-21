@@ -238,33 +238,34 @@ impl<'a> StateMachineLexer<'a> {
 
         let content_start = self.pos;
         
-        // Handle escape sequences
-        if self.current_char() == '\\' {
-            self.pos += 1;
-            if self.pos < self.input.len() {
-                let escape_char = self.current_char();
+        // Consume all characters until closing quote
+        // Supports multi-character constants like 'AB' or 'ABCD'
+        while self.pos < self.input.len() && self.current_char() != '\'' {
+            if self.current_char() == '\\' {
+                self.pos += 1; // skip backslash
+                if self.pos < self.input.len() {
+                    let escape_char = self.current_char();
+                    self.pos += 1;
+                    // For octal sequences, consume additional digits
+                    if escape_char.is_ascii_digit() && escape_char < '8' {
+                        while self.pos < self.input.len() 
+                              && self.current_char().is_ascii_digit() 
+                              && self.current_char() < '8'
+                              && self.pos - content_start < 4 {
+                            self.pos += 1;
+                        }
+                    }
+                    // For hex sequences \xHH, consume hex digits
+                    else if escape_char == 'x' {
+                        while self.pos < self.input.len() 
+                              && self.current_char().is_ascii_hexdigit() {
+                            self.pos += 1;
+                        }
+                    }
+                }
+            } else {
                 self.pos += 1;
-                
-                // For octal sequences, consume additional digits (up to 3 total)
-                if escape_char.is_ascii_digit() && escape_char < '8' {
-                    while self.pos < self.input.len() 
-                          && self.current_char().is_ascii_digit() 
-                          && self.current_char() < '8'
-                          && self.pos - content_start < 4 {
-                        self.pos += 1;
-                    }
-                }
-                // For hex sequences \\xHH, consume hex digits
-                else if escape_char == 'x' {
-                    while self.pos < self.input.len() 
-                          && self.current_char().is_ascii_hexdigit()
-                          && self.pos - content_start < 4 {
-                        self.pos += 1;
-                    }
-                }
             }
-        } else {
-            self.pos += 1;
         }
         
         if self.pos >= self.input.len() || self.current_char() != '\'' {
@@ -273,7 +274,18 @@ impl<'a> StateMachineLexer<'a> {
         
         let content = std::str::from_utf8(&self.input[content_start..self.pos])
             .expect("Invalid UTF-8 in char literal");
-        let value = parse_char_literal(content)?;
+        
+        // Check if this is a multi-character constant
+        let value = if content.len() > 1 && !content.starts_with('\\') {
+            // Multi-character constant: pack bytes big-endian (GCC-compatible)
+            let mut result: i64 = 0;
+            for byte in content.bytes() {
+                result = (result << 8) | (byte as i64);
+            }
+            result
+        } else {
+            parse_char_literal(content)?
+        };
         
         self.pos += 1; // Skip closing quote
         Ok(Some(Token::Constant { value }))
@@ -332,6 +344,11 @@ impl<'a> StateMachineLexer<'a> {
             Ok(Some(Token::FloatLiteral { value }))
         } else {
             let value = parse_int_constant(text)?;
+            // Consume integer suffixes: U, L, UL, LL, ULL, LU, etc.
+            while self.pos < self.input.len() 
+                  && matches!(self.current_char(), 'u' | 'U' | 'l' | 'L') {
+                self.pos += 1;
+            }
             Ok(Some(Token::Constant { value }))
         }
     }
@@ -354,6 +371,11 @@ impl<'a> StateMachineLexer<'a> {
         let text = std::str::from_utf8(&self.input[self.token_start..self.pos])
             .expect("Invalid UTF-8 in hex number");
         let value = parse_int_constant(text)?;
+        // Consume integer suffixes: U, L, UL, LL, ULL, etc.
+        while self.pos < self.input.len() 
+              && matches!(self.current_char(), 'u' | 'U' | 'l' | 'L') {
+            self.pos += 1;
+        }
         Ok(Some(Token::Constant { value }))
     }
 

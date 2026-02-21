@@ -603,7 +603,9 @@ impl<'a> ParserUtils for Parser<'a> {
                 | Token::Restrict
                 | Token::Attribute
                 | Token::Extension
-                | Token::Typeof,
+                | Token::Typeof
+                | Token::Bool
+                | Token::Register,
             ) => true,
             Some(Token::Identifier { value }) => self.typedefs.contains(value),
             _ => false,

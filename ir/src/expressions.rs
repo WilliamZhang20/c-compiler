@@ -683,6 +683,61 @@ impl Lowerer {
                             });
                             return Ok(Operand::Constant(0));
                         }
+                    } else if name == "__builtin_unreachable" {
+                        // Mark this point as unreachable — emit an Unreachable terminator
+                        let bid = self.current_block.ok_or("Unreachable outside block")?;
+                        self.blocks[bid.0].terminator = Terminator::Unreachable;
+                        self.current_block = None;
+                        return Ok(Operand::Constant(0));
+                    } else if name == "__builtin_trap" {
+                        // __builtin_trap() — abort execution; treat as unreachable
+                        let bid = self.current_block.ok_or("Trap outside block")?;
+                        self.blocks[bid.0].terminator = Terminator::Unreachable;
+                        self.current_block = None;
+                        return Ok(Operand::Constant(0));
+                    } else if name == "__builtin_clz" || name == "__builtin_ctz" 
+                           || name == "__builtin_popcount" || name == "__builtin_abs" {
+                        // Numeric builtins — evaluate at compile time
+                        if args.len() == 1 {
+                            let val = self.lower_expr(&args[0])?;
+                            if let Operand::Constant(v) = val {
+                                let result = match name.as_str() {
+                                    "__builtin_clz" => if v == 0 { 32 } else { (v as u32).leading_zeros() as i64 },
+                                    "__builtin_ctz" => if v == 0 { 32 } else { (v as u32).trailing_zeros() as i64 },
+                                    "__builtin_popcount" => (v as u32).count_ones() as i64,
+                                    "__builtin_abs" => v.abs(),
+                                    _ => unreachable!(),
+                                };
+                                return Ok(Operand::Constant(result));
+                            }
+                            // For non-constant __builtin_abs, generate: (x ^ (x>>31)) - (x>>31)
+                            if name == "__builtin_abs" {
+                                let bid = self.current_block.ok_or("abs outside block")?;
+                                let shift = self.new_var();
+                                self.blocks[bid.0].instructions.push(Instruction::Binary {
+                                    dest: shift,
+                                    op: BinaryOp::ShiftRight,
+                                    left: val.clone(),
+                                    right: Operand::Constant(31),
+                                });
+                                let xored = self.new_var();
+                                self.blocks[bid.0].instructions.push(Instruction::Binary {
+                                    dest: xored,
+                                    op: BinaryOp::BitwiseXor, 
+                                    left: val,
+                                    right: Operand::Var(shift),
+                                });
+                                let result = self.new_var();
+                                self.blocks[bid.0].instructions.push(Instruction::Binary {
+                                    dest: result,
+                                    op: BinaryOp::Sub,
+                                    left: Operand::Var(xored),
+                                    right: Operand::Var(shift),
+                                });
+                                return Ok(Operand::Var(result));
+                            }
+                            // Other non-constant builtins: fall through to call (will likely fail at link)
+                        }
                     }
                 }
 
@@ -731,6 +786,9 @@ impl Lowerer {
             AstExpr::SizeOfExpr(expr) => {
                 let expr_type = self.get_expr_type(expr);
                 Ok(Operand::Constant(self.get_type_size(&expr_type)))
+            }
+            AstExpr::AlignOf(ty) => {
+                Ok(Operand::Constant(self.get_alignment(ty)))
             }
             AstExpr::Cast(ty, expr) => {
                 let src_val = self.lower_expr(expr)?;
@@ -913,6 +971,27 @@ impl Lowerer {
                 };
                 let (offset, _field_type) = self.get_member_offset(&struct_name, member);
                 Ok(Operand::Constant(offset))
+            }
+            AstExpr::Generic { controlling, associations } => {
+                // Resolve _Generic at compile time based on controlling expression type
+                let ctrl_type = self.get_expr_type(controlling);
+                let mut default_expr = None;
+                let mut matched_expr = None;
+                
+                for (assoc_type, expr) in associations {
+                    match assoc_type {
+                        None => { default_expr = Some(expr); }
+                        Some(ty) => {
+                            if matched_expr.is_none() && self.types_compatible(&ctrl_type, ty) {
+                                matched_expr = Some(expr);
+                            }
+                        }
+                    }
+                }
+                
+                let selected = matched_expr.or(default_expr)
+                    .ok_or("_Generic: no matching type and no default")?;
+                self.lower_expr(selected)
             }
         }
     }

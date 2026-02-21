@@ -307,6 +307,7 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::SizeOf(_) => {}
+            Expr::AlignOf(_) => {}
             Expr::SizeOfExpr(expr) => {
                 self.analyze_expr(expr)?;
             }
@@ -346,6 +347,12 @@ impl SemanticAnalyzer {
             }
             Expr::BuiltinOffsetof { .. } => {
                 // Compile-time constant, nothing to analyze
+            }
+            Expr::Generic { controlling, associations } => {
+                self.analyze_expr(controlling)?;
+                for (_ty, expr) in associations {
+                    self.analyze_expr(expr)?;
+                }
             }
         }
         Ok(())

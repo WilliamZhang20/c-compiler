@@ -226,7 +226,7 @@ impl Lowerer {
                 }
             }
             AstExpr::Call { func: _, args:_ } => Type::Int, // Assume int return
-            AstExpr::SizeOf(_) | AstExpr::SizeOfExpr(_) => Type::Int,
+            AstExpr::SizeOf(_) | AstExpr::SizeOfExpr(_) | AstExpr::AlignOf(_) => Type::Int,
             AstExpr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
             AstExpr::Conditional { then_expr, .. } => {
                 // Ternary operator type is the type of the then/else branches
@@ -257,6 +257,25 @@ impl Lowerer {
             AstExpr::BuiltinOffsetof { .. } => {
                 // offsetof always returns an integer (size_t, effectively)
                 Type::Long
+            }
+            AstExpr::Generic { controlling, associations } => {
+                // Resolve to the matching association's expression type
+                let ctrl_type = self.get_expr_type(controlling);
+                for (assoc_type, expr) in associations {
+                    match assoc_type {
+                        Some(ty) if self.types_compatible(&ctrl_type, ty) => {
+                            return self.get_expr_type(expr);
+                        }
+                        _ => {}
+                    }
+                }
+                // Fall back to default
+                for (assoc_type, expr) in associations {
+                    if assoc_type.is_none() {
+                        return self.get_expr_type(expr);
+                    }
+                }
+                Type::Int
             }
         }
     }

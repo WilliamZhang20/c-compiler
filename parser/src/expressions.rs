@@ -1,4 +1,4 @@
-use model::{BinaryOp, Expr, Token, UnaryOp};
+use model::{BinaryOp, Expr, Token, Type, UnaryOp};
 use crate::parser::Parser;
 use crate::types::TypeParser;
 use crate::statements::StatementParser;
@@ -7,6 +7,8 @@ use crate::utils::ParserUtils;
 /// Expression parsing functionality using precedence climbing
 pub(crate) trait ExpressionParser {
     fn parse_expr(&mut self) -> Result<Expr, String>;
+    /// Parse a constant expression and evaluate it to a usize (for array sizes)
+    fn parse_array_size(&mut self) -> Result<usize, String>;
 }
 
 impl<'a> ExpressionParser for Parser<'a> {
@@ -21,6 +23,88 @@ impl<'a> ExpressionParser for Parser<'a> {
         } else {
             Ok(first)
         }
+    }
+    
+    fn parse_array_size(&mut self) -> Result<usize, String> {
+        let expr = self.parse_conditional()?;
+        const_eval_expr(&expr)
+            .map(|v| v as usize)
+            .ok_or_else(|| format!("expected constant array size expression, got {:?}", expr))
+    }
+}
+
+/// Evaluate a constant expression at compile time (for array sizes, etc.)
+fn const_eval_expr(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Constant(v) => Some(*v),
+        Expr::SizeOf(ty) => Some(const_sizeof(ty)),
+        Expr::AlignOf(ty) => Some(const_alignof(ty)),
+        Expr::Cast(_, inner) => const_eval_expr(inner),
+        Expr::Unary { op, expr } => {
+            let v = const_eval_expr(expr)?;
+            match op {
+                UnaryOp::Minus => Some(-v),
+                UnaryOp::BitwiseNot => Some(!v),
+                UnaryOp::LogicalNot => Some(if v == 0 { 1 } else { 0 }),
+                _ => None,
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            let l = const_eval_expr(left)?;
+            let r = const_eval_expr(right)?;
+            match op {
+                BinaryOp::Add => Some(l + r),
+                BinaryOp::Sub => Some(l - r),
+                BinaryOp::Mul => Some(l * r),
+                BinaryOp::Div => if r != 0 { Some(l / r) } else { None },
+                BinaryOp::Mod => if r != 0 { Some(l % r) } else { None },
+                BinaryOp::ShiftLeft => Some(l << r),
+                BinaryOp::ShiftRight => Some(l >> r),
+                BinaryOp::BitwiseAnd => Some(l & r),
+                BinaryOp::BitwiseOr => Some(l | r),
+                BinaryOp::BitwiseXor => Some(l ^ r),
+                BinaryOp::Less => Some(if l < r { 1 } else { 0 }),
+                BinaryOp::LessEqual => Some(if l <= r { 1 } else { 0 }),
+                BinaryOp::Greater => Some(if l > r { 1 } else { 0 }),
+                BinaryOp::GreaterEqual => Some(if l >= r { 1 } else { 0 }),
+                BinaryOp::EqualEqual => Some(if l == r { 1 } else { 0 }),
+                BinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
+                _ => None,
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            let cond = const_eval_expr(condition)?;
+            if cond != 0 {
+                const_eval_expr(then_expr)
+            } else {
+                const_eval_expr(else_expr)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Compile-time sizeof for common types (used in constant expressions)
+fn const_sizeof(ty: &Type) -> i64 {
+    match ty {
+        Type::Char | Type::UnsignedChar | Type::Bool => 1,
+        Type::Short | Type::UnsignedShort => 2,
+        Type::Int | Type::UnsignedInt | Type::Float => 4,
+        Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) => 8,
+        Type::Array(inner, n) => const_sizeof(inner) * (*n as i64),
+        Type::Void => 1, // GCC extension
+        _ => 4, // Default fallback
+    }
+}
+
+/// Compile-time alignof for common types
+fn const_alignof(ty: &Type) -> i64 {
+    match ty {
+        Type::Char | Type::UnsignedChar | Type::Bool => 1,
+        Type::Short | Type::UnsignedShort => 2,
+        Type::Int | Type::UnsignedInt | Type::Float => 4,
+        Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) => 8,
+        _ => 4,
     }
 }
 
@@ -315,6 +399,8 @@ impl<'a> Parser<'a> {
             Ok(Expr::PrefixDecrement(Box::new(expr)))
         } else if self.match_token(|t| matches!(t, Token::SizeOf)) {
             self.parse_sizeof()
+        } else if self.match_token(|t| matches!(t, Token::AlignOf)) {
+            self.parse_alignof()
         } else if self.check(|t| matches!(t, Token::OpenParenthesis)) && self.check_is_type_at(1)
         {
             // Cast or compound literal: (type)expr  or  (type){init}
@@ -356,6 +442,13 @@ impl<'a> Parser<'a> {
             let expr = self.parse_unary()?;
             Ok(Expr::SizeOfExpr(Box::new(expr)))
         }
+    }
+
+    fn parse_alignof(&mut self) -> Result<Expr, String> {
+        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+        let ty = self.parse_type()?;
+        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        Ok(Expr::AlignOf(ty))
     }
 
     // Postfix ([] () . ->)
@@ -511,6 +604,45 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expr()?;
                 self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
                 Ok(expr)
+            }
+            Some(Token::Generic) => {
+                // _Generic(controlling_expr, type: expr, type: expr, ..., default: expr)
+                self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                let ctrl_expr = self.parse_assignment()?;
+                self.expect(|t| matches!(t, Token::Comma), "','")?;
+                
+                let mut associations: Vec<(Option<Type>, Expr)> = Vec::new();
+                
+                loop {
+                    if self.check(|t| matches!(t, Token::CloseParenthesis)) {
+                        break;
+                    }
+                    
+                    if self.check(|t| matches!(t, Token::Default)) {
+                        self.advance();
+                        self.expect(|t| matches!(t, Token::Colon), "':'")?;
+                        let expr = self.parse_assignment()?;
+                        associations.push((None, expr));
+                    } else if self.check_is_type() {
+                        let ty = self.parse_type()?;
+                        self.expect(|t| matches!(t, Token::Colon), "':'")?;
+                        let expr = self.parse_assignment()?;
+                        associations.push((Some(ty), expr));
+                    } else {
+                        self.advance();
+                    }
+                    
+                    if !self.match_token(|t| matches!(t, Token::Comma)) {
+                        break;
+                    }
+                }
+                
+                self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                
+                Ok(Expr::Generic {
+                    controlling: Box::new(ctrl_expr),
+                    associations,
+                })
             }
             other => Err(format!("expected expression, found {:?}", other)),
         }

@@ -17,6 +17,7 @@ impl<'a> TypeCalculator<'a> {
 
     pub fn get_alignment(&self, r#type: &Type) -> usize {
         match r#type {
+            Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Int | Type::UnsignedInt => 4,
@@ -75,6 +76,7 @@ impl<'a> TypeCalculator<'a> {
     pub fn get_type_size(&self, r#type: &Type) -> usize {
         match r#type {
             Type::Int | Type::UnsignedInt => 4,  // 32-bit int
+            Type::Bool => 1,  // _Bool
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
             Type::Long | Type::UnsignedLong => 8,

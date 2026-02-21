@@ -276,10 +276,7 @@ impl<'a> Parser<'a> {
                             let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                                 0 // Use 0 to represent unsized array
                             } else {
-                                match self.advance() {
-                                    Some(Token::Constant { value }) => *value as usize,
-                                    other => return Err(format!("expected constant array size in function pointer parameter, found {:?}", other)),
-                                }
+                                self.parse_array_size()?
                             };
                             self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                             // Update the last parameter type to be an array
@@ -340,10 +337,7 @@ impl<'a> Parser<'a> {
                 let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
-                    match self.advance() {
-                        Some(Token::Constant { value }) => *value as usize,
-                        other => return Err(format!("[parse_declaration] expected constant array size, found {:?}", other)),
-                    }
+                    self.parse_array_size()?
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
                 decl_type = Type::Array(Box::new(decl_type), size);

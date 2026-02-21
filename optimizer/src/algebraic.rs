@@ -151,6 +151,22 @@ fn simplify_mul(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Inst
             src: right.clone(),
         });
     }
+    // x * -1 = -x
+    if matches!(right, Operand::Constant(-1)) {
+        return Some(Instruction::Unary {
+            dest,
+            op: UnaryOp::Minus,
+            src: left.clone(),
+        });
+    }
+    // -1 * x = -x
+    if matches!(left, Operand::Constant(-1)) {
+        return Some(Instruction::Unary {
+            dest,
+            op: UnaryOp::Minus,
+            src: right.clone(),
+        });
+    }
     None
 }
 
@@ -168,6 +184,23 @@ fn simplify_div(left: &Operand, right: &Operand, dest: ir::VarId) -> Option<Inst
             dest,
             src: Operand::Constant(0),
         });
+    }
+    // x / -1 = -x
+    if matches!(right, Operand::Constant(-1)) {
+        return Some(Instruction::Unary {
+            dest,
+            op: UnaryOp::Minus,
+            src: left.clone(),
+        });
+    }
+    // x / x = 1 (assuming x != 0)
+    if let (Operand::Var(v1), Operand::Var(v2)) = (left, right) {
+        if v1 == v2 {
+            return Some(Instruction::Copy {
+                dest,
+                src: Operand::Constant(1),
+            });
+        }
     }
     None
 }
@@ -381,6 +414,24 @@ fn simplify_comparison(
         return Some(Instruction::Copy {
             dest,
             src: Operand::Constant(result),
+        });
+    }
+    
+    // Normalize: constant on right side for consistent pattern matching
+    // If left is constant and right is var, flip the comparison
+    if let (Operand::Constant(_), Operand::Var(_)) = (left, right) {
+        let flipped_op = match op {
+            BinaryOp::Less => BinaryOp::Greater,
+            BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+            BinaryOp::Greater => BinaryOp::Less,
+            BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+            _ => op.clone(),  // == and != are symmetric
+        };
+        return Some(Instruction::Binary {
+            dest,
+            op: flipped_op,
+            left: right.clone(),
+            right: left.clone(),
         });
     }
     

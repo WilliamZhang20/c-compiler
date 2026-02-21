@@ -134,6 +134,17 @@ impl<'a> TypeParser for Parser<'a> {
                     base_type = Some(Type::Double);
                     self.advance();
                 }
+                Some(Token::Bool) => {
+                    if is_unsigned || is_signed || long_count > 0 || is_short {
+                        return Err("Cannot modify '_Bool' type".to_string());
+                    }
+                    base_type = Some(Type::Bool);
+                    self.advance();
+                }
+                Some(Token::Register) => {
+                    // 'register' storage class — just skip it
+                    self.advance();
+                }
                 Some(Token::Struct) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
                         return Err("Cannot modify struct type".to_string());
@@ -301,9 +312,9 @@ impl<'a> TypeParser for Parser<'a> {
                 let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
-                    match self.advance() {
-                        Some(Token::Constant { value }) => *value as usize,
-                        _ => {
+                    match self.parse_array_size() {
+                        Ok(s) => s,
+                        Err(_) => {
                             // Skip malformed array
                             while !self.is_at_end() 
                                 && !self.check(|t| matches!(t, Token::Semicolon)) 
@@ -421,9 +432,9 @@ impl<'a> TypeParser for Parser<'a> {
                 let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
                     0 // Use 0 to represent unsized array
                 } else {
-                    match self.advance() {
-                        Some(Token::Constant { value }) => *value as usize,
-                        _ => {
+                    match self.parse_array_size() {
+                        Ok(s) => s,
+                        Err(_) => {
                             // Skip malformed array
                             while !self.is_at_end() 
                                 && !self.check(|t| matches!(t, Token::Semicolon)) 
