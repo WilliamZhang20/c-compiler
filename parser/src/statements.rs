@@ -1,4 +1,4 @@
-use model::{Block, Expr, Stmt, Token, Type};
+use model::{Block, Expr, InitItem, Designator, Stmt, Token, Type};
 use crate::parser::Parser;
 use crate::types::TypeParser;
 use crate::expressions::ExpressionParser;
@@ -343,15 +343,21 @@ impl<'a> Parser<'a> {
             }
 
             let init = if self.match_token(|t| matches!(t, Token::Equal)) {
-                Some(self.parse_expr()?)
+                if self.check(|t| matches!(t, Token::OpenBrace)) {
+                    Some(self.parse_init_list()?)
+                } else {
+                    Some(self.parse_expr()?)
+                }
             } else {
                 None
             };
 
-            // Infer array size from string literal initializer if size is unspecified
+            // Infer array size from initializer
             if let Type::Array(inner, 0) = &decl_type {
                 if let Some(Expr::StringLiteral(s)) = &init {
                     decl_type = Type::Array(inner.clone(), s.len() + 1);
+                } else if let Some(Expr::InitList(items)) = &init {
+                    decl_type = Type::Array(inner.clone(), items.len());
                 }
             }
 
@@ -460,5 +466,61 @@ impl<'a> Parser<'a> {
             clobbers,
             is_volatile,
         })
+    }
+
+    /// Parse a brace-enclosed initializer list: `{ expr, expr, ... }`
+    /// Supports designated initializers: `{ .field = expr, [idx] = expr }`
+    /// and nested initializer lists: `{ {1,2}, {3,4} }`
+    pub(crate) fn parse_init_list(&mut self) -> Result<Expr, String> {
+        self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
+        let mut items = Vec::new();
+
+        // Handle empty initializer list `{}`
+        if self.match_token(|t| matches!(t, Token::CloseBrace)) {
+            return Ok(Expr::InitList(items));
+        }
+
+        loop {
+            let designator = if self.match_token(|t| matches!(t, Token::Dot)) {
+                // Designated field: .field = expr
+                let field_name = match self.advance() {
+                    Some(Token::Identifier { value }) => value.clone(),
+                    other => return Err(format!("expected field name after '.', found {:?}", other)),
+                };
+                self.expect(|t| matches!(t, Token::Equal), "'='")?;
+                Some(Designator::Field(field_name))
+            } else if self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                // Designated index: [index] = expr
+                let index = match self.advance() {
+                    Some(Token::Constant { value }) => *value,
+                    other => return Err(format!("expected constant index in designator, found {:?}", other)),
+                };
+                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                self.expect(|t| matches!(t, Token::Equal), "'='")?;
+                Some(Designator::Index(index))
+            } else {
+                None
+            };
+
+            // Parse the value — may be a nested init list or a regular expression
+            let value = if self.check(|t| matches!(t, Token::OpenBrace)) {
+                self.parse_init_list()?
+            } else {
+                self.parse_expr()?
+            };
+
+            items.push(InitItem { designator, value });
+
+            if !self.match_token(|t| matches!(t, Token::Comma)) {
+                break;
+            }
+            // Allow trailing comma before closing brace
+            if self.check(|t| matches!(t, Token::CloseBrace)) {
+                break;
+            }
+        }
+
+        self.expect(|t| matches!(t, Token::CloseBrace), "'}'")?;
+        Ok(Expr::InitList(items))
     }
 }

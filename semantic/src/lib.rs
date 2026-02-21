@@ -324,6 +324,11 @@ impl SemanticAnalyzer {
                 self.analyze_expr(then_expr)?;
                 self.analyze_expr(else_expr)?;
             }
+            Expr::InitList(items) => {
+                for item in items {
+                    self.analyze_expr(&item.value)?;
+                }
+            }
         }
         Ok(())
     }

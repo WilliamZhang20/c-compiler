@@ -14,16 +14,23 @@ Between these layers, a peephole optimizer simplifies the instruction stream. Re
 ## Source Files
 
 ### `lib.rs`
-Program-level driver. The `Codegen` struct holds shared state (float constants, target configuration). `gen_program()` emits the `.data` section (global strings as `.asciz`, global variables with alignment and optional custom section directives), then the `.text` section (one `FunctionGenerator` per IR function), followed by float constant data and a `.note.GNU-stack` marker for non-executable stacks.
+Program-level driver. The `Codegen` struct holds shared state (float constants, target configuration). `gen_program()` emits the `.data` section (global strings as `.asciz`, global variables with alignment and optional custom section directives), then the `.text` section (one `FunctionGenerator` per IR function), followed by float constant data and a `.note.GNU-stack` marker for non-executable stacks. Global initializer list emission has been extracted to `globals.rs`.
 
 ### `function.rs`
-Per-function code generation orchestrator and the largest file in the module. `FunctionGenerator` manages stack layout, register-allocation results, variable-to-operand mappings, and alloca buffer tracking. Key operations:
+Per-function code generation orchestrator. `FunctionGenerator` manages stack layout, register-allocation results, variable-to-operand mappings, and alloca buffer tracking. Key operations:
 
 - **`gen_function()`** — seeds `var_types` from the IR-level type annotations (e.g. `Float`/`Double` annotations on mem2reg phi vars), runs register allocation, emits the prologue (callee-saved pushes, frame pointer setup, stack reservation with a placeholder that is **backpatched** after codegen completes to account for late-created spill slots), moves parameters from ABI registers to their assigned locations (with cycle detection to avoid overwrites), walks all blocks emitting instructions and terminators, and appends the epilogue. Stack frame calculation includes space for locals, callee-saved registers, shadow space, and **stack-passed call arguments** (for functions with more than 6 arguments).
-- **`gen_instr()`** — dispatches each IR instruction to the appropriate specialized generator (see below).
-- **`gen_terminator()`** — handles `Ret` (with callee-saved restore), `Br` (unconditional jump), and `CondBr` (test + conditional jump). Both branch variants resolve remaining phi copies at block transitions via `resolve_phis()`.
+- **`gen_instr()`** — dispatches each IR instruction to the appropriate specialized generator.
 - **`var_to_op()` / `operand_to_op()`** — translates IR variables and operands to `X86Operand`, consulting register allocation, stack slots, and alloca buffers.
 - **Cast handling** — covers int↔float (`cvtsi2ss`/`cvttss2si`), pointer casts, and 32/64-bit width mismatches.
+
+Terminator handling and inline assembly have been extracted to `control_flow.rs` and `inline_asm.rs` respectively.
+
+### `control_flow.rs`
+Implements control flow methods on `FunctionGenerator`: `gen_terminator()` handles `Ret` (with callee-saved restore), `Br` (unconditional jump), and `CondBr` (test + conditional jump). Both branch variants resolve remaining phi copies at block transitions via `resolve_phis()`. Also provides `get_current_block_id()` helper.
+
+### `inline_asm.rs`
+Implements `gen_inline_asm()` on `FunctionGenerator`. Handles inline assembly template expansion, mapping IR variables/operands to assembly operand syntax (`%n` for numbered operands).
 
 ### `instructions.rs`
 Integer/pointer arithmetic and logic. `gen_binary_op()` handles `Add`, `Sub`, `Mul`, `Div`/`Mod` (via `cdq`/`cqo` + `idiv`), all six comparisons (`cmp` + `set*`), bitwise ops, and shifts. `gen_unary_op()` covers negation, bitwise not, logical not, and identity. Automatically selects 32-bit vs 64-bit register variants based on operand types and optimizes the common case where the destination already holds one operand.
@@ -43,13 +50,19 @@ Platform ABI abstraction. The `CallingConvention` trait exposes parameter regist
 ### `regalloc.rs`
 **Graph-coloring register allocator.** `allocate_registers()` runs these phases:
 
-1. Compute live intervals using **iterative dataflow liveness analysis** — computes per-block use/def sets, then iterates `live_in(B) = use(B) ∪ (live_out(B) - def(B))` and `live_out(B) = ∪ live_in(S)` to a fixed point, ensuring correct liveness across CFG back-edges.
+1. Compute live intervals (via `liveness.rs`).
 2. Build an interference graph from overlapping intervals.
 3. Collect copy and parameter hints for coalescing.
 4. Determine which variables are live across calls (must prefer callee-saved registers).
 5. Color the graph greedily: try parameter hint → copy hint → caller-saved → callee-saved → any available.
 
-Nine GP registers are allocatable (`RBX, RSI, RDI, R8, R9, R12–R15`); `RAX`, `RCX`, `RDX`, `R10`, `R11` are reserved as scratch. Variables that don't receive a register are spilled to stack slots.
+Nine GP registers are allocatable (`RBX, RSI, RDI, R8, R9, R12–R15`); `RAX`, `RCX`, `RDX`, `R10`, `R11` are reserved as scratch. Variables that don't receive a register are spilled to stack slots. Exports the `PhysicalReg` enum and `LiveInterval` struct.
+
+### `liveness.rs`
+Standalone liveness analysis. `compute_live_intervals()` performs **iterative dataflow analysis** — computes per-block use/def sets, then iterates `live_in(B) = use(B) ∪ (live_out(B) - def(B))` and `live_out(B) = ∪ live_in(S)` to a fixed point, ensuring correct liveness across CFG back-edges. Returns a `Vec<LiveInterval>` with position ranges for each variable. `visit_operands()` helper walks all operand positions in an instruction.
+
+### `globals.rs`
+Implements global variable initializer emission methods on `Codegen`: `emit_init_list_data()`, `find_init_item()`, `emit_scalar_data()`, `emit_zero_data()`, `type_size()`, `type_alignment()`, and `struct_size()`. Handles array and struct initializer lists with designated initializers, padding, and alignment calculations.
 
 ### `peephole.rs`
 Assembly-level peephole optimizations applied after instruction selection:

@@ -24,17 +24,18 @@ Defines every IR data structure:
 ### `lowerer.rs`
 The `Lowerer` struct and its `lower_program()` / `lower_function()` methods. This is the main AST → IR translation engine. It maintains extensive state: SSA bookkeeping (variable definitions, incomplete phis, sealed blocks), symbol tables (locals, globals, structs, unions, enums, typedefs), control-flow context (loop break/continue targets, switch case lists, goto labels with forward-reference resolution), and type-size caches.
 
-Key responsibilities include parameter spilling to `Alloca` slots (so addresses can be taken), type-size and struct-layout computation (with alignment and `__attribute__((packed))` support), and coordinating block creation and sealing for correct SSA construction.
+The file coordinates parameter spilling to `Alloca` slots (so addresses can be taken) and delegates to `expressions.rs` and `statements.rs` for lowering. Type size and alignment helper methods have been extracted to `type_utils.rs`.
 
 ### `expressions.rs`
-### `expressions.rs`\nImplements `lower_expr()` and `lower_to_addr()` on `Lowerer`. `lower_expr()` dispatches on every AST expression variant: constants, variables (with array-to-pointer decay), binary/unary operations (with separate int and float paths), assignments and compound assignments, pointer arithmetic (with element-size scaling), string literals (registered as global data), function calls (direct and indirect, including `__builtin_va_*` intrinsics), `sizeof`, type casts (int↔float, pointer casts), and pre/post increment/decrement. Function call lowering re-reads the current block after evaluating all arguments to correctly handle arguments that create new basic blocks (e.g., ternary expressions).
+Implements `lower_expr()` on `Lowerer`. Dispatches on every AST expression variant: constants, variables (with array-to-pointer decay), binary/unary operations (with separate int and float paths), assignments and compound assignments, pointer arithmetic (with element-size scaling), string literals (registered as global data), function calls (direct and indirect, including `__builtin_va_*` intrinsics), `sizeof`, type casts (int↔float, pointer casts), and pre/post increment/decrement. Function call lowering re-reads the current block after evaluating all arguments to correctly handle arguments that create new basic blocks (e.g., ternary expressions). Lvalue address calculation has been extracted to `lvalue.rs`.
 
-`lower_to_addr()` computes the memory address of an l-value, handling variables (alloca or global), array/pointer indexing via `GetElementPtr`, dereferences, and struct/union member access with byte-offset calculation.
+### `lvalue.rs`
+Implements `lower_to_addr()` on `Lowerer`. Computes the memory address of an l-value, handling variables (alloca or global), array/pointer indexing via `GetElementPtr`, dereferences, and struct/union member access with byte-offset calculation.
 
 ### `statements.rs`
 Implements `lower_stmt()` and `lower_block()` on `Lowerer`. Handles all statement-level control flow translation:
 
-- **Declarations** — creates `Alloca` slots, handles initializers including character-array string initialization.
+- **Declarations** — creates `Alloca` slots, handles initializers. Initializer list lowering has been extracted to `init_list.rs`.
 - **If/else** — creates then/else/merge blocks with `CondBr`.
 - **Loops** (`while`, `do-while`, `for`) — creates header/body/exit blocks with proper block sealing order to support back-edge phi construction; pushes loop context for `break`/`continue`.
 - **Switch** — collects case/default blocks, builds a linear comparison chain in the head block, supports fallthrough.
@@ -43,6 +44,12 @@ Implements `lower_stmt()` and `lower_block()` on `Lowerer`. Handles all statemen
 - **Inline assembly** — maps output/input operands to IR variables and emits `InlineAsm`.
 
 Dead code after terminators is handled by setting `current_block` to `None`.
+
+### `init_list.rs`
+Implements `lower_init_list_to_stores()` and `lower_struct_init_list()` on `Lowerer`. Handles both positional and designated initializers for arrays and structs, including nested initializer lists. For unions, ensures only the first field is initialized per C standard.
+
+### `type_utils.rs`
+Implements type size and alignment helper methods on `Lowerer`: `get_type_size()`, `get_alignment()`, `is_float_type()`, and `get_member_offset()`. Handles struct padding, `__attribute__((packed))`, and typedef resolution.
 
 ### `ssa.rs`
 Implements on-the-fly SSA construction using the **Braun et al.** algorithm. Functions on `Lowerer`:
@@ -58,8 +65,10 @@ The **mem2reg** optimization pass, which promotes scalar `Alloca`/`Load`/`Store`
 
 The pass replaces `Load`s with the reaching definition and removes the corresponding `Alloca` and `Store` instructions. Cross-block value flow is resolved by inserting phi nodes, with trivial phi elimination (all operands identical). Single-predecessor incoming values are cached to avoid redundant recursion on long chains. Newly created phi vars are annotated with the alloca's type in `func.var_types` so codegen can distinguish float from integer variables.
 
-When a phi is simplified away, a **comprehensive fixup pass** resolves all references to simplified phi vars across **every instruction type and terminator** — not just other phi nodes. The fixup resolves transitive simplification chains (e.g. `VarId(77)→76→75`) to their final target.
+When a phi is simplified away, a **comprehensive fixup pass** resolves all references to simplified phi vars across **every instruction type and terminator** — not just other phi nodes. The fixup resolves transitive simplification chains (e.g. `VarId(77)→76→75`) to their final target. Uninitialized reads default to zero (int or float as appropriate). SSA verification and phi removal have been extracted to `ssa_utils.rs`.
 
-Uninitialized reads default to zero (int or float as appropriate). A separate `remove_phis()` function later deconstructs phi nodes into `Copy` instructions placed at the end of predecessor blocks, preparing the IR for register allocation.
+### `ssa_utils.rs`
+Standalone SSA utility functions:
 
-The module also exports a `verify_ssa()` function that checks every used `VarId` is defined by a parameter or instruction dest. This runs as a `debug_assert!` after every mem2reg pass, catching undefined-variable bugs before they become runtime segfaults in codegen.
+- **`verify_ssa(func)`** — validates that every used `VarId` is defined by a parameter or instruction dest. Runs as a `debug_assert!` after every mem2reg pass, catching undefined-variable bugs before they become runtime segfaults in codegen.
+- **`remove_phis(func)`** — deconstructs phi nodes into `Copy` instructions placed at the end of predecessor blocks, preparing the IR for register allocation.

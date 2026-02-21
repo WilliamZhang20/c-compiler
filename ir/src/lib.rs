@@ -3,17 +3,21 @@
 
 mod types;
 mod lowerer;
+mod type_utils;
 mod ssa;
 mod expressions;
+mod lvalue;
 mod statements;
+mod init_list;
 mod mem2reg;
+mod ssa_utils;
 
 // Public exports
 pub use types::{VarId, BlockId, Operand, Instruction, Terminator, BasicBlock, Function, IRProgram};
 pub use lowerer::Lowerer;
 pub use mem2reg::mem2reg;
-pub use mem2reg::remove_phis;
-pub use mem2reg::verify_ssa;
+pub use ssa_utils::remove_phis;
+pub use ssa_utils::verify_ssa;
 
 #[cfg(test)]
 mod tests {

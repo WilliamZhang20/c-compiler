@@ -8,6 +8,10 @@ mod float_ops;
 mod memory_ops;
 mod call_ops;
 mod calling_convention;
+mod control_flow;
+mod inline_asm;
+mod liveness;
+mod globals;
 
 use model::Type;
 use ir::IRProgram;
@@ -118,18 +122,36 @@ impl Codegen {
                  output.push_str(&format!(".align {}\n", alignment));
                  
                  if let Some(init) = &g.init {
-                     // Extract string from Expr
-                     let init_str = match init {
-                         model::Expr::Constant(c) => c.to_string(),
-                         model::Expr::FloatConstant(f) => format!("{:.15}", f),
-                         _ => "0".to_string(),
-                     };
-                     
-                     // Initialized - use .quad for all for simplicity
-                     match &g.r#type {
-                         Type::Char | Type::UnsignedChar => output.push_str(&format!("{}: .byte {}\n", g.name, init_str)),
-                         Type::Int | Type::UnsignedInt => output.push_str(&format!("{}: .long {}\n", g.name, init_str)),
-                         _ => output.push_str(&format!("{}: .quad {}\n", g.name, init_str)),
+                     match init {
+                         model::Expr::InitList(items) => {
+                             // Emit label, then each element
+                             output.push_str(&format!("{}:\n", g.name));
+                             self.emit_init_list_data(&mut output, &g.r#type, items);
+                         }
+                         model::Expr::StringLiteral(s) => {
+                             // Global string array: emit as .asciz
+                             let escaped = s
+                                 .replace("\\", "\\\\")
+                                 .replace("\n", "\\n")
+                                 .replace("\r", "\\r")
+                                 .replace("\t", "\\t")
+                                 .replace("\"", "\\\"")
+                                 .replace("\0", "\\0");
+                             output.push_str(&format!("{}: .asciz \"{}\"\n", g.name, escaped));
+                         }
+                         _ => {
+                             // Scalar init
+                             let init_str = match init {
+                                 model::Expr::Constant(c) => c.to_string(),
+                                 model::Expr::FloatConstant(f) => format!("{:.15}", f),
+                                 _ => "0".to_string(),
+                             };
+                             match &g.r#type {
+                                 Type::Char | Type::UnsignedChar => output.push_str(&format!("{}: .byte {}\n", g.name, init_str)),
+                                 Type::Int | Type::UnsignedInt => output.push_str(&format!("{}: .long {}\n", g.name, init_str)),
+                                 _ => output.push_str(&format!("{}: .quad {}\n", g.name, init_str)),
+                             }
+                         }
                      }
                  } else {
                      // Uninitialized
@@ -206,4 +228,5 @@ impl Codegen {
         
         output
     }
+
 }

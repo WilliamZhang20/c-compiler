@@ -4,6 +4,7 @@
 
 - Auto-introduce obvious missing headers
 - Examine/compare usage of static & dynamic linkage
+- Complex numbers
 
 ## Future Feature Roadmap
 
@@ -22,6 +23,8 @@ To fully compile big projects like the Linux Kernel, the following features are 
 
 ### Section 3: Type System Edge Cases
 - Type qualifiers on function parameters
+- Comma Operator
+- static/external storage classes
 - Complex array declarators
 - Function pointer syntax edge cases
 

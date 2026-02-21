@@ -449,10 +449,23 @@ impl<'a> DeclarationParser for Parser<'a> {
             }
 
             let init = if self.match_token(|t| matches!(t, Token::Equal)) {
-                Some(self.parse_expr()?)
+                if self.check(|t| matches!(t, Token::OpenBrace)) {
+                    Some(self.parse_init_list()?)
+                } else {
+                    Some(self.parse_expr()?)
+                }
             } else {
                 None
             };
+
+            // Infer array size from initializer
+            if let model::Type::Array(inner, 0) = &var_type {
+                if let Some(model::Expr::StringLiteral(s)) = &init {
+                    var_type = model::Type::Array(inner.clone(), s.len() + 1);
+                } else if let Some(model::Expr::InitList(items)) = &init {
+                    var_type = model::Type::Array(inner.clone(), items.len());
+                }
+            }
             
             globals.push(GlobalVar {
                 r#type: var_type,

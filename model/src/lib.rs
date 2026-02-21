@@ -299,6 +299,26 @@ pub enum Expr {
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
+    /// Brace-enclosed initializer list: `{1, 2, 3}` or `{.x = 1, [0] = 2}`
+    InitList(Vec<InitItem>),
+}
+
+/// A single item inside a brace-enclosed initializer list.
+#[derive(Debug, PartialEq, Clone)]
+pub struct InitItem {
+    /// `None` for positional, `Some(...)` for designated (`.field` or `[index]`).
+    pub designator: Option<Designator>,
+    /// The value expression (may itself be an `InitList` for nested structs/arrays).
+    pub value: Expr,
+}
+
+/// Designator in a designated initializer.
+#[derive(Debug, PartialEq, Clone)]
+pub enum Designator {
+    /// `.field_name`
+    Field(String),
+    /// `[constant_index]`
+    Index(i64),
 }
 
 #[derive(Debug, PartialEq, Clone)]

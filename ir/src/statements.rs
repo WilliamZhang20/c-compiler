@@ -103,8 +103,55 @@ impl Lowerer {
                                     });
                                 }
                             }
+                            AstExpr::InitList(items) => {
+                                let elem_type = if let Type::Array(inner, _) = r#type {
+                                    inner.as_ref().clone()
+                                } else {
+                                    unreachable!()
+                                };
+                                let elem_size = self.get_type_size(&elem_type);
+                                self.lower_init_list_to_stores(var, items, &elem_type, elem_size, bid)?;
+                            }
                             _ => {
-                                // TODO: Handle other array initializers (e.g., {1, 2, 3})
+                                // Other init expressions for arrays not supported
+                            }
+                        }
+                    }
+                } else if matches!(r#type, Type::Struct(..) | Type::Union(..)) {
+                    // Struct/Union declaration
+                    let alloca_var = self.new_var();
+                    self.blocks[bid.0].instructions.push(Instruction::Alloca {
+                        dest: alloca_var,
+                        r#type: r#type.clone(),
+                    });
+                    self.write_variable(name, bid, alloca_var);
+                    self.variable_allocas.insert(name.clone(), alloca_var);
+
+                    if let Some(init_expr) = init {
+                        match init_expr {
+                            AstExpr::InitList(items) => {
+                                self.lower_struct_init_list(alloca_var, r#type, items, bid)?;
+                            }
+                            _ => {
+                                // Scalar init for struct (e.g., copy from another struct)
+                                let val = self.lower_expr(init_expr)?;
+                                self.blocks[bid.0].instructions.push(Instruction::Store {
+                                    addr: Operand::Var(alloca_var),
+                                    src: val.clone(),
+                                    value_type: r#type.clone(),
+                                });
+                                let var = match val {
+                                    Operand::Var(v) => v,
+                                    _ => {
+                                        let v = self.new_var();
+                                        self.blocks[bid.0].instructions.push(Instruction::Copy {
+                                            dest: v,
+                                            src: val,
+                                        });
+                                        v
+                                    }
+                                };
+                                self.write_variable(name, bid, var);
                             }
                         }
                     }
