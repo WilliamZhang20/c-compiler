@@ -72,13 +72,13 @@ pub fn copy_propagation(func: &mut Function) {
         
         for inst in &mut block.instructions {
             match inst {
-                Instruction::Binary { left, right, .. } => {
+                Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
                     replace_operand(left, &copies);
                     replace_operand(right, &copies);
                     collect_used_var(left, &mut used_vars);
                     collect_used_var(right, &mut used_vars);
                 }
-                Instruction::Unary { src, .. } => {
+                Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
                     replace_operand(src, &copies);
                     collect_used_var(src, &mut used_vars);
                 }

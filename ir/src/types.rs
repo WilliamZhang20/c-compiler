@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use model::{BinaryOp, UnaryOp, Type, GlobalVar as AstGlobalVar};
 
 /// Variable identifier in IR
@@ -143,6 +144,8 @@ pub struct Function {
     pub params: Vec<(Type, VarId)>,
     pub blocks: Vec<BasicBlock>,
     pub entry_block: BlockId,
+    /// Type annotations for IR variables (used to distinguish float/int in codegen)
+    pub var_types: HashMap<VarId, Type>,
 }
 
 /// Complete IR program

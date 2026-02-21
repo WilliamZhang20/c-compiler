@@ -61,6 +61,11 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     pub fn gen_function(mut self, func: &IrFunction) -> Vec<X86Instr> {
+        // Seed var_types from IR-level type annotations (e.g. mem2reg phi vars)
+        for (var, ty) in &func.var_types {
+            self.var_types.insert(*var, ty.clone());
+        }
+
         // Check if function is variadic (uses va_start)
         let uses_va_start = func.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, IrInstruction::VaStart {..})));
 

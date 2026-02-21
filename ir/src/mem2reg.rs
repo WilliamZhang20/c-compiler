@@ -6,6 +6,123 @@ use model::Type;
 pub fn mem2reg(func: &mut Function) {
     let mut pass = Mem2RegPass::new(func);
     pass.run();
+    // Verify SSA invariants after promotion.  Catches undefined-VarId bugs
+    // (like the transitive-simplified-phi issue) before they become runtime
+    // segfaults downstream in codegen/regalloc.
+    debug_assert!(verify_ssa(func).is_ok(), "SSA verification failed after mem2reg for function '{}': {}",
+        func.name, verify_ssa(func).unwrap_err());
+}
+
+/// Verify that every VarId used as an operand in the function is defined
+/// exactly once (by an instruction dest, phi, or function parameter).
+/// Returns Ok(()) if valid, or Err with a description of the first violation.
+pub fn verify_ssa(func: &Function) -> Result<(), String> {
+    let mut defs: HashSet<VarId> = HashSet::new();
+
+    // Parameters define their VarIds
+    for (_, var) in &func.params {
+        defs.insert(*var);
+    }
+
+    // Collect all VarIds defined by instructions
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            match instr {
+                Instruction::Binary { dest, .. } | Instruction::FloatBinary { dest, .. } |
+                Instruction::Unary { dest, .. } | Instruction::FloatUnary { dest, .. } |
+                Instruction::Phi { dest, .. } | Instruction::Copy { dest, .. } |
+                Instruction::Cast { dest, .. } | Instruction::Alloca { dest, .. } |
+                Instruction::Load { dest, .. } | Instruction::GetElementPtr { dest, .. } |
+                Instruction::VaArg { dest, .. } => { defs.insert(*dest); }
+                Instruction::Call { dest, .. } | Instruction::IndirectCall { dest, .. } => {
+                    if let Some(d) = dest { defs.insert(*d); }
+                }
+                Instruction::InlineAsm { outputs, .. } => {
+                    for o in outputs { defs.insert(*o); }
+                }
+                Instruction::Store { .. } | Instruction::VaStart { .. } |
+                Instruction::VaEnd { .. } | Instruction::VaCopy { .. } => {}
+            }
+        }
+    }
+
+    // Now check that every used VarId is in the defs set
+    let check_operand = |op: &Operand, defs: &HashSet<VarId>, context: &str| -> Result<(), String> {
+        if let Operand::Var(v) = op {
+            if !defs.contains(v) {
+                return Err(format!("VarId({}) used but never defined ({})", v.0, context));
+            }
+        }
+        Ok(())
+    };
+
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            let ctx = format!("block {:?}", block.id);
+            match instr {
+                Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
+                    check_operand(left, &defs, &ctx)?;
+                    check_operand(right, &defs, &ctx)?;
+                }
+                Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
+                    check_operand(src, &defs, &ctx)?;
+                }
+                Instruction::Copy { src, .. } | Instruction::Cast { src, .. } => {
+                    check_operand(src, &defs, &ctx)?;
+                }
+                Instruction::Load { addr, .. } => {
+                    check_operand(addr, &defs, &ctx)?;
+                }
+                Instruction::Store { addr, src, .. } => {
+                    check_operand(addr, &defs, &ctx)?;
+                    check_operand(src, &defs, &ctx)?;
+                }
+                Instruction::GetElementPtr { base, index, .. } => {
+                    check_operand(base, &defs, &ctx)?;
+                    check_operand(index, &defs, &ctx)?;
+                }
+                Instruction::Call { args, .. } => {
+                    for arg in args { check_operand(arg, &defs, &ctx)?; }
+                }
+                Instruction::IndirectCall { func_ptr, args, .. } => {
+                    check_operand(func_ptr, &defs, &ctx)?;
+                    for arg in args { check_operand(arg, &defs, &ctx)?; }
+                }
+                Instruction::Phi { preds, .. } => {
+                    for (_, src) in preds {
+                        if !defs.contains(src) {
+                            return Err(format!("VarId({}) used in phi but never defined ({})", src.0, ctx));
+                        }
+                    }
+                }
+                Instruction::VaStart { list, .. } | Instruction::VaEnd { list } => {
+                    check_operand(list, &defs, &ctx)?;
+                }
+                Instruction::VaCopy { dest, src } => {
+                    check_operand(dest, &defs, &ctx)?;
+                    check_operand(src, &defs, &ctx)?;
+                }
+                Instruction::VaArg { list, .. } => {
+                    check_operand(list, &defs, &ctx)?;
+                }
+                Instruction::InlineAsm { inputs, .. } => {
+                    for input in inputs { check_operand(input, &defs, &ctx)?; }
+                }
+                Instruction::Alloca { .. } => {}
+            }
+        }
+        // Check terminator operands
+        match &block.terminator {
+            Terminator::CondBr { cond, .. } => {
+                check_operand(cond, &defs, &format!("terminator of block {:?}", block.id))?;
+            }
+            Terminator::Ret(Some(val)) => {
+                check_operand(val, &defs, &format!("terminator of block {:?}", block.id))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 struct Mem2RegPass<'a> {
@@ -223,13 +340,19 @@ impl<'a> Mem2RegPass<'a> {
         }
         
         if preds.len() == 1 {
-            // Optimization: bypass cache to avoid recursion overhead if possible
-            // but for cycles/correctness in general graph, let's just recurse
-            return self.get_outgoing_value(preds[0], var_id);
+            // Single predecessor: recurse and cache to avoid redundant traversals
+            // on repeated lookups over long single-pred chains.
+            let val = self.get_outgoing_value(preds[0], var_id);
+            self.incoming_cache.insert((block_id, var_id), val);
+            return val;
         }
 
         // Multiple preds -> Phi
         let phi_var = self.new_var();
+        // Propagate the alloca's type to the phi_var so codegen knows float vs int
+        if let Some(ty) = self.alloca_types.get(&var_id) {
+            self.func.var_types.insert(phi_var, ty.clone());
+        }
         // Break usage cycles
         self.incoming_cache.insert((block_id, var_id), phi_var);
         
@@ -424,6 +547,7 @@ impl<'a> Mem2RegPass<'a> {
         matches!(ty, Type::Int | Type::UnsignedInt | Type::Char | Type::UnsignedChar |
             Type::Short | Type::UnsignedShort | Type::Long | Type::UnsignedLong |
             Type::LongLong | Type::UnsignedLongLong | 
+            Type::Float | Type::Double |
             Type::Pointer(_))
     }
     
@@ -452,8 +576,11 @@ impl<'a> Mem2RegPass<'a> {
                 Self::operand_uses_var(addr, var_id) || Self::operand_uses_var(src, var_id),
             Instruction::GetElementPtr { base, index, .. } => 
                 Self::operand_uses_var(base, var_id) || Self::operand_uses_var(index, var_id),
-            Instruction::Call { args, .. } | Instruction::IndirectCall { args, .. } => 
+            Instruction::Call { args, .. } =>
                 args.iter().any(|arg| Self::operand_uses_var(arg, var_id)),
+            Instruction::IndirectCall { func_ptr, args, .. } => 
+                Self::operand_uses_var(func_ptr, var_id)
+                || args.iter().any(|arg| Self::operand_uses_var(arg, var_id)),
             Instruction::VaStart { list, .. } => 
                 Self::operand_uses_var(list, var_id),
             Instruction::VaEnd { list } => Self::operand_uses_var(list, var_id),

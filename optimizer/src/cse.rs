@@ -110,11 +110,11 @@ pub fn common_subexpression_elimination(func: &mut Function) {
 
 fn replace_in_instruction(inst: &mut Instruction, replacements: &HashMap<VarId, VarId>) {
     match inst {
-        Instruction::Binary { left, right, .. } => {
+        Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
             replace_in_operand(left, replacements);
             replace_in_operand(right, replacements);
         }
-        Instruction::Unary { src, .. } => {
+        Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
             replace_in_operand(src, replacements);
         }
         Instruction::Store { addr, src, .. } => {

@@ -13,6 +13,7 @@ pub use types::{VarId, BlockId, Operand, Instruction, Terminator, BasicBlock, Fu
 pub use lowerer::Lowerer;
 pub use mem2reg::mem2reg;
 pub use mem2reg::remove_phis;
+pub use mem2reg::verify_ssa;
 
 #[cfg(test)]
 mod tests {

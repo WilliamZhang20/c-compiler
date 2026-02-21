@@ -518,6 +518,7 @@ impl Lowerer {
             params,
             blocks: self.blocks.clone(),
             entry_block: entry_id,
+            var_types: self.var_types.clone(),
         })
     }
 
