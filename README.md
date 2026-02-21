@@ -15,7 +15,7 @@ That makes the project quite competitive with [Anthropic's](https://www.anthropi
 
 ### How to Run
 
-The most exciting part. The compiler now works on both **Windows** and **Linux**! On Windows, run `windows_release.exe` and point to any C file. On Linux, build and run `./linux_release`. The compiler successfully compiles and runs complex programs including the classic `donut.c` spinning donut animation, matching GCC's output exactly. The next milestone is expanding language coverage and using the compiler on larger real-world projects.
+The compiler now works on both **Windows** and **Linux**! On Windows, run `windows_release.exe` and point to any C file. On Linux, build and run `./linux_release`. The compiler successfully compiles and runs complex programs including the classic `donut.c` spinning donut animation, matching GCC's output exactly. The next milestone is expanding language coverage and using the compiler on larger real-world projects.
 
 To build a new release from the existing files, run the following:
 ```
