@@ -31,10 +31,10 @@ Module root and pipeline driver. Declares submodules and invokes each pass in th
 Uses helpers from `utils.rs` for power-of-two detection and log₂ computation.
 
 ### `propagation.rs`
-**Copy propagation.** Collects all `Copy` instructions into a map, transitively resolves chains (`x = y`, `y = z` → `x = z`) with cycle detection, then rewrites all operand references across instructions and terminators. Dead copies whose destinations are no longer used are removed.
+**Copy propagation.** Collects all `Copy` instructions into a map, transitively resolves chains (`x = y`, `y = z` → `x = z`) with cycle detection, then rewrites all operand references across instructions and terminators — including `FloatBinary` and `FloatUnary` variants. Dead copies whose destinations are no longer used are removed.
 
 ### `cse.rs`
-**Common subexpression elimination.** Within each basic block, hashes `Binary` instructions by a canonical `(op, left, right)` key (with operand reordering for commutative ops) and replaces duplicates with a `Copy` of the first result. The expression map is reset at block boundaries to avoid invalid cross-block reuse.
+**Common subexpression elimination.** Within each basic block, hashes `Binary` instructions by a canonical `(op, left, right)` key (with operand reordering for commutative ops) and replaces duplicates with a `Copy` of the first result. Operand replacement within `FloatBinary` and `FloatUnary` instructions is also handled. The expression map is reset at block boundaries to avoid invalid cross-block reuse.
 
 ### `folding.rs`
 **Constant folding and propagation.** Runs a fixpoint loop (up to 10 iterations) interleaved with DCE. Maintains a per-block constant map; when both operands of a `Binary` resolve to known constants the result is evaluated at compile time. `Copy` of a constant propagates the value. Conditional branches (`CondBr`) with constant conditions are folded into unconditional branches. Covers all integer binary and unary operators (except `Assign` and logical short-circuit ops).

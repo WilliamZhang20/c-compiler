@@ -9,7 +9,7 @@ The lowering pipeline is: AST → `Lowerer` → `IRProgram` (with SSA via on-the
 ## Source Files
 
 ### `lib.rs`
-Module root. Re-exports the key IR types (`Instruction`, `Terminator`, `BasicBlock`, `Function`, `IRProgram`, `VarId`, `BlockId`, `Operand`) and the `Lowerer`, `mem2reg`, and `remove_phis` entry points. Contains integration tests that lower small C programs and verify the resulting instruction shapes.
+Module root. Re-exports the key IR types (`Instruction`, `Terminator`, `BasicBlock`, `Function`, `IRProgram`, `VarId`, `BlockId`, `Operand`) and the `Lowerer`, `mem2reg`, `remove_phis`, and `verify_ssa` entry points. Contains integration tests that lower small C programs and verify the resulting instruction shapes.
 
 ### `types.rs`
 Defines every IR data structure:
@@ -19,7 +19,7 @@ Defines every IR data structure:
 - **`Instruction`** — 16-variant enum covering `Binary`, `FloatBinary`, `Unary`, `FloatUnary`, `Copy`, `Cast`, `Phi`, `Alloca`, `Load`, `Store`, `GetElementPtr`, `Call`, `IndirectCall`, `InlineAsm`, and variadic intrinsics (`VaStart`, `VaEnd`, `VaCopy`, `VaArg`).
 - **`Terminator`** — `Br`, `CondBr`, `Ret`, `Unreachable`.
 - **`BasicBlock`** — holds its `id`, instruction list, terminator, and an `is_label_target` flag for goto destinations.
-- **`Function`** / **`IRProgram`** — top-level containers. `IRProgram` also stores global strings, global variables, and struct/union definitions.
+- **`Function`** / **`IRProgram`** — top-level containers. `Function` carries a `var_types: HashMap<VarId, Type>` map so that type annotations (e.g. float vs int) survive across optimization passes and reach codegen. `IRProgram` also stores global strings, global variables, and struct/union definitions.
 
 ### `lowerer.rs`
 The `Lowerer` struct and its `lower_program()` / `lower_function()` methods. This is the main AST → IR translation engine. It maintains extensive state: SSA bookkeeping (variable definitions, incomplete phis, sealed blocks), symbol tables (locals, globals, structs, unions, enums, typedefs), control-flow context (loop break/continue targets, switch case lists, goto labels with forward-reference resolution), and type-size caches.
@@ -54,6 +54,12 @@ Implements on-the-fly SSA construction using the **Braun et al.** algorithm. Fun
 Phi nodes are only inserted when a variable is live across multiple predecessors, avoiding unnecessary phis by construction.
 
 ### `mem2reg.rs`
-The **mem2reg** optimization pass, which promotes scalar `Alloca`/`Load`/`Store` patterns to SSA registers. An alloca is promotable if it is only used as the address operand of `Load` and `Store` instructions (its address never escapes).
+The **mem2reg** optimization pass, which promotes scalar `Alloca`/`Load`/`Store` patterns to SSA registers. An alloca is promotable if it is a scalar type (integers, floats, or pointers) and is only used as the address operand of `Load` and `Store` instructions (its address never escapes). Address-taken analysis checks all instruction operands including `IndirectCall` function pointers.
 
-The pass replaces `Load`s with the reaching definition and removes the corresponding `Alloca` and `Store` instructions. Cross-block value flow is resolved by inserting phi nodes, with trivial phi elimination (all operands identical). When a phi is simplified away, a **fixup pass** resolves any dangling references in other phi instructions that may have cached the now-removed phi variable during recursive SSA construction. Uninitialized reads default to zero (int or float as appropriate). A separate `remove_phis()` function later deconstructs phi nodes into `Copy` instructions placed at the end of predecessor blocks, preparing the IR for register allocation.
+The pass replaces `Load`s with the reaching definition and removes the corresponding `Alloca` and `Store` instructions. Cross-block value flow is resolved by inserting phi nodes, with trivial phi elimination (all operands identical). Single-predecessor incoming values are cached to avoid redundant recursion on long chains. Newly created phi vars are annotated with the alloca's type in `func.var_types` so codegen can distinguish float from integer variables.
+
+When a phi is simplified away, a **comprehensive fixup pass** resolves all references to simplified phi vars across **every instruction type and terminator** — not just other phi nodes. The fixup resolves transitive simplification chains (e.g. `VarId(77)→76→75`) to their final target.
+
+Uninitialized reads default to zero (int or float as appropriate). A separate `remove_phis()` function later deconstructs phi nodes into `Copy` instructions placed at the end of predecessor blocks, preparing the IR for register allocation.
+
+The module also exports a `verify_ssa()` function that checks every used `VarId` is defined by a parameter or instruction dest. This runs as a `debug_assert!` after every mem2reg pass, catching undefined-variable bugs before they become runtime segfaults in codegen.
