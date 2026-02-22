@@ -30,10 +30,13 @@ impl<'a> FunctionGenerator<'a> {
                               if matches!(d_op, X86Operand::FloatMem(..)) {
                                   self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                                   self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                              } else if matches!(d_op, X86Operand::DoubleMem(..)) {
+                                  self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                                  self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                               } else {
                                   // Check if we can emit a direct move (no intermediate register needed)
-                                  let src_is_mem = matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
-                                  let dst_is_mem = matches!(d_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                                  let src_is_mem = matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
+                                  let dst_is_mem = matches!(d_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
                                   
                                   if !src_is_mem || !dst_is_mem {
                                       // At least one is a register or immediate — direct move is valid
@@ -85,9 +88,14 @@ impl<'a> FunctionGenerator<'a> {
             IrTerminator::Ret(op) => {
                 if let Some(o) = op {
                     let is_float_return = matches!(func.return_type, Type::Float | Type::Double);
+                    let is_double_return = matches!(func.return_type, Type::Double);
                     if is_float_return {
                         let label = self.operand_to_op(o);
-                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
+                        if is_double_return {
+                            self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), label));
+                        } else {
+                            self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
+                        }
                     } else {
                         let val = self.operand_to_op(o);
                         // Handle 32-bit vs 64-bit return values

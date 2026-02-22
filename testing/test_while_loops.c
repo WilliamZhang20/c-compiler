@@ -1,5 +1,5 @@
 // EXPECT: 42
-// Test while loops with various patterns
+// Test while loops with various patterns including modulo and division
 int main() {
     // Basic while
     int sum = 0;
@@ -23,17 +23,20 @@ int main() {
     }
     if (product != 12) return 2;
 
-    // While with complex condition (&&)
-    int x = 64;
+    // While with modulo and division (Collatz-style)
+    int x = 84;
     int steps = 0;
-    while (x > 1 && steps < 20) {
-        x = x - 1;
+    while (x > 1) {
+        if (x % 2 == 0) {
+            x = x / 2;
+        } else {
+            x = x - 1;
+        }
         steps++;
     }
-    // 64->63->...->1 = 63 steps, but steps < 20 stops at 20
-    // x = 64 - 20 = 44
-    if (x != 44) return 3;
-    if (steps != 20) return 30;
+    // 84 -> 42 -> 21 -> 20 -> 10 -> 5 -> 4 -> 2 -> 1 (8 steps)
+    if (x != 1) return 3;
+    if (steps != 8) return 30;
 
     // While with early return
     int arr[5];

@@ -336,6 +336,10 @@ impl Lowerer {
             AstExpr::Variable(name) if self.is_function(name) => {
                 // Function names evaluate to their address (function pointer)
                 let dest = self.new_var();
+                // Record the function pointer type so codegen knows return type
+                if let Some(ftype) = self.function_types.get(name).cloned() {
+                    self.var_types.insert(dest, ftype);
+                }
                 self.add_instruction(Instruction::Copy {
                     dest,
                     src: Operand::Global(name.clone()),

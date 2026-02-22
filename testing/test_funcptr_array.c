@@ -1,6 +1,5 @@
 // EXPECT: 42
-// Test array of function pointers and dispatch tables
-typedef int (*binop)(int, int);
+// Test array of function pointers using raw syntax and ternary selection
 
 int add(int a, int b) { return a + b; }
 int sub(int a, int b) { return a - b; }
@@ -8,8 +7,8 @@ int mul(int a, int b) { return a * b; }
 int divide(int a, int b) { return a / b; }
 
 int main() {
-    // Array of function pointers via typedef
-    binop ops[4];
+    // Array of function pointers via raw syntax (no typedef)
+    int (*ops[4])(int, int);
     ops[0] = add;
     ops[1] = sub;
     ops[2] = mul;
@@ -37,15 +36,15 @@ int main() {
     if (results[2] != 80) return 7;
     if (results[3] != 5) return 8;
 
-    // Conditional function pointer selection
-    binop chosen;
-    if (r0 > r1) {
-        chosen = add;
-    } else {
-        chosen = sub;
-    }
-    int result = chosen(20, 22); // 42
+    // Ternary function pointer selection
+    int (*chosen)(int, int) = (r0 > r1) ? add : sub;
+    int result = chosen(20, 22); // add(20,22) = 42
     if (result != 42) return 9;
+
+    // Ternary with else path
+    int (*chosen2)(int, int) = (r0 < r1) ? add : mul;
+    int result2 = chosen2(6, 7); // mul(6,7) = 42
+    if (result2 != 42) return 10;
 
     return result; // 42
 }

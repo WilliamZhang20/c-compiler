@@ -27,7 +27,7 @@ pub struct Codegen {
     // Shared state
     structs: HashMap<String, model::StructDef>,
     unions: HashMap<String, model::UnionDef>,
-    float_constants: HashMap<String, f64>,
+    float_constants: HashMap<String, (f64, bool)>,
     next_float_const: usize,
     func_return_types: HashMap<String, Type>,
     enable_regalloc: bool,
@@ -250,11 +250,15 @@ impl Codegen {
             output.push_str(".align 16\n");
             let mut sorted_consts: Vec<_> = self.float_constants.iter().collect();
             sorted_consts.sort_by_key(|(label, _)| label.as_str());
-            for (label, value) in sorted_consts {
-                // Convert f64 to f32 for single-precision floats
-                let f32_value = *value as f32;
-                let bits = f32_value.to_bits();
-                output.push_str(&format!("{}: .long 0x{:08x}\n", label, bits));
+            for (label, (value, is_double)) in sorted_consts {
+                if *is_double {
+                    let bits = value.to_bits();
+                    output.push_str(&format!("{}: .quad 0x{:016x}\n", label, bits));
+                } else {
+                    let f32_value = *value as f32;
+                    let bits = f32_value.to_bits();
+                    output.push_str(&format!("{}: .long 0x{:08x}\n", label, bits));
+                }
             }
         }
         

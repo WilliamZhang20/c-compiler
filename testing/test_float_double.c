@@ -1,5 +1,5 @@
 // EXPECT: 42
-// Test float arithmetic, comparisons, casting, and edge cases
+// Test float AND double arithmetic, comparisons, casting, and mixed operations
 int main() {
     // Float addition
     float f1 = 1.5;
@@ -51,6 +51,57 @@ int main() {
     float fbig = (float)big;
     int back = (int)fbig;
     if (back != 100) return 13;
+
+    // === DOUBLE tests ===
+
+    // Double addition
+    double d1 = 1.5;
+    double d2 = 2.5;
+    double d3 = d1 + d2; // 4.0
+    if ((int)d3 != 4) return 14;
+
+    // Double subtraction
+    double d4 = 10.0;
+    double d5 = 3.5;
+    double d6 = d4 - d5; // 6.5
+    if ((int)d6 != 6) return 15;
+
+    // Double multiplication
+    double dm1 = 6.0;
+    double dm2 = 7.0;
+    double dprod = dm1 * dm2; // 42.0
+    if ((int)dprod != 42) return 16;
+
+    // Double division
+    double da = 10.0;
+    double db = 3.0;
+    double ddiv = da / db; // ~3.333
+    int didiv = (int)ddiv;
+    if (didiv != 3) return 17;
+
+    // Negative doubles
+    double dneg = -5.5;
+    int dineg = (int)dneg;
+    if (dineg != -5) return 18;
+
+    // Double comparisons
+    double dx = 1.0;
+    double dy = 2.0;
+    if (!(dx < dy)) return 19;
+    if (!(dy > dx)) return 20;
+    if (dx == dy) return 21;
+
+    // Int to double cast
+    int ibig = 100;
+    double dbig = (double)ibig;
+    int dback = (int)dbig;
+    if (dback != 100) return 22;
+
+    // Float-double mixed: float + double should promote to double
+    float fmix = 1.5;
+    double dmix = 2.5;
+    double mixed = fmix + dmix; // 4.0
+    if ((int)mixed != 4) return 23;
 
     return (int)prod; // 42
 }

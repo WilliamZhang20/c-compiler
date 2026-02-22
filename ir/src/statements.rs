@@ -155,7 +155,9 @@ impl Lowerer {
                             _ => {
                                 // Scalar init for struct (e.g., copy from another struct)
                                 let val = self.lower_expr(init_expr)?;
-                                self.blocks[bid.0].instructions.push(Instruction::Store {
+                                // Re-read current_block after lowering (ternary may change it)
+                                let cur_bid = self.current_block.ok_or("Declaration init outside of block")?;
+                                self.blocks[cur_bid.0].instructions.push(Instruction::Store {
                                     addr: Operand::Var(alloca_var),
                                     src: val.clone(),
                                     value_type: r#type.clone(),
@@ -164,14 +166,14 @@ impl Lowerer {
                                     Operand::Var(v) => v,
                                     _ => {
                                         let v = self.new_var();
-                                        self.blocks[bid.0].instructions.push(Instruction::Copy {
+                                        self.blocks[cur_bid.0].instructions.push(Instruction::Copy {
                                             dest: v,
                                             src: val,
                                         });
                                         v
                                     }
                                 };
-                                self.write_variable(name, bid, var);
+                                self.write_variable(name, cur_bid, var);
                             }
                         }
                     }
@@ -186,7 +188,10 @@ impl Lowerer {
 
                     if let Some(e) = init {
                         let val = self.lower_expr(e)?;
-                        self.blocks[bid.0].instructions.push(Instruction::Store {
+                        // Re-read current_block AFTER lowering init expr, since ternary
+                        // expressions create new blocks and change current_block.
+                        let cur_bid = self.current_block.ok_or("Declaration init outside of block")?;
+                        self.blocks[cur_bid.0].instructions.push(Instruction::Store {
                             addr: Operand::Var(alloca_var),
                             src: val.clone(),
                             value_type: r#type.clone(),
@@ -196,14 +201,14 @@ impl Lowerer {
                             Operand::Var(v) => v,
                             Operand::Constant(_) | Operand::FloatConstant(_) | Operand::Global(_) => {
                                 let v = self.new_var();
-                                self.blocks[bid.0].instructions.push(Instruction::Copy {
+                                self.blocks[cur_bid.0].instructions.push(Instruction::Copy {
                                     dest: v,
                                     src: val,
                                 });
                                 v
                             }
                         };
-                        self.write_variable(name, bid, var);
+                        self.write_variable(name, cur_bid, var);
                     }
                 }
             }

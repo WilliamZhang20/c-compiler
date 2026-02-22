@@ -281,8 +281,8 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
             if std::mem::discriminant(temp_reg) == std::mem::discriminant(temp_reg2) {
                 if !is_reg_used_after(instructions, i + 2, temp_reg) {
                     // Check if this would create a memory-to-memory move (illegal in x86)
-                    let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
-                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
+                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
                     
                     if !is_src_mem || !is_dest_mem {
                         // Safe to optimize: at least one operand is not memory
@@ -321,8 +321,8 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
                             // Found the target. Check reg is dead after j.
                             if !is_reg_used_after(instructions, j + 1, temp_reg) {
                                 // Check no mem-to-mem
-                                let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
-                                let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                                let is_src_mem = matches!(src, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
+                                let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
                                 if !is_src_mem || !is_dest_mem {
                                     instructions[j] = X86Instr::Mov(dest.clone(), src.clone());
                                     instructions.remove(i);
@@ -356,7 +356,7 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
             let can_forward = match &instructions[i + 1] {
                 X86Instr::Mov(dest, X86Operand::Reg(use_reg)) if same_physical_reg(&load_reg, use_reg) => {
                     // Don't create memory-to-memory
-                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                    let is_dest_mem = matches!(dest, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::DoubleMem(..) | X86Operand::GlobalMem(..) | X86Operand::GlobalQwordMem(..));
                     // For DWORD memory destinations, the immediate must fit in 32 bits
                     if is_dest_mem && matches!(dest, X86Operand::DwordMem(..)) {
                         imm_val >= i32::MIN as i64 && imm_val <= i32::MAX as i64
@@ -788,8 +788,14 @@ fn is_reg_live_from(
             X86Instr::Imul(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
-            X86Instr::Neg(op) | X86Instr::Not(op) | X86Instr::Idiv(op) => {
+            X86Instr::Neg(op) | X86Instr::Not(op) => {
                 if reads_reg(op, reg) { return true; }
+            }
+            X86Instr::Idiv(op) => {
+                // idiv reads rax, rdx, and the operand; writes rax (quotient) and rdx (remainder)
+                if reads_reg(op, reg) { return true; }
+                let reg_id = physical_reg_id(reg);
+                if reg_id == 0 || reg_id == 2 { return true; } // rax/rdx are both read and written
             }
             X86Instr::Set(_, _op) => {
                 // set writes only a byte register — partial write, continue
@@ -803,7 +809,7 @@ fn is_reg_live_from(
             X86Instr::Shl(dest, src) | X86Instr::Shr(dest, src) | X86Instr::Sar(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
-            X86Instr::Movss(dest, src) => {
+            X86Instr::Movss(dest, src) | X86Instr::Movsd(dest, src) => {
                 if reads_reg(src, reg) { return true; }
                 if reads_reg_direct(dest, reg) { return false; }
                 if uses_reg_as_base(dest, reg) { return true; }
@@ -811,7 +817,12 @@ fn is_reg_live_from(
             X86Instr::Addss(dest, src) | X86Instr::Subss(dest, src) |
             X86Instr::Mulss(dest, src) | X86Instr::Divss(dest, src) |
             X86Instr::Ucomiss(dest, src) | X86Instr::Cvtsi2ss(dest, src) |
-            X86Instr::Cvttss2si(dest, src) | X86Instr::Xorps(dest, src) => {
+            X86Instr::Cvttss2si(dest, src) | X86Instr::Xorps(dest, src) |
+            X86Instr::Addsd(dest, src) | X86Instr::Subsd(dest, src) |
+            X86Instr::Mulsd(dest, src) | X86Instr::Divsd(dest, src) |
+            X86Instr::Ucomisd(dest, src) | X86Instr::Cvtsi2sd(dest, src) |
+            X86Instr::Cvttsd2si(dest, src) | X86Instr::Xorpd(dest, src) |
+            X86Instr::Cvtss2sd(dest, src) | X86Instr::Cvtsd2ss(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
             // Packed SSE/AVX instructions
@@ -877,6 +888,10 @@ fn instr_touches_reg(inst: &X86Instr, reg: &X86Reg) -> bool {
         X86Instr::Movss(d, s) | X86Instr::Addss(d, s) | X86Instr::Subss(d, s) |
         X86Instr::Mulss(d, s) | X86Instr::Divss(d, s) | X86Instr::Ucomiss(d, s) |
         X86Instr::Cvtsi2ss(d, s) | X86Instr::Cvttss2si(d, s) | X86Instr::Xorps(d, s) |
+        X86Instr::Movsd(d, s) | X86Instr::Addsd(d, s) | X86Instr::Subsd(d, s) |
+        X86Instr::Mulsd(d, s) | X86Instr::Divsd(d, s) | X86Instr::Ucomisd(d, s) |
+        X86Instr::Cvtsi2sd(d, s) | X86Instr::Cvttsd2si(d, s) | X86Instr::Xorpd(d, s) |
+        X86Instr::Cvtss2sd(d, s) | X86Instr::Cvtsd2ss(d, s) |
         X86Instr::Movaps(d, s) | X86Instr::Movups(d, s) |
         X86Instr::Addps(d, s) | X86Instr::Subps(d, s) |
         X86Instr::Mulps(d, s) | X86Instr::Divps(d, s) |
@@ -895,7 +910,11 @@ fn instr_touches_reg(inst: &X86Instr, reg: &X86Reg) -> bool {
         X86Instr::Vpxor(d, s1, s2) => {
             reads_reg(d, reg) || reads_reg(s1, reg) || reads_reg(s2, reg)
         }
-        X86Instr::Neg(o) | X86Instr::Not(o) | X86Instr::Idiv(o) => reads_reg(o, reg),
+        X86Instr::Neg(o) | X86Instr::Not(o) => reads_reg(o, reg),
+        X86Instr::Idiv(o) => {
+            // idiv implicitly reads rax and rdx:rax
+            reads_reg(o, reg) || physical_reg_id(reg) == 0 || physical_reg_id(reg) == 2
+        }
         X86Instr::Set(_, o) => reads_reg(o, reg),
         X86Instr::Push(r) | X86Instr::Pop(r) => same_physical_reg(r, reg),
         X86Instr::CallIndirect(o) => reads_reg(o, reg),
@@ -937,8 +956,14 @@ fn is_reg_read_in_block(instructions: &[X86Instr], start: usize, reg: &X86Reg) -
             X86Instr::Pop(r) => {
                 if same_physical_reg(r, reg) { return false; }
             }
-            X86Instr::Neg(op) | X86Instr::Not(op) | X86Instr::Idiv(op) => {
+            X86Instr::Neg(op) | X86Instr::Not(op) => {
                 if reads_reg(op, reg) { return true; }
+            }
+            X86Instr::Idiv(op) => {
+                // idiv reads rax, rdx, and the operand; writes rax and rdx
+                if reads_reg(op, reg) { return true; }
+                let reg_id = physical_reg_id(reg);
+                if reg_id == 0 || reg_id == 2 { return true; }
             }
             X86Instr::Shl(dest, src) | X86Instr::Shr(dest, src) | X86Instr::Sar(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
@@ -947,7 +972,13 @@ fn is_reg_read_in_block(instructions: &[X86Instr], start: usize, reg: &X86Reg) -
             X86Instr::Subss(dest, src) | X86Instr::Mulss(dest, src) |
             X86Instr::Divss(dest, src) | X86Instr::Ucomiss(dest, src) |
             X86Instr::Cvtsi2ss(dest, src) | X86Instr::Cvttss2si(dest, src) |
-            X86Instr::Xorps(dest, src) => {
+            X86Instr::Xorps(dest, src) |
+            X86Instr::Movsd(dest, src) | X86Instr::Addsd(dest, src) |
+            X86Instr::Subsd(dest, src) | X86Instr::Mulsd(dest, src) |
+            X86Instr::Divsd(dest, src) | X86Instr::Ucomisd(dest, src) |
+            X86Instr::Cvtsi2sd(dest, src) | X86Instr::Cvttsd2si(dest, src) |
+            X86Instr::Xorpd(dest, src) |
+            X86Instr::Cvtss2sd(dest, src) | X86Instr::Cvtsd2ss(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
             // Packed SSE/AVX
@@ -983,7 +1014,7 @@ fn reads_reg(operand: &X86Operand, reg: &X86Reg) -> bool {
     match operand {
         X86Operand::Reg(r) => same_physical_reg(r, reg),
         X86Operand::Mem(r, _) | X86Operand::DwordMem(r, _) | X86Operand::WordMem(r, _) |
-        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) |
+        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) | X86Operand::DoubleMem(r, _) |
         X86Operand::XmmwordMem(r, _) | X86Operand::YmmwordMem(r, _) => {
             same_physical_reg(r, reg)
         }
@@ -1003,7 +1034,7 @@ fn reads_reg_direct(operand: &X86Operand, reg: &X86Reg) -> bool {
 fn uses_reg_as_base(operand: &X86Operand, reg: &X86Reg) -> bool {
     match operand {
         X86Operand::Mem(r, _) | X86Operand::DwordMem(r, _) | X86Operand::WordMem(r, _) |
-        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) |
+        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) | X86Operand::DoubleMem(r, _) |
         X86Operand::XmmwordMem(r, _) | X86Operand::YmmwordMem(r, _) => {
             same_physical_reg(r, reg)
         }

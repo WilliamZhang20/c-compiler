@@ -18,7 +18,7 @@ pub struct FunctionGenerator<'a> {
     pub(crate) structs: &'a HashMap<String, model::StructDef>,
     pub(crate) unions: &'a HashMap<String, model::UnionDef>,
     pub(crate) func_return_types: &'a HashMap<String, Type>,
-    pub(crate) float_constants: &'a mut HashMap<String, f64>,
+    pub(crate) float_constants: &'a mut HashMap<String, (f64, bool)>,
     pub(crate) next_float_const: &'a mut usize,
     pub(crate) target: &'a model::TargetConfig,
     
@@ -41,7 +41,7 @@ impl<'a> FunctionGenerator<'a> {
         structs: &'a HashMap<String, model::StructDef>,
         unions: &'a HashMap<String, model::UnionDef>,
         func_return_types: &'a HashMap<String, Type>,
-        float_constants: &'a mut HashMap<String, f64>,
+        float_constants: &'a mut HashMap<String, (f64, bool)>,
         next_float_const: &'a mut usize,
         enable_regalloc: bool,
         target: &'a model::TargetConfig,
@@ -448,7 +448,7 @@ impl<'a> FunctionGenerator<'a> {
                 let s_op = self.operand_to_op(src);
 
                 if dest_is_float && !src_is_float {
-                    // Int -> Float
+                    // Int -> Float/Double
                     let src_reg = if let X86Operand::Imm(_) = s_op {
                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op.clone()));
                         X86Operand::Reg(X86Reg::Eax)
@@ -458,27 +458,65 @@ impl<'a> FunctionGenerator<'a> {
                         s_op.clone()
                     };
                     
-                    self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), src_reg));
-                    self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    let dest_is_double = matches!(r#type, Type::Double);
+                    if dest_is_double {
+                        self.asm.push(X86Instr::Cvtsi2sd(X86Operand::Reg(X86Reg::Xmm0), src_reg));
+                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    } else {
+                        self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), src_reg));
+                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    }
                     
                 } else if !dest_is_float && src_is_float {
-                    // Float -> Int
+                    // Float/Double -> Int
                     let use_rax = !matches!(d_op, X86Operand::DwordMem(..));
                     let dst_reg = if use_rax { X86Reg::Rax } else { X86Reg::Eax };
+                    let src_is_double = match src {
+                        Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
+                        _ => false,
+                    };
                     
-                    if matches!(s_op, X86Operand::FloatMem(..) | X86Operand::DwordMem(..)) {
-                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                        self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
+                    if src_is_double {
+                        if matches!(s_op, X86Operand::DoubleMem(..) | X86Operand::Mem(..)) {
+                            self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                            self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
+                        } else {
+                            self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), s_op));
+                        }
                     } else {
-                        self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), s_op));
+                        if matches!(s_op, X86Operand::FloatMem(..) | X86Operand::DwordMem(..)) {
+                            self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                            self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
+                        } else {
+                            self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), s_op));
+                        }
                     }
                     self.asm.push(X86Instr::Mov(d_op.clone(), X86Operand::Reg(dst_reg)));
+                } else if dest_is_float && src_is_float {
+                    // Float<->Double conversion or same-type copy
+                    let dest_is_double = matches!(r#type, Type::Double);
+                    let src_is_double = match src {
+                        Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
+                        _ => false,
+                    };
+                    if !src_is_double && dest_is_double {
+                        // float -> double
+                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                        self.asm.push(X86Instr::Cvtss2sd(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
+                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    } else if src_is_double && !dest_is_double {
+                        // double -> float
+                        self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                        self.asm.push(X86Instr::Cvtsd2ss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
+                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    } else if dest_is_double {
+                        self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    } else {
+                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                    }
                 } else {
-                    // Same type cast (or pointer cast etc) - just copy
-                     if dest_is_float {
-                         self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                         self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                     } else {
                          // Check operand sizes to avoid invalid mov instructions
                          let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
                          let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
@@ -501,7 +539,6 @@ impl<'a> FunctionGenerator<'a> {
                              self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                          }
                      }
-                }
             }
             IrInstruction::Copy { dest, src} => {
                  if !self.var_types.contains_key(dest) {
@@ -564,8 +601,11 @@ impl<'a> FunctionGenerator<'a> {
                     }
                 }
                 
-                // Check if float
-                if matches!(s_op, X86Operand::FloatMem(..)) || matches!(d_op, X86Operand::FloatMem(..)) {
+                // Check if float/double
+                if matches!(s_op, X86Operand::DoubleMem(..)) || matches!(d_op, X86Operand::DoubleMem(..)) {
+                     self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                     self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                } else if matches!(s_op, X86Operand::FloatMem(..)) || matches!(d_op, X86Operand::FloatMem(..)) {
                      self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                      self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                 } else if matches!(s_op, X86Operand::DwordMem(..)) && matches!(d_op, X86Operand::DwordMem(..)) {
@@ -718,7 +758,11 @@ impl<'a> FunctionGenerator<'a> {
             return X86Operand::Mem(X86Reg::Rbp, buffer_offset);
         }
         if let Some(var_type) = self.var_types.get(&var) {
-            if matches!(var_type, Type::Float | Type::Double) {
+            if matches!(var_type, Type::Double) {
+                let slot = self.get_or_create_slot(var);
+                return X86Operand::DoubleMem(X86Reg::Rbp, slot);
+            }
+            if matches!(var_type, Type::Float) {
                 let slot = self.get_or_create_slot(var);
                 return X86Operand::FloatMem(X86Reg::Rbp, slot);
             }
@@ -734,7 +778,7 @@ impl<'a> FunctionGenerator<'a> {
         match op {
             Operand::Constant(c) => X86Operand::Imm(*c),
             Operand::FloatConstant(f) => {
-                let label = self.get_or_create_float_const(*f);
+                let label = self.get_or_create_float_const(*f, false);
                 X86Operand::RipRelLabel(label)
             }
             Operand::Var(v) => self.var_to_op(*v),
@@ -742,16 +786,16 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
     
-    pub(crate) fn get_or_create_float_const(&mut self, value: f64) -> String {
+    pub(crate) fn get_or_create_float_const(&mut self, value: f64, is_double: bool) -> String {
         let bits = value.to_bits();
-        for (label, &v) in self.float_constants.iter() {
-            if v.to_bits() == bits {
+        for (label, &(v, d)) in self.float_constants.iter() {
+            if v.to_bits() == bits && d == is_double {
                 return label.clone();
             }
         }
         let label = format!(".LC{}", self.next_float_const);
         *self.next_float_const += 1;
-        self.float_constants.insert(label.clone(), value);
+        self.float_constants.insert(label.clone(), (value, is_double));
         label
     }
 

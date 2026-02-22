@@ -250,6 +250,18 @@ impl<'a> Parser<'a> {
                     }
                 };
                 
+                // Check for array dimensions inside the declarator group: (*name[N])
+                let mut array_sizes = Vec::new();
+                while self.match_token(|t| matches!(t, Token::OpenBracket)) {
+                    let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
+                        0
+                    } else {
+                        self.parse_array_size()?
+                    };
+                    self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                    array_sizes.push(size);
+                }
+                
                 if !self.match_token(|t| matches!(t, Token::CloseParenthesis)) {
                     // Malformed function pointer
                     return Err("Expected ')' after function pointer name".to_string());
@@ -296,6 +308,11 @@ impl<'a> Parser<'a> {
                     return_type: Box::new(r#type),
                     param_types,
                 };
+
+                // Wrap in Array if array dimensions were found inside declarator
+                for size in array_sizes {
+                    r#type = Type::Array(Box::new(r#type), size);
+                }
 
                 let init = if self.match_token(|t| matches!(t, Token::Equal)) {
                     Some(self.parse_assignment()?)

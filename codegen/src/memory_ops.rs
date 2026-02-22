@@ -3,42 +3,60 @@ use crate::x86::{X86Instr, X86Operand, X86Reg};
 use model::Type;
 use ir::{VarId, Operand};
 
-/// Returns (is_float, use_byte, use_word, use_dword, is_unsigned) for a type.
-/// use_byte=1-byte, use_word=2-byte, use_dword=4-byte, else 8-byte.
-fn type_load_info(value_type: &Type) -> (bool, bool, bool, bool, bool) {
+/// Returns (is_float, is_double, use_byte, use_word, use_dword, is_unsigned) for a type.
+/// is_float covers both float and double (use is_double to distinguish).
+fn type_load_info(value_type: &Type) -> (bool, bool, bool, bool, bool, bool) {
     match value_type {
-        Type::Float  => (true, false, false, true, false),
-        Type::Double => (true, false, false, false, false),
-        Type::Char   => (false, true, false, false, false),
-        Type::UnsignedChar => (false, true, false, false, true),
-        Type::Short  => (false, false, true, false, false),
-        Type::UnsignedShort => (false, false, true, false, true),
-        Type::Int | Type::UnsignedInt => (false, false, false, true, matches!(value_type, Type::UnsignedInt)),
+        Type::Float  => (true, false, false, false, true, false),
+        Type::Double => (true, true, false, false, false, false),
+        Type::Char   => (false, false, true, false, false, false),
+        Type::UnsignedChar => (false, false, true, false, false, true),
+        Type::Short  => (false, false, false, true, false, false),
+        Type::UnsignedShort => (false, false, false, true, false, true),
+        Type::Int | Type::UnsignedInt => (false, false, false, false, true, matches!(value_type, Type::UnsignedInt)),
         Type::Typedef(name) => match name.as_str() {
-            "int8_t"  | "int8"  => (false, true, false, false, false),
-            "uint8_t" | "uint8" => (false, true, false, false, true),
-            "int16_t" | "int16" => (false, false, true, false, false),
-            "uint16_t"| "uint16"=> (false, false, true, false, true),
-            "int32_t" | "int32" => (false, false, false, true, false),
-            "uint32_t"| "uint32"=> (false, false, false, true, true),
-            _ => (false, false, false, false, false), // 8-byte default
+            "int8_t"  | "int8"  => (false, false, true, false, false, false),
+            "uint8_t" | "uint8" => (false, false, true, false, false, true),
+            "int16_t" | "int16" => (false, false, false, true, false, false),
+            "uint16_t"| "uint16"=> (false, false, false, true, false, true),
+            "int32_t" | "int32" => (false, false, false, false, true, false),
+            "uint32_t"| "uint32"=> (false, false, false, false, true, true),
+            _ => (false, false, false, false, false, false),
         },
-        _ => (false, false, false, false, false), // 8-byte / pointer
+        _ => (false, false, false, false, false, false),
+    }
+}
+
+/// Emit a float/double load from memory into d_op via xmm0
+fn emit_fp_load(generator: &mut FunctionGenerator, d_op: X86Operand, is_double: bool, base: X86Reg, offset: i32) {
+    if is_double {
+        generator.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), X86Operand::DoubleMem(base, offset)));
+        generator.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+    } else {
+        generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(base, offset)));
+        generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+    }
+}
+
+/// Emit a float/double store from xmm0 to memory
+fn emit_fp_store(generator: &mut FunctionGenerator, is_double: bool, base: X86Reg, offset: i32) {
+    if is_double {
+        generator.asm.push(X86Instr::Movsd(X86Operand::DoubleMem(base, offset), X86Operand::Reg(X86Reg::Xmm0)));
+    } else {
+        generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(base, offset), X86Operand::Reg(X86Reg::Xmm0)));
     }
 }
 
 pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, value_type: &Type) {
     generator.var_types.insert(dest, value_type.clone());
     let d_op = generator.var_to_op(dest);
-    let (is_float, use_byte, use_word, use_dword, is_unsigned) = type_load_info(value_type);
+    let (is_float, is_double, use_byte, use_word, use_dword, is_unsigned) = type_load_info(value_type);
 
-    
     // Optimization: if loading directly from an alloca (stack slot), just read it
     if let Operand::Var(var) = addr {
          if let Some(buffer_offset) = generator.alloca_buffers.get(var) {
              if is_float {
-                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, *buffer_offset)));
-                 generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+                 emit_fp_load(generator, d_op, is_double, X86Reg::Rbp, *buffer_offset);
              } else if use_byte {
                  if is_unsigned {
                      generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rbp, *buffer_offset)));
@@ -69,15 +87,18 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
     // Optimization: if loading directly from a global, use RIP-relative load
     if let Operand::Global(name) = addr {
          if is_float {
-             generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::GlobalMem(name.clone())));
-             generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+             if is_double {
+                 generator.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), X86Operand::GlobalQwordMem(name.clone())));
+                 generator.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+             } else {
+                 generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::GlobalMem(name.clone())));
+                 generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+             }
          } else {
              if use_dword {
-                 // 32-bit int: Mov EAX, [rip+name]
                  generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), X86Operand::GlobalMem(name.clone())));
                  generator.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Eax)));
              } else {
-                 // 64-bit int/ptr: Mov RAX, [rip+name]
                  generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
              }
              generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
@@ -102,8 +123,7 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
     }
     
     if is_float {
-        generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rax, 0)));
-        generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+        emit_fp_load(generator, d_op, is_double, X86Reg::Rax, 0);
     } else if use_byte {
          if is_unsigned {
              generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::ByteMem(X86Reg::Rax, 0)));
@@ -130,18 +150,23 @@ pub fn gen_load(generator: &mut FunctionGenerator, dest: VarId, addr: &Operand, 
 }
 
 pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operand, value_type: &Type) {
-    let (is_float, use_byte, use_word, use_dword, _is_unsigned) = type_load_info(value_type);
+    let (is_float, is_double, use_byte, use_word, use_dword, _is_unsigned) = type_load_info(value_type);
 
     // Load src into register
     if is_float {
         let s_op = generator.operand_to_op(src);
          match s_op {
              X86Operand::Reg(X86Reg::Xmm0) => {},
-             _ => generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op))
+             _ => {
+                 if is_double {
+                     generator.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                 } else {
+                     generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                 }
+             }
          }
     } else {
         let s_op = generator.operand_to_op(src);
-         // Handle alloca address loading vs value loading
          if let Operand::Global(name) = src {
              generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rcx), X86Operand::RipRelLabel(name.clone())));
          } else if let Operand::Var(v) = src {
@@ -176,7 +201,7 @@ pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operan
     
     // Store
     if is_float {
-        generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Xmm0)));
+        emit_fp_store(generator, is_double, X86Reg::Rax, 0);
     } else if use_byte {
         generator.asm.push(X86Instr::Mov(X86Operand::ByteMem(X86Reg::Rax, 0), X86Operand::Reg(X86Reg::Cl)));
     } else if use_word {

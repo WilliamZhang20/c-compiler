@@ -51,7 +51,9 @@ pub enum X86Operand {
     Label(String),
     GlobalMem(String), // RIP-relative global: label[rip]
     RipRelLabel(String), // For LEA: label[rip]
-    FloatMem(X86Reg, i32), // [reg + offset] for float ops (no PTR directive for SSE)
+    FloatMem(X86Reg, i32), // [reg + offset] for float ops - DWORD PTR (32-bit single)
+    DoubleMem(X86Reg, i32), // [reg + offset] for double ops - QWORD PTR (64-bit double)
+    GlobalQwordMem(String), // RIP-relative global: QWORD PTR label[rip]
     XmmwordMem(X86Reg, i32), // [reg + offset] - 128-bit (XMMWORD PTR)
     YmmwordMem(X86Reg, i32), // [reg + offset] - 256-bit (YMMWORD PTR)
 }
@@ -69,6 +71,8 @@ impl fmt::Display for X86Operand {
             Self::GlobalMem(name) => write!(f, "DWORD PTR {}[rip]", name),
             Self::RipRelLabel(name) => write!(f, "{}[rip]", name),
             Self::FloatMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::DoubleMem(r, offset) => write!(f, "QWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::GlobalQwordMem(name) => write!(f, "QWORD PTR {}[rip]", name),
             Self::XmmwordMem(r, offset) => write!(f, "XMMWORD PTR [{}{:+}]", r.to_str(), offset),
             Self::YmmwordMem(r, offset) => write!(f, "YMMWORD PTR [{}{:+}]", r.to_str(), offset),
         }
@@ -116,6 +120,18 @@ pub enum X86Instr {
     Cvtsi2ss(X86Operand, X86Operand), // Convert int to float
     Cvttss2si(X86Operand, X86Operand), // Convert float to int (truncate)
     Xorps(X86Operand, X86Operand), // XOR packed single-precision (for negation)
+    // Double-precision (64-bit) float instructions
+    Movsd(X86Operand, X86Operand),
+    Addsd(X86Operand, X86Operand),
+    Subsd(X86Operand, X86Operand),
+    Mulsd(X86Operand, X86Operand),
+    Divsd(X86Operand, X86Operand),
+    Ucomisd(X86Operand, X86Operand),
+    Cvtsi2sd(X86Operand, X86Operand),
+    Cvttsd2si(X86Operand, X86Operand),
+    Xorpd(X86Operand, X86Operand),
+    Cvtss2sd(X86Operand, X86Operand), // float -> double
+    Cvtsd2ss(X86Operand, X86Operand), // double -> float
     Neg(X86Operand), // TWO'S COMPLEMENT NEGATION
     // Packed SSE instructions (128-bit, 4x float)
     Movaps(X86Operand, X86Operand),   // Move aligned packed single-precision
@@ -201,6 +217,18 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Cvtsi2ss(d, src) => { let _ = write!(s, "  cvtsi2ss {}, {}\n", d, src); }
             X86Instr::Cvttss2si(d, src) => { let _ = write!(s, "  cvttss2si {}, {}\n", d, src); }
             X86Instr::Xorps(d, src) => { let _ = write!(s, "  xorps {}, {}\n", d, src); }
+            // Double-precision float instructions
+            X86Instr::Movsd(d, src) => { let _ = write!(s, "  movsd {}, {}\n", d, src); }
+            X86Instr::Addsd(d, src) => { let _ = write!(s, "  addsd {}, {}\n", d, src); }
+            X86Instr::Subsd(d, src) => { let _ = write!(s, "  subsd {}, {}\n", d, src); }
+            X86Instr::Mulsd(d, src) => { let _ = write!(s, "  mulsd {}, {}\n", d, src); }
+            X86Instr::Divsd(d, src) => { let _ = write!(s, "  divsd {}, {}\n", d, src); }
+            X86Instr::Ucomisd(l, r) => { let _ = write!(s, "  ucomisd {}, {}\n", l, r); }
+            X86Instr::Cvtsi2sd(d, src) => { let _ = write!(s, "  cvtsi2sd {}, {}\n", d, src); }
+            X86Instr::Cvttsd2si(d, src) => { let _ = write!(s, "  cvttsd2si {}, {}\n", d, src); }
+            X86Instr::Xorpd(d, src) => { let _ = write!(s, "  xorpd {}, {}\n", d, src); }
+            X86Instr::Cvtss2sd(d, src) => { let _ = write!(s, "  cvtss2sd {}, {}\n", d, src); }
+            X86Instr::Cvtsd2ss(d, src) => { let _ = write!(s, "  cvtsd2ss {}, {}\n", d, src); }
             // Packed SSE
             X86Instr::Movaps(d, src) => { let _ = write!(s, "  movaps {}, {}\n", d, src); }
             X86Instr::Movups(d, src) => { let _ = write!(s, "  movups {}, {}\n", d, src); }

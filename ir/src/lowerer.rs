@@ -18,6 +18,7 @@ pub struct Lowerer {
     pub(crate) global_vars: HashSet<String>,
     pub(crate) global_types: HashMap<String, Type>,
     pub(crate) function_names: HashSet<String>,
+    pub(crate) function_types: HashMap<String, Type>,
     // Stack of (continue_target, break_target) for nested loops
     pub(crate) loop_context: Vec<(BlockId, BlockId)>,
     pub(crate) struct_defs: HashMap<String, model::StructDef>,
@@ -59,6 +60,7 @@ impl Lowerer {
             global_vars: HashSet::new(),
             global_types: HashMap::new(),
             function_names: HashSet::new(),
+            function_types: HashMap::new(),
             loop_context: Vec::new(),
             struct_defs: HashMap::new(),
             union_defs: HashMap::new(),
@@ -287,6 +289,7 @@ impl Lowerer {
     pub fn lower_program(&mut self, ast: &AstProgram) -> Result<IRProgram, String> {
         self.global_vars.clear();
         self.function_names.clear();
+        self.function_types.clear();
         self.struct_defs.clear();
         self.union_defs.clear();
         self.enum_constants.clear();
@@ -315,6 +318,11 @@ impl Lowerer {
         for f in &ast.functions {
             self.global_vars.insert(f.name.clone());
             self.function_names.insert(f.name.clone());
+            // Track function pointer type for each function
+            self.function_types.insert(f.name.clone(), Type::FunctionPointer {
+                return_type: Box::new(f.return_type.clone()),
+                param_types: f.params.iter().map(|p| p.0.clone()).collect(),
+            });
         }
 
         let mut functions = Vec::new();

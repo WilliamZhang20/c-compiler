@@ -1,5 +1,5 @@
 // EXPECT: 42
-// Test deeply nested ternary, complex conditional expressions
+// Test deeply nested ternary, complex conditional expressions, and function pointers
 int abs_val(int x) {
     return x < 0 ? -x : x;
 }
@@ -7,6 +7,9 @@ int abs_val(int x) {
 int clamp(int x, int lo, int hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
+
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
 
 int main() {
     // Basic ternary
@@ -45,6 +48,16 @@ int main() {
     int idx = 1;
     int val = arr[idx > 0 ? idx : 0];
     if (val != 42) return 11;
+
+    // Ternary with function pointer operands (then path)
+    int (*op)(int, int) = (x > 0) ? add : sub;
+    int fptr_res = op(20, 22); // x=2 > 0, so add(20,22) = 42
+    if (fptr_res != 42) return 12;
+
+    // Ternary with function pointer operands (else path)
+    int (*op2)(int, int) = (x < 0) ? add : sub;
+    int fptr_res2 = op2(50, 8); // x=2 >= 0, so sub(50,8) = 42
+    if (fptr_res2 != 42) return 13;
 
     return 42;
 }

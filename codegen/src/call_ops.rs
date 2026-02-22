@@ -92,12 +92,22 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
             }
             _ => false,
         };
+        let is_double = match arg {
+            Operand::Var(v) => {
+                generator.var_types.get(v).map_or(false, |t| matches!(t, Type::Double))
+            }
+            _ => false,
+        };
 
         if i < param_regs.len() {
             if is_float && i < float_regs.len() {
-                // Float args: emit immediately (xmm regs don't conflict with int param regs)
+                // Float/double args: emit immediately (xmm regs don't conflict with int param regs)
                 let label = generator.operand_to_op(arg);
-                generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
+                if is_double {
+                    generator.asm.push(X86Instr::Movsd(X86Operand::Reg(float_regs[i].clone()), label));
+                } else {
+                    generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
+                }
             } else if !is_float {
                 // Check for alloca var → needs LEA to get address
                 let mut handled = false;
@@ -121,8 +131,13 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
             let offset = shadow_space + (i - param_regs.len()) * 8;
             if is_float {
                 let label = generator.operand_to_op(arg);
-                generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
-                generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                if is_double {
+                    generator.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), label));
+                    generator.asm.push(X86Instr::Movsd(X86Operand::DoubleMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                } else {
+                    generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
+                    generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                }
             } else {
                 let mut handled = false;
                 if let Operand::Var(var) = arg {
@@ -150,15 +165,22 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
     generator.asm.push(X86Instr::Call(name.to_string()));
 
     if let Some(d) = dest {
-        let returns_float = generator.func_return_types.get(name)
-            .map_or(false, |ret_type| matches!(ret_type, Type::Float | Type::Double));
+        let ret_type = generator.func_return_types.get(name).cloned();
+        let returns_float = ret_type.as_ref()
+            .map_or(false, |t| matches!(t, Type::Float | Type::Double));
+        let returns_double = ret_type.as_ref()
+            .map_or(false, |t| matches!(t, Type::Double));
 
-        if returns_float {
-            generator.var_types.insert(*d, Type::Float);
+        if let Some(rt) = &ret_type {
+            if returns_float {
+                generator.var_types.insert(*d, rt.clone());
+            }
         }
 
         let d_op = generator.var_to_op(*d);
-        if returns_float {
+        if returns_double {
+            generator.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+        } else if returns_float {
             generator.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
         } else {
             generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
@@ -175,7 +197,12 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
     let shadow_space = convention.shadow_space_size();
     
     let fp_op = generator.operand_to_op(func_ptr);
-    generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
+    // Use LEA for Global (function name) to produce RIP-relative addressing for PIE
+    if let X86Operand::Label(name) = &fp_op {
+        generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::R10), X86Operand::RipRelLabel(name.clone())));
+    } else {
+        generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
+    }
     
     for (i, arg) in args.iter().enumerate() {
         let is_float = match arg {
@@ -185,11 +212,21 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
             }
             _ => false,
         };
+        let is_double = match arg {
+            Operand::Var(v) => {
+                generator.var_types.get(v).map_or(false, |t| matches!(t, Type::Double))
+            }
+            _ => false,
+        };
 
         if i < param_regs.len() {
             if is_float && i < float_regs.len() {
                 let label = generator.operand_to_op(arg);
-                generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
+                if is_double {
+                    generator.asm.push(X86Instr::Movsd(X86Operand::Reg(float_regs[i].clone()), label));
+                } else {
+                    generator.asm.push(X86Instr::Movss(X86Operand::Reg(float_regs[i].clone()), label));
+                }
             } else if !is_float {
                 let val = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Mov(X86Operand::Reg(param_regs[i].clone()), val));
@@ -198,8 +235,13 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
             let offset = shadow_space + (i - param_regs.len()) * 8;
             if is_float {
                 let label = generator.operand_to_op(arg);
-                generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
-                generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                if is_double {
+                    generator.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), label));
+                    generator.asm.push(X86Instr::Movsd(X86Operand::DoubleMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                } else {
+                    generator.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), label));
+                    generator.asm.push(X86Instr::Movss(X86Operand::FloatMem(X86Reg::Rsp, offset as i32), X86Operand::Reg(X86Reg::Xmm0)));
+                }
             } else {
                 let val = generator.operand_to_op(arg);
                 generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
@@ -212,6 +254,7 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
     
     if let Some(d) = dest {
          let mut is_float_ret = false;
+         let mut is_double_ret = false;
          
          // Try to infer return type from function pointer type
          if let Operand::Var(v) = func_ptr {
@@ -219,9 +262,22 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
                  if let Type::FunctionPointer { return_type, .. } = t {
                      if matches!(**return_type, Type::Float | Type::Double) {
                          is_float_ret = true;
+                         is_double_ret = matches!(**return_type, Type::Double);
                      }
-                     // Store the inferred type for the destination variable
                      generator.var_types.insert(*d, *return_type.clone());
+                 }
+             }
+         }
+         
+         // If func_ptr is a Global (function name after copy propagation), look up return type
+         if !is_float_ret {
+             if let Operand::Global(name) = func_ptr {
+                 if let Some(ret_ty) = generator.func_return_types.get(name) {
+                     if matches!(ret_ty, Type::Float | Type::Double) {
+                         is_float_ret = true;
+                         is_double_ret = matches!(ret_ty, Type::Double);
+                     }
+                     generator.var_types.insert(*d, ret_ty.clone());
                  }
              }
          }
@@ -231,14 +287,18 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
             if let Some(t) = generator.var_types.get(d) {
                 if matches!(t, Type::Float | Type::Double) {
                     is_float_ret = true;
+                    is_double_ret = matches!(t, Type::Double);
                 }
             }
         }
         
         if is_float_ret {
-            generator.var_types.insert(*d, Type::Float);
             let dest_op = generator.var_to_op(*d);
-            generator.asm.push(X86Instr::Movss(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
+            if is_double_ret {
+                generator.asm.push(X86Instr::Movsd(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else {
+                generator.asm.push(X86Instr::Movss(dest_op, X86Operand::Reg(X86Reg::Xmm0)));
+            }
         } else {
             let dest_op = generator.var_to_op(*d);
             generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
