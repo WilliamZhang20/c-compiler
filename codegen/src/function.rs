@@ -343,8 +343,13 @@ impl<'a> FunctionGenerator<'a> {
                         // Alloca uses direct stack space, not managed by stack_slots map in the same way
                         // Instead, we just reserve a block of stack and track its offset
                         let size = self.get_type_size(r#type);
-                        // Align to 16 bytes for SSE compatibility
-                        let size = (size + 15) & !15;
+                        // Align arrays to cache line boundaries (64 bytes) for better
+                        // cache locality when the array spans multiple cache lines.
+                        // Smaller allocations only need 16 bytes for SSE compatibility.
+                        let alignment = if size >= 64 { 64 } else { 16 };
+                        let size = (size + alignment - 1) & !(alignment - 1);
+                        // Ensure next_slot is also aligned to alignment boundary
+                        self.next_slot = (self.next_slot + alignment as i32 - 1) & !(alignment as i32 - 1);
                         
                         self.next_slot += size as i32;
                         let offset = -self.next_slot;

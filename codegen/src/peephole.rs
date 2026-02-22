@@ -302,7 +302,6 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
     if let X86Instr::Mov(X86Operand::Reg(temp_reg), src) = &instructions[i] {
         if matches!(src, X86Operand::Reg(_) | X86Operand::Imm(_)) {
             let max_scan = std::cmp::min(i + 10, instructions.len());
-            let mut intervening_ok = true;
             for j in (i + 1)..max_scan {
                 // Stop at control flow boundaries (labels, jumps, calls, ret)
                 if matches!(instructions[j],
@@ -318,7 +317,7 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
                     if let X86Instr::Mov(dest, X86Operand::Reg(temp2)) = &instructions[j] {
                         // Use exact variant match (not same_physical_reg) to avoid
                         // size mismatches (e.g., forwarding 64-bit rdi into DWORD PTR)
-                        if std::mem::discriminant(temp_reg) == std::mem::discriminant(temp2) && intervening_ok {
+                        if std::mem::discriminant(temp_reg) == std::mem::discriminant(temp2) {
                             // Found the target. Check reg is dead after j.
                             if !is_reg_used_after(instructions, j + 1, temp_reg) {
                                 // Check no mem-to-mem
@@ -338,9 +337,7 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
                 // Check if src (if register) is modified by intervening instruction
                 if let X86Operand::Reg(src_reg) = src {
                     if instr_touches_reg(&instructions[j], src_reg) {
-                        intervening_ok = false;
-                        // Don't break — still want to find the target mov to see
-                        // if it comes before any src modification that's also a read
+                        // src is modified before it could be forwarded
                         break;
                     }
                 }

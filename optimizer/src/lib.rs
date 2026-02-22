@@ -19,6 +19,10 @@ mod folding;
 mod utils;
 mod cfg_simplify;
 mod load_forwarding;
+mod licm;
+mod prefetch;
+mod block_layout;
+mod loop_interchange;
 pub mod loop_analysis;
 pub mod vectorize;
 
@@ -30,6 +34,10 @@ use cse::common_subexpression_elimination;
 use folding::optimize_function;
 use cfg_simplify::simplify_cfg;
 use load_forwarding::load_forwarding;
+use licm::loop_invariant_code_motion;
+use prefetch::insert_prefetches;
+use block_layout::optimize_block_layout;
+use loop_interchange::try_loop_interchange;
 use model::target::SimdLevel;
 
 /// Main optimization entry point
@@ -66,6 +74,15 @@ pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRPr
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
 
+        // Loop interchange: swap nested loop order for better cache stride patterns
+        try_loop_interchange(func);
+
+        // Loop-invariant code motion: hoist invariant computations out of loops
+        loop_invariant_code_motion(func);
+
+        // Software prefetch insertion: add prefetch hints for large-stride array loops
+        insert_prefetches(func);
+
         // Auto-vectorization: analyze loops and emit vectorized IR
         if simd_level >= SimdLevel::SSE2 {
             let vec_level = match simd_level {
@@ -77,6 +94,9 @@ pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRPr
 
         ir::remove_phis(func);
         simplify_cfg(func);  // Run AFTER phi removal (only uses remove_empty_blocks now)
+
+        // Block layout: reorder blocks for I-cache locality (hot loops placed tight)
+        optimize_block_layout(func);
     }
     program
 }

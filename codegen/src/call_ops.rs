@@ -13,6 +13,7 @@ enum ParamMove {
 }
 
 impl ParamMove {
+    #[allow(dead_code)]
     fn src_operand(&self) -> &X86Operand {
         match self {
             ParamMove::Lea(op) | ParamMove::Mov(op) => op,

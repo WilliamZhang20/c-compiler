@@ -1,4 +1,4 @@
-use model::{Token, Type, TypeQualifiers, Expr};
+use model::{Token, Type, TypeQualifiers};
 use crate::parser::Parser;
 use crate::attributes::AttributeParser;
 use crate::expressions::ExpressionParser;
