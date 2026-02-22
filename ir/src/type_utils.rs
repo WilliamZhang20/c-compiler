@@ -7,12 +7,31 @@ use crate::lowerer::Lowerer;
 impl Lowerer {
     /// Calculate the size of a type in bytes
     pub(crate) fn get_type_size(&mut self, ty: &Type) -> i64 {
-        // Create a cache key from the type
-        let cache_key = format!("{:?}", ty);
-        
-        // Check cache first
-        if let Some(&size) = self.type_size_cache.get(&cache_key) {
-            return size;
+        // Fast path for leaf types — no caching needed
+        match ty {
+            Type::Int | Type::UnsignedInt => return 4,
+            Type::Bool => return 1,
+            Type::Char | Type::UnsignedChar => return 1,
+            Type::Short | Type::UnsignedShort => return 2,
+            Type::Long | Type::UnsignedLong => return 8,
+            Type::LongLong | Type::UnsignedLongLong => return 8,
+            Type::Float => return 4,
+            Type::Double => return 8,
+            Type::Void => return 0,
+            Type::Pointer(_) | Type::FunctionPointer { .. } => return 8,
+            _ => {}
+        }
+
+        // For complex types, use name-based cache key (only struct/union/typedef names matter)
+        let cache_key = match ty {
+            Type::Struct(name) | Type::Union(name) | Type::Typedef(name) => Some(name.clone()),
+            _ => None,
+        };
+
+        if let Some(ref key) = cache_key {
+            if let Some(&size) = self.type_size_cache.get(key) {
+                return size;
+            }
         }
         
         // Compute size
@@ -86,8 +105,10 @@ impl Lowerer {
             }
         };
         
-        // Cache the result
-        self.type_size_cache.insert(cache_key, size);
+        // Cache only named types (struct/union/typedef)
+        if let Some(key) = cache_key {
+            self.type_size_cache.insert(key, size);
+        }
         size
     }
 

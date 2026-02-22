@@ -17,6 +17,9 @@ cargo build --bin driver --release
 # Compile a C file to an executable
 ./target/release/driver hello_world.c
 
+# Compile to object file only (no link)
+./target/release/driver -c hello_world.c
+
 # Emit assembly only (no assemble/link)
 ./target/release/driver hello_world.c -S
 
@@ -26,14 +29,26 @@ cargo build --bin driver --release
 # See AST
 ./target/release/driver hello_world.c --parse
 
-# Keep intermediate files (.i preprocessed, .s assembly)
-./target/release/driver hello_world.c --keep-intermediates
-
 # Custom output name
 ./target/release/driver hello_world.c -o my_program
 
+# Preprocessor flags (forwarded to gcc -E)
+./target/release/driver -DNDEBUG -DMAX=100 -I/usr/local/include hello_world.c
+
+# Force-include a header
+./target/release/driver --include config.h hello_world.c
+
+# Freestanding / no standard library
+./target/release/driver --nostdlib --ffreestanding kernel.c
+
+# Keep intermediate files (.i preprocessed, .s assembly)
+./target/release/driver hello_world.c --keep-intermediates
+
 # Enable debug logging
 ./target/release/driver hello_world.c --debug
+
+# Multiple source files
+./target/release/driver file1.c file2.c -o output
 ```
 
 On Windows, the same binary works with MinGW GCC. The compiler auto-detects the host platform and adjusts the calling convention (System V vs Windows x64) and executable extension.
@@ -156,7 +171,9 @@ Dependency graph: `driver` → `codegen` → `optimizer` → `ir` → `semantic`
 - `__builtin_clz(x)`, `__builtin_ctz(x)`, `__builtin_popcount(x)`, `__builtin_abs(x)` — bit/math intrinsics (compile-time evaluated for constants, inline code for `abs`)
 - `typeof(expr)` / `__typeof__(expr)` — type inference
 - Multi-character constants: `'ABCD'` packed big-endian
-- Integer literal suffixes: `U`, `L`, `UL`, `LL`, `ULL`
+- Integer literal suffixes: `U`, `L`, `UL`, `LL`, `ULL` (tracked as `IntegerSuffix` in the token)
+- Octal integer literals: `0777`, `0644`
+- Binary integer literals: `0b1010`, `0B11111111` (GCC extension)
 
 ### Pointer Arithmetic
 - Array-to-pointer decay
@@ -193,7 +210,7 @@ cargo test --test integration_tests
 
 The integration test harness (`driver/tests/integration_tests.rs`) discovers all `.c` files in `testing/`, compiles each one using the compiler, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the source file.
 
-**Current status**: 142 integration test programs, all passing. 34 unit tests across all crates.
+**Current status**: 146 integration test programs, all passing. 251 unit tests across all crates (252 total with integration harness).
 
 ## Benchmarks
 

@@ -18,8 +18,8 @@ The codegen targets the **System V AMD64 ABI** (Linux) by default. Windows x64 s
 
 ### `lib.rs` — Program-level driver
 The `Codegen` struct holds shared state: struct/union definitions, float constant pool, function return type map, and target configuration. `gen_program()` emits:
-1. `.data` section — global strings (`.asciz`), global variables with alignment, optional custom `section` directives
-2. `.text` section — one `FunctionGenerator` per IR function
+1. `.data` section — global strings (`.asciz`), global variables with alignment, optional custom `section` directives. Extern globals (`is_extern`) with no initializer are skipped.
+2. `.text` section — one `FunctionGenerator` per IR function. Static functions/globals omit `.globl` for internal linkage.
 3. Float constant data (labeled `.LC*` values)
 4. `.note.GNU-stack` marker for non-executable stacks
 5. `.init_array` / `.fini_array` entries for `__attribute__((constructor/destructor))`

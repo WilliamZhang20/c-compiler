@@ -1,11 +1,11 @@
 use model::{Program, Function, Stmt, Expr, Type, BinaryOp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct SemanticAnalyzer {
     global_scope: HashMap<String, Type>,
     scopes: Vec<HashMap<String, Type>>,
-    const_vars: HashMap<String, bool>, // Track const-qualified variables
-    volatile_vars: HashMap<String, bool>, // Track volatile-qualified variables  
+    const_vars: HashSet<String>, // Track const-qualified variables
+    volatile_vars: HashSet<String>, // Track volatile-qualified variables  
     structs: HashMap<String, model::StructDef>,
     unions: HashMap<String, model::UnionDef>,
     enum_constants: HashMap<String, i64>, // enum constant name => value
@@ -18,8 +18,8 @@ impl SemanticAnalyzer {
         Self {
             global_scope: HashMap::new(),
             scopes: Vec::new(),
-            const_vars: HashMap::new(),
-            volatile_vars: HashMap::new(),
+            const_vars: HashSet::new(),
+            volatile_vars: HashSet::new(),
             structs: HashMap::new(),
             unions: HashMap::new(),
             enum_constants: HashMap::new(),
@@ -67,10 +67,10 @@ impl SemanticAnalyzer {
             
             self.global_scope.insert(global.name.clone(), global.r#type.clone());
             if global.qualifiers.is_const {
-                self.const_vars.insert(global.name.clone(), true);
+                self.const_vars.insert(global.name.clone());
             }
             if global.qualifiers.is_volatile {
-                self.volatile_vars.insert(global.name.clone(), true);
+                self.volatile_vars.insert(global.name.clone());
             }
         }
         
@@ -93,7 +93,8 @@ impl SemanticAnalyzer {
     }
 
     fn analyze_function(&mut self, function: &Function) -> Result<(), String> {
-        self.scopes = vec![self.global_scope.clone()];
+        // Start with an empty scope stack — lookup_symbol falls through to global_scope
+        self.scopes.clear();
         self.loop_depth = 0;
         self.in_switch = false;
         
@@ -120,13 +121,13 @@ impl SemanticAnalyzer {
         }
     }
 
-    fn lookup_symbol(&self, name: &str) -> Option<Type> {
+    fn lookup_symbol(&self, name: &str) -> Option<&Type> {
         for scope in self.scopes.iter().rev() {
             if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
+                return Some(ty);
             }
         }
-        None
+        self.global_scope.get(name)
     }
 
     fn analyze_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
@@ -139,10 +140,10 @@ impl SemanticAnalyzer {
                 
                 self.add_symbol(name.clone(), r#type.clone());
                 if qualifiers.is_const {
-                    self.const_vars.insert(name.clone(), true);
+                    self.const_vars.insert(name.clone());
                 }
                 if qualifiers.is_volatile {
-                    self.volatile_vars.insert(name.clone(), true);
+                    self.volatile_vars.insert(name.clone());
                 }
                 
                 if let Some(expr) = init {
@@ -272,7 +273,7 @@ impl SemanticAnalyzer {
                     | BinaryOp::ShiftRightAssign) 
                 {
                     if let Expr::Variable(name) = left.as_ref() {
-                        if self.const_vars.get(name) == Some(&true) {
+                        if self.const_vars.contains(name) {
                             return Err(format!("Cannot assign to const variable '{}'", name));
                         }
                     }
@@ -286,7 +287,7 @@ impl SemanticAnalyzer {
                 self.analyze_expr(expr)?;
                 // Check for increment/decrement of const variable
                 if let Expr::Variable(name) = expr.as_ref() {
-                    if self.const_vars.get(name) == Some(&true) {
+                    if self.const_vars.contains(name) {
                         return Err(format!("Cannot modify const variable '{}'", name));
                     }
                 }

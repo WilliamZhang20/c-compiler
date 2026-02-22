@@ -493,16 +493,16 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 
 These must be implemented before any kernel source file can be processed:
 
-1. **`-c` flag (compile to `.o`)** — kernel build invokes the compiler per-TU
-2. **`-D` / `-U` / `-I` passthrough** — build system passes hundreds of defines and include paths
-3. **`-nostdlib` / `-ffreestanding`** — kernel is freestanding
-4. **`-include` flag** — kernel force-includes `compiler_types.h`
-5. **Octal integer literals** — permissions, ioctl codes, bit patterns
-6. **Integer suffix preservation** — `0UL`, `1ULL` must have correct types
-7. **Function prototypes in AST** — headers are all prototypes; needed for type checking
-8. **`extern` declarations in AST** — `extern int jiffies;` patterns
-9. **`static` linkage** — internal linkage for `static` functions/variables; `.local` instead of `.globl`
-10. **Forward struct declarations** — opaque pointer pattern everywhere
+1. ~~**`-c` flag (compile to `.o`)**~~ ✅ — DONE: `-c` produces `.o` via `gcc -c`
+2. ~~**`-D` / `-U` / `-I` passthrough**~~ ✅ — DONE: forwarded to GCC preprocessor
+3. ~~**`-nostdlib` / `-ffreestanding`**~~ ✅ — DONE: forwarded to preprocessor and linker
+4. ~~**`-include` flag**~~ ✅ — DONE: `--include` forwarded to GCC preprocessor
+5. ~~**Octal integer literals**~~ ✅ — DONE: `0777` → 511, plus binary `0b1010` → 10
+6. ~~**Integer suffix preservation**~~ ✅ — DONE: `IntegerSuffix` enum (None/U/L/UL/LL/ULL)
+7. ~~**Function prototypes in AST**~~ ✅ — DONE: `FunctionPrototype` struct in `Program.prototypes`
+8. ~~**`extern` declarations in AST**~~ ✅ — DONE: `GlobalVar.is_extern`, parsed and stored
+9. ~~**`static` linkage**~~ ✅ — DONE: `Function.is_static`/`GlobalVar.is_static`, no `.globl` for static
+10. ~~**Forward struct declarations**~~ ✅ — DONE: stored in `Program.forward_structs`
 
 ### Tier 1 — Critical Infrastructure (Needed for Most Kernel Files)
 

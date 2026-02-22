@@ -9,7 +9,8 @@ The **Model** crate defines every shared data type that the rest of the compiler
 This single file contains the complete set of types that represent a parsed C program:
 
 **`Token`** (~100 variants) — the output of the lexer, input of the parser. Covers:
-- Literals: `Constant(i64)`, `FloatLiteral(f64)`, `StringLiteral(String)`, `Identifier`
+- Literals: `Constant { value: i64, suffix: IntegerSuffix }`, `FloatLiteral(f64)`, `StringLiteral(String)`, `Identifier`
+- `IntegerSuffix` enum: `None`, `U`, `L`, `UL`, `LL`, `ULL` — tracks the suffix on integer constants for correct type determination
 - Punctuation: parens, braces, brackets, semicolons, commas, colons
 - All C keywords: `int`, `void`, `return`, `if`, `for`, `while`, `switch`, `struct`, `union`, `enum`, `typedef`, `sizeof`, `static`, `extern`, `const`, `volatile`, etc.
 - C99/C11 keywords: `_Bool`, `_Generic`, `_Alignof`, `_Static_assert`, `register`, `restrict`
@@ -36,7 +37,16 @@ This single file contains the complete set of types that represent a parsed C pr
 
 **`Attribute`** — GCC `__attribute__` variants: `Packed`, `Aligned(N)`, `Section(name)`, `NoReturn`, `AlwaysInline`, `Weak`, `Unused`, `Constructor`, `Destructor`
 
-**Supporting types**: `TypeQualifiers` (`const`/`volatile`/`restrict`), `BinaryOp` (20 variants including compound assignment), `UnaryOp`, `InitItem`/`Designator` for initializer lists, `AsmOperand` for inline assembly, `Program`/`Function`/`GlobalVar`/`StructDef`/`UnionDef`/`EnumDef`/`Block`/`StructField`.
+**Supporting types**: `TypeQualifiers` (`const`/`volatile`/`restrict`), `BinaryOp` (20 variants including compound assignment), `UnaryOp`, `InitItem`/`Designator` for initializer lists, `AsmOperand` for inline assembly, `Program`/`Function`/`GlobalVar`/`FunctionPrototype`/`StructDef`/`UnionDef`/`EnumDef`/`Block`/`StructField`.
+
+**`Program`** contains:
+- `functions: Vec<Function>` — function definitions with bodies
+- `globals: Vec<GlobalVar>` — global variable declarations (with `is_extern` and `is_static` flags)
+- `structs`, `unions`, `enums` — type definitions
+- `prototypes: Vec<FunctionPrototype>` — function declarations without bodies (return type, name, params, variadic flag)
+- `forward_structs: Vec<String>` — forward-declared struct names (`struct foo;`)
+
+**`Function`** includes `is_static: bool` — controls linkage visibility (`.globl` vs local). **`GlobalVar`** includes `is_extern: bool` and `is_static: bool`.
 
 ### `target.rs` — Platform abstraction
 

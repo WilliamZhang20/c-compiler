@@ -39,12 +39,17 @@ pub fn parse_char_literal(content: &str) -> Result<i64, String> {
 }
 
 /// Parse an integer constant (decimal or hexadecimal)
+/// Returns the value as i64 (bit-reinterpreted for values > i64::MAX)
 pub fn parse_int_constant(text: &str) -> Result<i64, String> {
     if text.starts_with("0x") || text.starts_with("0X") {
-        i64::from_str_radix(&text[2..], 16)
+        // Use u64 to handle full unsigned range, then reinterpret as i64
+        u64::from_str_radix(&text[2..], 16)
+            .map(|v| v as i64)
             .map_err(|_| format!("Failed to parse hex constant: {}", text))
     } else {
+        // Try i64 first, then u64 for large unsigned values
         text.parse::<i64>()
+            .or_else(|_| text.parse::<u64>().map(|v| v as i64))
             .map_err(|_| format!("Failed to parse constant: {}", text))
     }
 }

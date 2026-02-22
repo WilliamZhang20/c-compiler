@@ -2,10 +2,28 @@
 mod target;
 pub use target::{Platform, CallingConvention, TargetConfig};
 
+/// Suffix on an integer constant, controlling its type.
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub enum IntegerSuffix {
+    /// No suffix — the type is `int` (or wider if the value is too large).
+    #[default]
+    None,
+    /// `U` — unsigned int (or wider unsigned if value too large).
+    U,
+    /// `L` — long.
+    L,
+    /// `UL` / `LU` — unsigned long.
+    UL,
+    /// `LL` — long long.
+    LL,
+    /// `ULL` / `LLU` — unsigned long long.
+    ULL,
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum Token {
     Identifier { value: String },
-    Constant { value: i64 },
+    Constant { value: i64, suffix: IntegerSuffix },
     FloatLiteral { value: f64 },
     StringLiteral { value: String },
     OpenParenthesis,
@@ -160,6 +178,16 @@ pub struct Program {
     pub structs: Vec<StructDef>,
     pub unions: Vec<UnionDef>,
     pub enums: Vec<EnumDef>,
+    pub prototypes: Vec<FunctionPrototype>,
+    pub forward_structs: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FunctionPrototype {
+    pub return_type: Type,
+    pub name: String,
+    pub params: Vec<(Type, String)>,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -195,6 +223,8 @@ pub struct GlobalVar {
     pub name: String,
     pub init: Option<Expr>,
     pub attributes: Vec<Attribute>,
+    pub is_extern: bool,
+    pub is_static: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -204,6 +234,7 @@ pub struct Function {
     pub params: Vec<(Type, String)>,
     pub body: Block,
     pub is_inline: bool,
+    pub is_static: bool,
     pub attributes: Vec<Attribute>,
 }
 

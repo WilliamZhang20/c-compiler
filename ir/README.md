@@ -24,7 +24,7 @@ AST → Lowerer → IRProgram (with SSA) → mem2reg → optimizer → remove_ph
 | `Instruction` | 16 variants: `Binary`, `FloatBinary`, `Unary`, `FloatUnary`, `Copy`, `Cast`, `Phi`, `Alloca`, `Load`, `Store`, `GetElementPtr`, `Call`, `IndirectCall`, `InlineAsm`, `VaStart/End/Copy/Arg` |
 | `Terminator` | `Br(block)`, `CondBr(cond, then, else)`, `Ret(operand)`, `Unreachable` |
 | `BasicBlock` | instructions + terminator + `is_label_target` flag |
-| `Function` | blocks + `var_types: HashMap<VarId, Type>` (survives through optimizer to codegen) |
+| `Function` | blocks + `var_types: HashMap<VarId, Type>` (survives through optimizer to codegen) + `is_static: bool` for internal linkage |
 | `IRProgram` | functions + global strings + global variables + struct/union definitions |
 
 ## Source files

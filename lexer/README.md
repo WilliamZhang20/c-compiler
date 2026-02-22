@@ -23,8 +23,10 @@ The core lexer. `StateMachineLexer` holds a `&[u8]` input slice, a cursor positi
 | `lex_next_token` | Top-level dispatch: inspects current byte and routes to the appropriate sub-lexer |
 | `lex_string` | Double-quoted string literals with full escape support |
 | `lex_char` | Character literals including **multi-character constants** (e.g. `'ABCD'` → packed big-endian `i64`) |
-| `lex_number` | Decimal integers and floating-point literals (`3.14`, `1e-5`, `.5f`). Consumes **integer suffixes**: `U`, `L`, `UL`, `LL`, `ULL` (case-insensitive) |
+| `lex_number` | Decimal integers and floating-point literals (`3.14`, `1e-5`, `.5f`). Detects `0x`/`0b`/`0` prefixes and dispatches to hex/binary/octal sub-lexers. Consumes **integer suffixes**: `U`, `L`, `UL`, `LL`, `ULL` (case-insensitive) via `parse_integer_suffix()` |
 | `lex_hex_number` | Hexadecimal integers (`0xFF`). Also consumes integer suffixes |
+| `lex_octal_number` | Octal integers (`0777`, `0644`). Digits 0-7 only |
+| `lex_binary_number` | Binary integers (`0b1010`, `0B1111`). GCC extension |
 | `lex_identifier` | `[a-zA-Z_][a-zA-Z0-9_]*` identifiers, then delegates to `keywords::keyword_or_identifier` |
 | `lex_operator_or_punctuation` | Single/two/three-character operators: `==`, `!=`, `<=`, `>=`, `&&`, `||`, `->`, `++`, `--`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `...` |
 | `skip_line_comment` / `skip_block_comment` | Comment consumption |
@@ -49,7 +51,7 @@ Anything not in the map becomes `Token::Identifier { value }`.
 Pure functions for parsing literal values from already-delimited text:
 
 - `parse_char_literal(s: &str) -> i64` — converts a char body (`n`, `\\`, `x1F`, `077`) to its integer value
-- `parse_int_constant(s: &str) -> i64` — decimal or `0x`-prefixed hex
+- `parse_int_constant(s: &str) -> i64` — decimal, `0x`-prefixed hex, `0`-prefixed octal, or `0b`-prefixed binary
 - `parse_float_literal(s: &str) -> f64` — strips optional `f`/`F` suffix
 
 ### `repro_bug.rs`

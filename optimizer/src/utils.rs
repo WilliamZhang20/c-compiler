@@ -9,13 +9,7 @@ pub fn is_power_of_two(n: i64) -> bool {
 /// Calculate log2 of a power of 2
 #[inline]
 pub fn log2(n: i64) -> i64 {
-    let mut count = 0;
-    let mut num = n;
-    while num > 1 {
-        num >>= 1;
-        count += 1;
-    }
-    count
+    (n as u64).trailing_zeros() as i64
 }
 
 #[cfg(test)]

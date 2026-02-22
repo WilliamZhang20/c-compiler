@@ -11,8 +11,18 @@ cargo run -- hello_world.c
 # Custom output name
 cargo run -- hello_world.c -o my_program
 
+# Compile to object file only (.o, no link)
+cargo run -- hello_world.c -c
+
 # Emit assembly only (.s file, no assemble/link)
 cargo run -- hello_world.c -S
+
+# Preprocessor flags (forwarded to gcc -E)
+cargo run -- hello_world.c -DNDEBUG -DMAX=100 -I/usr/local/include
+cargo run -- hello_world.c --include config.h
+
+# Freestanding / no-stdlib compilation
+cargo run -- kernel.c --nostdlib --ffreestanding
 
 # Stop after lexing (prints tokens to stdout)
 cargo run -- hello_world.c --lex
@@ -59,7 +69,7 @@ Built with [clap](https://docs.rs/clap) for argument parsing. The `Args` struct 
 ## Source files
 
 ### `src/main.rs`
-The entire driver is a single file (~250 lines). Contains `main()`, `Args` struct, `preprocess()` (GCC invocation), and `run_linker()` (GCC invocation for assemble+link). Intermediate `.i` and `.s` files are cleaned up unless `--keep-intermediates` or `-S` is specified.
+The entire driver is a single file (~345 lines). Contains `main()`, `Args` struct, `preprocess()` (GCC invocation with `-D`/`-U`/`-I`/`--include` forwarding), `assemble()` (GCC `.s` → `.o`), and `run_linker()` (GCC invocation for link, with `--nostdlib`/`--ffreestanding` support). Intermediate `.i` and `.s` files are cleaned up unless `--keep-intermediates` or `-S` is specified.
 
 ### `tests/integration_tests.rs`
-The integration test harness. `run_all_c_tests()` discovers all `.c` files in `testing/`, compiles each one using the driver binary, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the first line of the source file. Currently exercises 142 test programs covering the full feature set.
+The integration test harness. `run_all_c_tests()` discovers all `.c` files in `testing/`, compiles each one using the driver binary, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the first line of the source file. Currently exercises 146 test programs covering the full feature set.

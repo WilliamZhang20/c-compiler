@@ -335,7 +335,7 @@ impl<'a> TypeParser for Parser<'a> {
             // Check for bit field syntax (: width)
             let bit_width = if self.match_token(|t| matches!(t, Token::Colon)) {
                 match self.advance() {
-                    Some(Token::Constant { value }) => Some(*value as usize),
+                    Some(Token::Constant { value, .. }) => Some(*value as usize),
                     _ => {
                         // Skip malformed bit field
                         while !self.is_at_end() 
@@ -496,7 +496,7 @@ impl<'a> TypeParser for Parser<'a> {
                 // Explicit value: RED = 10 or ERROR = -1
                 let is_negative = self.match_token(|t| matches!(t, Token::Minus));
                 match self.advance() {
-                    Some(Token::Constant { value }) => {
+                    Some(Token::Constant { value, .. }) => {
                         let actual_value = if is_negative { -value } else { *value };
                         next_value = actual_value;
                         actual_value

@@ -10,6 +10,8 @@ pub(crate) trait DeclarationParser {
     fn parse_program(&mut self) -> Result<Program, String>;
     fn parse_typedef(&mut self) -> Result<(), String>;
     fn parse_function(&mut self) -> Result<Function, String>;
+    fn parse_function_prototype(&mut self) -> Result<model::FunctionPrototype, String>;
+    fn parse_forward_struct_name(&mut self) -> Result<String, String>;
     fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String>;
     fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String>;
     fn parse_static_assert(&mut self) -> Result<(), String>;
@@ -23,6 +25,8 @@ impl<'a> DeclarationParser for Parser<'a> {
         let mut structs = Vec::new();
         let mut unions = Vec::new();
         let mut enums = Vec::new();
+        let mut prototypes = Vec::new();
+        let mut forward_structs = Vec::new();
 
         while !self.is_at_end() {
              if self.match_token(|t| matches!(t, Token::StaticAssert)) {
@@ -75,8 +79,13 @@ impl<'a> DeclarationParser for Parser<'a> {
                     }
                 }
             } else if self.peek() == Some(&Token::Extern) {
-                // Skip extern variable declarations BEFORE other type checks
-                let _ = self.skip_extern_declaration();
+                // Extern declarations: parse as globals with is_extern=true
+                // If it's a function declaration like "extern int foo(void);", 
+                // parse_globals will handle it — we fall back to skip on error.
+                match self.parse_globals() {
+                    Ok(gvars) => globals.extend(gvars),
+                    Err(_) => { let _ = self.skip_extern_declaration(); }
+                }
             } else if self.is_inline_function() {
                 // Skip extern/static inline functions from headers (e.g., printf/scanf wrappers)
                 let _ = self.skip_extern_inline_function();
@@ -93,9 +102,11 @@ impl<'a> DeclarationParser for Parser<'a> {
                     }
                 }
             } else if self.is_function_declaration() {
-                // Function prototype/declaration - just skip it
-                // The actual definition will come from another file or later
-                let _ = self.skip_function_declaration();
+                // Function prototype/declaration - parse and store
+                match self.parse_function_prototype() {
+                    Ok(proto) => prototypes.push(proto),
+                    Err(_) => { let _ = self.skip_function_declaration(); }
+                }
             } else if self.check_is_type() 
                 || self.check(|t| matches!(t, Token::Identifier { .. })) 
             {
@@ -103,7 +114,11 @@ impl<'a> DeclarationParser for Parser<'a> {
                 // Wrap in error handling to skip complex header constructs we can't parse
                 let parse_result = if self.check(|t| matches!(t, Token::Struct)) && self.is_struct_forward_declaration() {
                     // Forward struct declaration: struct foo;
-                    self.skip_forward_declaration()
+                    let name = self.parse_forward_struct_name();
+                    if let Ok(n) = &name {
+                        forward_structs.push(n.clone());
+                    }
+                    name.map(|_| ())
                 } else if self.check(|t| matches!(t, Token::Union)) && self.is_union_forward_declaration() {
                     // Forward union declaration: union foo;
                     self.skip_forward_declaration()
@@ -146,6 +161,8 @@ impl<'a> DeclarationParser for Parser<'a> {
             structs,
             unions,
             enums,
+            prototypes,
+            forward_structs,
         })
     }
 
@@ -298,18 +315,23 @@ impl<'a> DeclarationParser for Parser<'a> {
     }
 
     fn parse_function(&mut self) -> Result<Function, String> {
-        // Track inline and attributes before parsing type
+        // Track inline, static, and attributes before parsing type
         let saved_pos = self.pos;
         let mut is_inline = false;
+        let mut is_static = false;
         
-        // Scan for inline keyword
+        // Scan for inline/static keywords
         while self.pos < self.tokens.len() {
             match self.peek() {
                 Some(Token::Inline) => {
                     is_inline = true;
                     break;
                 }
-                Some(Token::Static | Token::Extern | Token::Const | Token::Volatile | Token::Restrict) => {
+                Some(Token::Static) => {
+                    is_static = true;
+                    self.pos += 1;
+                }
+                Some(Token::Extern | Token::Const | Token::Volatile | Token::Restrict) => {
                     self.pos += 1;
                 }
                 Some(Token::Attribute | Token::Extension) => {
@@ -370,8 +392,86 @@ impl<'a> DeclarationParser for Parser<'a> {
             params,
             body: body_block,
             is_inline,
+            is_static,
             attributes,
         })
+    }
+
+    fn parse_function_prototype(&mut self) -> Result<model::FunctionPrototype, String> {
+        // Skip storage class specifiers (extern, static, etc.)
+        while self.check(|t| matches!(t, Token::Extern | Token::Static | Token::Inline)) {
+            self.advance();
+        }
+        // Skip __extension__ / __attribute__
+        while self.check(|t| matches!(t, Token::Extension | Token::Attribute)) {
+            self.advance();
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
+                self.skip_parentheses()?;
+            }
+        }
+        
+        let return_type = self.parse_type()?;
+        
+        // Skip post-type attributes
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
+            self.advance();
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
+                self.skip_parentheses()?;
+            }
+        }
+        
+        let name = match self.advance() {
+            Some(Token::Identifier { value }) => value.clone(),
+            other => return Err(format!("expected function name, found {:?}", other)),
+        };
+        
+        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+        let params = self.parse_function_params()?;
+        
+        // Check for variadic
+        let is_variadic = self.check(|t| matches!(t, Token::Ellipsis));
+        if is_variadic {
+            self.advance();
+        }
+        
+        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+        
+        // Skip post-declaration attributes
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
+            self.advance();
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
+                self.skip_parentheses()?;
+            }
+        }
+        
+        self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        
+        Ok(model::FunctionPrototype {
+            return_type,
+            name,
+            params,
+            is_variadic,
+        })
+    }
+
+    fn parse_forward_struct_name(&mut self) -> Result<String, String> {
+        self.advance(); // skip 'struct'
+        
+        // Skip attributes
+        while self.check(|t| matches!(t, Token::Attribute | Token::Extension)) {
+            self.advance();
+            if self.check(|t| matches!(t, Token::OpenParenthesis)) {
+                self.skip_parentheses()?;
+            }
+        }
+        
+        let name = match self.advance() {
+            Some(Token::Identifier { value }) => value.clone(),
+            other => return Err(format!("expected struct name, found {:?}", other)),
+        };
+        
+        self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+        Ok(name)
     }
 
     fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String> {
@@ -431,6 +531,35 @@ impl<'a> DeclarationParser for Parser<'a> {
     fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String> {
         // Parse attributes before the type
         let mut attributes = self.parse_attributes()?;
+        
+        // Check for storage class specifiers before we parse the type (which consumes them)
+        let mut is_extern = false;
+        let mut is_static = false;
+        {
+            let mut peek_pos = self.pos;
+            while peek_pos < self.tokens.len() {
+                match &self.tokens[peek_pos] {
+                    Token::Extern => { is_extern = true; peek_pos += 1; }
+                    Token::Static => { is_static = true; peek_pos += 1; }
+                    Token::Const | Token::Volatile | Token::Restrict | Token::Inline => { peek_pos += 1; }
+                    Token::Attribute | Token::Extension => {
+                        peek_pos += 1;
+                        // Skip attribute parens
+                        if peek_pos < self.tokens.len() && matches!(&self.tokens[peek_pos], Token::OpenParenthesis) {
+                            let mut depth = 0;
+                            while peek_pos < self.tokens.len() {
+                                match &self.tokens[peek_pos] {
+                                    Token::OpenParenthesis => { depth += 1; peek_pos += 1; }
+                                    Token::CloseParenthesis => { depth -= 1; peek_pos += 1; if depth == 0 { break; } }
+                                    _ => { peek_pos += 1; }
+                                }
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
         
         let (base_type, qualifiers) = match self.parse_type_with_qualifiers() {
              Ok(res) => res,
@@ -493,6 +622,8 @@ impl<'a> DeclarationParser for Parser<'a> {
                 name,
                 init,
                 attributes: attributes.clone(),
+                is_extern,
+                is_static,
             });
 
             if !self.match_token(|t| matches!(t, Token::Comma)) {

@@ -407,6 +407,7 @@ impl Lowerer {
             entry_block: entry_id,
             var_types: self.var_types.clone(),
             attributes: f.attributes.clone(),
+            is_static: f.is_static,
         })
     }
 

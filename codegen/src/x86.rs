@@ -1,4 +1,5 @@
 // X86-64 register and instruction definitions
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum X86Reg {
@@ -44,19 +45,19 @@ pub enum X86Operand {
     FloatMem(X86Reg, i32), // [reg + offset] for float ops (no PTR directive for SSE)
 }
 
-impl X86Operand {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for X86Operand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Reg(r) => r.to_str().to_string(),
-            Self::Mem(r, offset) => format!("QWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::DwordMem(r, offset) => format!("DWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::WordMem(r, offset) => format!("WORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::ByteMem(r, offset) => format!("BYTE PTR [{}{:+}]", r.to_str(), offset),
-            Self::Imm(i) => i.to_string(),
-            Self::Label(s) => s.clone(), // Just emit the label as-is (for LEA)
-            Self::GlobalMem(name) => format!("DWORD PTR {}[rip]", name), // RIP-relative 32-bit int access
-            Self::RipRelLabel(name) => format!("{}[rip]", name), // RIP-relative label for LEA
-            Self::FloatMem(r, offset) => format!("DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::Reg(r) => f.write_str(r.to_str()),
+            Self::Mem(r, offset) => write!(f, "QWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::DwordMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::WordMem(r, offset) => write!(f, "WORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::ByteMem(r, offset) => write!(f, "BYTE PTR [{}{:+}]", r.to_str(), offset),
+            Self::Imm(i) => write!(f, "{}", i),
+            Self::Label(s) => f.write_str(s),
+            Self::GlobalMem(name) => write!(f, "DWORD PTR {}[rip]", name),
+            Self::RipRelLabel(name) => write!(f, "{}[rip]", name),
+            Self::FloatMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
         }
     }
 }
@@ -108,48 +109,51 @@ pub enum X86Instr {
 
 /// emit_asm converts X86 instructions to Intel syntax assembly
 pub fn emit_asm(instructions: &[X86Instr]) -> String {
+    use fmt::Write;
     let mut s = String::new();
     for instr in instructions {
         match instr {
-            X86Instr::Label(l) => s.push_str(&format!("{}:\n", l)),
-            X86Instr::Mov(d, src) => s.push_str(&format!("  mov {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Add(d, src) => s.push_str(&format!("  add {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Sub(d, src) => s.push_str(&format!("  sub {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Neg(d) => s.push_str(&format!("  neg {}\n", d.to_string())),
-            X86Instr::Imul(d, src) => s.push_str(&format!("  imul {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Idiv(src) => s.push_str(&format!("  idiv {}\n", src.to_string())),
-            X86Instr::Cmp(l, r) => s.push_str(&format!("  cmp {}, {}\n", l.to_string(), r.to_string())),
-            X86Instr::Test(l, r) => s.push_str(&format!("  test {}, {}\n", l.to_string(), r.to_string())),
-            X86Instr::Set(c, d) => s.push_str(&format!("  set{} {}\n", c, d.to_string())),
-            X86Instr::Jmp(l) => s.push_str(&format!("  jmp {}\n", l)),
-            X86Instr::Jcc(c, l) => s.push_str(&format!("  j{} {}\n", c, l)),
-            X86Instr::Push(r) => s.push_str(&format!("  push {}\n", r.to_str())),
-            X86Instr::Pop(r) => s.push_str(&format!("  pop {}\n", r.to_str())),
-            X86Instr::Call(l) => s.push_str(&format!("  call {}\n", l)),            X86Instr::CallIndirect(op) => s.push_str(&format!("  call {}\n", op.to_string())),            X86Instr::Ret => s.push_str("  ret\n"),
+            X86Instr::Label(l) => { let _ = write!(s, "{}:\n", l); }
+            X86Instr::Mov(d, src) => { let _ = write!(s, "  mov {}, {}\n", d, src); }
+            X86Instr::Add(d, src) => { let _ = write!(s, "  add {}, {}\n", d, src); }
+            X86Instr::Sub(d, src) => { let _ = write!(s, "  sub {}, {}\n", d, src); }
+            X86Instr::Neg(d) => { let _ = write!(s, "  neg {}\n", d); }
+            X86Instr::Imul(d, src) => { let _ = write!(s, "  imul {}, {}\n", d, src); }
+            X86Instr::Idiv(src) => { let _ = write!(s, "  idiv {}\n", src); }
+            X86Instr::Cmp(l, r) => { let _ = write!(s, "  cmp {}, {}\n", l, r); }
+            X86Instr::Test(l, r) => { let _ = write!(s, "  test {}, {}\n", l, r); }
+            X86Instr::Set(c, d) => { let _ = write!(s, "  set{} {}\n", c, d); }
+            X86Instr::Jmp(l) => { let _ = write!(s, "  jmp {}\n", l); }
+            X86Instr::Jcc(c, l) => { let _ = write!(s, "  j{} {}\n", c, l); }
+            X86Instr::Push(r) => { let _ = write!(s, "  push {}\n", r.to_str()); }
+            X86Instr::Pop(r) => { let _ = write!(s, "  pop {}\n", r.to_str()); }
+            X86Instr::Call(l) => { let _ = write!(s, "  call {}\n", l); }
+            X86Instr::CallIndirect(op) => { let _ = write!(s, "  call {}\n", op); }
+            X86Instr::Ret => s.push_str("  ret\n"),
             X86Instr::Leave => s.push_str("  leave\n"),
             X86Instr::Cqto => s.push_str("  cqo\n"),
             X86Instr::Cdq => s.push_str("  cdq\n"),
-            X86Instr::Xor(d, s_op) => s.push_str(&format!("  xor {}, {}\n", d.to_string(), s_op.to_string())),
-            X86Instr::Lea(d, s_op) => s.push_str(&format!("  lea {}, {}\n", d.to_string(), s_op.to_string())),
-            X86Instr::And(d, s_op) => s.push_str(&format!("  and {}, {}\n", d.to_string(), s_op.to_string())),
-            X86Instr::Or(d, s_op) => s.push_str(&format!("  or {}, {}\n", d.to_string(), s_op.to_string())),
-            X86Instr::Not(d) => s.push_str(&format!("  not {}\n", d.to_string())),
-            X86Instr::Shl(d, c) => s.push_str(&format!("  shl {}, {}\n", d.to_string(), c.to_string())),
-            X86Instr::Shr(d, c) => s.push_str(&format!("  shr {}, {}\n", d.to_string(), c.to_string())),
-            X86Instr::Sar(d, c) => s.push_str(&format!("  sar {}, {}\n", d.to_string(), c.to_string())),
-            X86Instr::Movsx(d, src) => s.push_str(&format!("  movsx {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Movzx(d, src) => s.push_str(&format!("  movzx {}, {}\n", d.to_string(), src.to_string())),
+            X86Instr::Xor(d, s_op) => { let _ = write!(s, "  xor {}, {}\n", d, s_op); }
+            X86Instr::Lea(d, s_op) => { let _ = write!(s, "  lea {}, {}\n", d, s_op); }
+            X86Instr::And(d, s_op) => { let _ = write!(s, "  and {}, {}\n", d, s_op); }
+            X86Instr::Or(d, s_op) => { let _ = write!(s, "  or {}, {}\n", d, s_op); }
+            X86Instr::Not(d) => { let _ = write!(s, "  not {}\n", d); }
+            X86Instr::Shl(d, c) => { let _ = write!(s, "  shl {}, {}\n", d, c); }
+            X86Instr::Shr(d, c) => { let _ = write!(s, "  shr {}, {}\n", d, c); }
+            X86Instr::Sar(d, c) => { let _ = write!(s, "  sar {}, {}\n", d, c); }
+            X86Instr::Movsx(d, src) => { let _ = write!(s, "  movsx {}, {}\n", d, src); }
+            X86Instr::Movzx(d, src) => { let _ = write!(s, "  movzx {}, {}\n", d, src); }
             // Float instructions
-            X86Instr::Movss(d, src) => s.push_str(&format!("  movss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Addss(d, src) => s.push_str(&format!("  addss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Subss(d, src) => s.push_str(&format!("  subss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Mulss(d, src) => s.push_str(&format!("  mulss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Divss(d, src) => s.push_str(&format!("  divss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Ucomiss(l, r) => s.push_str(&format!("  ucomiss {}, {}\n", l.to_string(), r.to_string())),
-            X86Instr::Cvtsi2ss(d, src) => s.push_str(&format!("  cvtsi2ss {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Cvttss2si(d, src) => s.push_str(&format!("  cvttss2si {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Xorps(d, src) => s.push_str(&format!("  xorps {}, {}\n", d.to_string(), src.to_string())),
-            X86Instr::Raw(asm_str) => s.push_str(&format!("  {}\n", asm_str)),
+            X86Instr::Movss(d, src) => { let _ = write!(s, "  movss {}, {}\n", d, src); }
+            X86Instr::Addss(d, src) => { let _ = write!(s, "  addss {}, {}\n", d, src); }
+            X86Instr::Subss(d, src) => { let _ = write!(s, "  subss {}, {}\n", d, src); }
+            X86Instr::Mulss(d, src) => { let _ = write!(s, "  mulss {}, {}\n", d, src); }
+            X86Instr::Divss(d, src) => { let _ = write!(s, "  divss {}, {}\n", d, src); }
+            X86Instr::Ucomiss(l, r) => { let _ = write!(s, "  ucomiss {}, {}\n", l, r); }
+            X86Instr::Cvtsi2ss(d, src) => { let _ = write!(s, "  cvtsi2ss {}, {}\n", d, src); }
+            X86Instr::Cvttss2si(d, src) => { let _ = write!(s, "  cvttss2si {}, {}\n", d, src); }
+            X86Instr::Xorps(d, src) => { let _ = write!(s, "  xorps {}, {}\n", d, src); }
+            X86Instr::Raw(asm_str) => { let _ = write!(s, "  {}\n", asm_str); }
         }
     }
     s

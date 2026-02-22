@@ -25,7 +25,10 @@ Top-level program parsing. `parse_program()` loops over tokens and dispatches to
 - Struct/union/enum definitions at file scope
 - Attribute parsing and propagation to the following declaration (handles `__attribute__((constructor))` before a function)
 
-Also handles deduplication of extern forward declarations and skipping of unsupported header constructs.
+- `parse_function_prototype()` — function declarations without bodies (stored in `Program.prototypes`)
+- `parse_forward_struct_name()` — forward struct declarations (`struct foo;`, stored in `Program.forward_structs`)
+
+Tracks `extern` keyword → sets `GlobalVar.is_extern = true`. Tracks `static` keyword → sets `Function.is_static` / `GlobalVar.is_static = true`. Handles deduplication of extern forward declarations and skipping of unsupported header constructs.
 
 ### `expressions.rs` — `ExpressionParser` trait
 Expression parsing via precedence climbing, from lowest to highest precedence:

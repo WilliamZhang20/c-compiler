@@ -1,5 +1,5 @@
 use crate::lex;
-use model::Token;
+use model::{Token, IntegerSuffix};
 
 #[test]
 fn test_float_starting_with_dot() {
@@ -46,15 +46,15 @@ fn test_char_escape_sequences() {
     let input = "'\\x41'";
     let tokens = lex(input).expect("lexing should succeed");
     assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0], Token::Constant { value: 0x41 }); // 'A'
+    assert_eq!(tokens[0], Token::Constant { value: 0x41, suffix: IntegerSuffix::None }); // 'A'
     
     // Test \a alert
     let input = "'\\a'";
     let tokens = lex(input).expect("lexing should succeed");
-    assert_eq!(tokens[0], Token::Constant { value: 7 });
+    assert_eq!(tokens[0], Token::Constant { value: 7, suffix: IntegerSuffix::None });
     
     // Test \b backspace
     let input = "'\\b'";
     let tokens = lex(input).expect("lexing should succeed");
-    assert_eq!(tokens[0], Token::Constant { value: 8 });
+    assert_eq!(tokens[0], Token::Constant { value: 8, suffix: IntegerSuffix::None });
 }

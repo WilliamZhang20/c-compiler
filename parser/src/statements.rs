@@ -495,7 +495,7 @@ impl<'a> Parser<'a> {
             } else if self.match_token(|t| matches!(t, Token::OpenBracket)) {
                 // Designated index: [index] = expr
                 let index = match self.advance() {
-                    Some(Token::Constant { value }) => *value,
+                    Some(Token::Constant { value, .. }) => *value,
                     other => return Err(format!("expected constant index in designator, found {:?}", other)),
                 };
                 self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;

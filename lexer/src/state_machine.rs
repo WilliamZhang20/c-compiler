@@ -1,6 +1,37 @@
-use model::Token;
+use model::{Token, IntegerSuffix};
 use crate::keywords::keyword_or_identifier;
 use crate::literals::{parse_char_literal, parse_int_constant, parse_float_literal};
+
+/// Parse integer suffix characters (U, L, UL, LL, ULL, etc.) from the current position.
+/// Returns the parsed IntegerSuffix.
+fn parse_integer_suffix(input: &[u8], pos: &mut usize) -> IntegerSuffix {
+    let mut has_u = false;
+    let mut long_count = 0;
+    
+    while *pos < input.len() {
+        match input[*pos] as char {
+            'u' | 'U' if !has_u => {
+                has_u = true;
+                *pos += 1;
+            }
+            'l' | 'L' if long_count < 2 => {
+                long_count += 1;
+                *pos += 1;
+            }
+            _ => break,
+        }
+    }
+    
+    match (has_u, long_count) {
+        (false, 0) => IntegerSuffix::None,
+        (true, 0) => IntegerSuffix::U,
+        (false, 1) => IntegerSuffix::L,
+        (true, 1) => IntegerSuffix::UL,
+        (false, 2) => IntegerSuffix::LL,
+        (true, 2) => IntegerSuffix::ULL,
+        _ => IntegerSuffix::None,
+    }
+}
 
 pub struct StateMachineLexer<'a> {
     input: &'a [u8],
@@ -288,13 +319,23 @@ impl<'a> StateMachineLexer<'a> {
         };
         
         self.pos += 1; // Skip closing quote
-        Ok(Some(Token::Constant { value }))
+        Ok(Some(Token::Constant { value, suffix: IntegerSuffix::None }))
     }
 
     fn lex_number(&mut self) -> Result<Option<Token>, String> {
         // Check for hexadecimal
         if self.current_char() == '0' && matches!(self.peek(1), Some('x') | Some('X')) {
             return self.lex_hex_number();
+        }
+
+        // Check for binary literals (0b...)
+        if self.current_char() == '0' && matches!(self.peek(1), Some('b') | Some('B')) {
+            return self.lex_binary_number();
+        }
+
+        // Check for octal literals (0 followed by octal digits)
+        if self.current_char() == '0' && self.peek(1).map_or(false, |c| matches!(c, '0'..='7')) {
+            return self.lex_octal_number();
         }
 
         let start = self.pos;
@@ -344,13 +385,47 @@ impl<'a> StateMachineLexer<'a> {
             Ok(Some(Token::FloatLiteral { value }))
         } else {
             let value = parse_int_constant(text)?;
-            // Consume integer suffixes: U, L, UL, LL, ULL, LU, etc.
-            while self.pos < self.input.len() 
-                  && matches!(self.current_char(), 'u' | 'U' | 'l' | 'L') {
-                self.pos += 1;
-            }
-            Ok(Some(Token::Constant { value }))
+            let suffix = parse_integer_suffix(self.input, &mut self.pos);
+            Ok(Some(Token::Constant { value, suffix }))
         }
+    }
+
+    fn lex_octal_number(&mut self) -> Result<Option<Token>, String> {
+        self.pos += 1; // Skip leading '0'
+        let start = self.pos;
+
+        while self.pos < self.input.len() && matches!(self.current_char(), '0'..='7') {
+            self.pos += 1;
+        }
+
+        let octal_str = std::str::from_utf8(&self.input[start..self.pos])
+            .expect("Invalid UTF-8 in octal number");
+        let value = i64::from_str_radix(octal_str, 8)
+            .map_err(|_| format!("Invalid octal number: 0{}", octal_str))?;
+
+        let suffix = parse_integer_suffix(self.input, &mut self.pos);
+        Ok(Some(Token::Constant { value, suffix }))
+    }
+
+    fn lex_binary_number(&mut self) -> Result<Option<Token>, String> {
+        self.pos += 2; // Skip '0b' or '0B'
+        let start = self.pos;
+
+        while self.pos < self.input.len() && matches!(self.current_char(), '0' | '1') {
+            self.pos += 1;
+        }
+
+        if self.pos == start {
+            return Err("Invalid binary number: no digits after 0b".to_string());
+        }
+
+        let bin_str = std::str::from_utf8(&self.input[start..self.pos])
+            .expect("Invalid UTF-8 in binary number");
+        let value = i64::from_str_radix(bin_str, 2)
+            .map_err(|_| format!("Invalid binary number: 0b{}", bin_str))?;
+
+        let suffix = parse_integer_suffix(self.input, &mut self.pos);
+        Ok(Some(Token::Constant { value, suffix }))
     }
 
     fn lex_hex_number(&mut self) -> Result<Option<Token>, String> {
@@ -371,12 +446,8 @@ impl<'a> StateMachineLexer<'a> {
         let text = std::str::from_utf8(&self.input[self.token_start..self.pos])
             .expect("Invalid UTF-8 in hex number");
         let value = parse_int_constant(text)?;
-        // Consume integer suffixes: U, L, UL, LL, ULL, etc.
-        while self.pos < self.input.len() 
-              && matches!(self.current_char(), 'u' | 'U' | 'l' | 'L') {
-            self.pos += 1;
-        }
-        Ok(Some(Token::Constant { value }))
+        let suffix = parse_integer_suffix(self.input, &mut self.pos);
+        Ok(Some(Token::Constant { value, suffix }))
     }
 
     fn lex_identifier(&mut self) -> Result<Option<Token>, String> {
@@ -489,7 +560,7 @@ mod tests {
         assert!(matches!(tokens[0], Token::Int));
         assert!(matches!(tokens[1], Token::Identifier { .. }));
         assert!(matches!(tokens[2], Token::Equal));
-        assert!(matches!(tokens[3], Token::Constant { value: 123 }));
+        assert!(matches!(tokens[3], Token::Constant { value: 123, suffix: IntegerSuffix::None }));
         assert!(matches!(tokens[4], Token::Semicolon));
     }
 
@@ -508,7 +579,25 @@ mod tests {
         let mut lexer = StateMachineLexer::new(input);
         let tokens = lexer.tokenize().expect("Should tokenize");
         
-        assert_eq!(tokens[3], Token::Constant { value: 255 });
+        assert_eq!(tokens[3], Token::Constant { value: 255, suffix: IntegerSuffix::None });
+    }
+
+    #[test]
+    fn test_state_machine_octal() {
+        let input = "int x = 0777;";
+        let mut lexer = StateMachineLexer::new(input);
+        let tokens = lexer.tokenize().expect("Should tokenize");
+        
+        assert_eq!(tokens[3], Token::Constant { value: 0o777, suffix: IntegerSuffix::None });
+    }
+
+    #[test]
+    fn test_state_machine_binary() {
+        let input = "int x = 0b1010;";
+        let mut lexer = StateMachineLexer::new(input);
+        let tokens = lexer.tokenize().expect("Should tokenize");
+        
+        assert_eq!(tokens[3], Token::Constant { value: 10, suffix: IntegerSuffix::None });
     }
 
     #[test]

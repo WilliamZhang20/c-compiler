@@ -8,16 +8,7 @@ use crate::function::FunctionGenerator;
 
 impl<'a> FunctionGenerator<'a> {
     pub(crate) fn get_current_block_id(&self) -> BlockId {
-        for instr in self.asm.iter().rev() {
-            if let X86Instr::Label(l) = instr {
-                if let Some(pos) = l.rfind('_') {
-                    if let Ok(id) = l[pos+1..].parse::<usize>() {
-                        return BlockId(id);
-                    }
-                }
-            }
-        }
-        BlockId(0)
+        self.current_block
     }
 
     pub(crate) fn resolve_phis(&mut self, target: BlockId, from: BlockId, func: &IrFunction) {

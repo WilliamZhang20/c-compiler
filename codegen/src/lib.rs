@@ -90,6 +90,11 @@ impl Codegen {
         if !prog.globals.is_empty() {
              if prog.global_strings.is_empty() { output.push_str(".data\n"); }
              for g in &prog.globals {
+                 // Skip extern declarations (no storage emitted for them)
+                 if g.is_extern && g.init.is_none() {
+                     continue;
+                 }
+                 
                  // Handle section attribute
                  let mut in_custom_section = false;
                  for attr in &g.attributes {
@@ -110,7 +115,11 @@ impl Codegen {
                      }
                  }
                  
-                 output.push_str(&format!(".globl {}\n", g.name));
+                 if g.is_static {
+                     // Static linkage: not visible outside this translation unit
+                 } else {
+                     output.push_str(&format!(".globl {}\n", g.name));
+                 }
                  
                  // Handle aligned attribute (default to 4-byte alignment otherwise)
                  let mut alignment = 4;
@@ -186,8 +195,12 @@ impl Codegen {
         output.push_str(".text\n");
         
         for func in &prog.functions {
-            // Emit .globl directive for all functions (for linking)
-            output.push_str(&format!(".globl {}\n", func.name));
+            // Emit visibility directive
+            if func.is_static {
+                // Static linkage: internal visibility only
+            } else {
+                output.push_str(&format!(".globl {}\n", func.name));
+            }
             
             // Check for weak attribute
             if func.attributes.iter().any(|a| matches!(a, model::Attribute::Weak)) {

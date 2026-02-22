@@ -107,17 +107,13 @@ impl<'a> Mem2RegPass<'a> {
                 }
             }
         }
-        self.alloca_types = alloca_types.clone();
         
         for (id, ty) in &alloca_types {
             if Self::is_scalar_type(ty) && !Self::is_address_taken(self.func, *id) {
                 self.promotable.insert(*id);
-            } else {
-                // println!("Not promotable: VarId({}) (scalar: {}, address_taken: {})", 
-                //     id.0, Self::is_scalar_type(ty), Self::is_address_taken(self.func, *id));
             }
         }
-        // println!("Promotable allocas: {:?}", self.promotable);
+        self.alloca_types = alloca_types;
     }
     
     fn ensure_zeros(&mut self) {
@@ -180,8 +176,8 @@ impl<'a> Mem2RegPass<'a> {
         let mut new_instructions = Vec::new();
         let mut local_defs: HashMap<VarId, VarId> = HashMap::new(); 
         
-        // Clone instructions to allow mutable borrow of self during processing
-        let instructions = self.func.blocks[block_idx].instructions.clone();
+        // Temporarily take instructions to avoid cloning while allowing mutable self access
+        let instructions = std::mem::take(&mut self.func.blocks[block_idx].instructions);
         
         for instr in &instructions {
             match instr {

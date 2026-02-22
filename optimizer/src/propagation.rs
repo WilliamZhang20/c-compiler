@@ -34,26 +34,32 @@ pub fn copy_propagation(func: &mut Function) {
 
     // Resolve transitive copies: if x=y and y=z, then x=z
     // This is important for chains of copies that arise from SSA construction
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut new_copies = copies.clone();
-        
-        for (dest, src) in &copies {
-            if let Operand::Var(src_var) = src {
-                if let Some(transitive_src) = copies.get(src_var) {
-                    // Don't create circular references
-                    if !would_create_cycle(dest, transitive_src, &copies) {
-                        if &new_copies[dest] != transitive_src {
-                            new_copies.insert(*dest, transitive_src.clone());
-                            changed = true;
-                        }
-                    }
+    // Resolve in-place by following chains without cloning the entire map
+    let keys: Vec<VarId> = copies.keys().copied().collect();
+    for start in keys {
+        let mut var = start;
+        // Follow the chain: var -> src -> src's src -> ...
+        loop {
+            if let Some(Operand::Var(src_var)) = copies.get(&var) {
+                let next = *src_var;
+                if next == start {
+                    break; // cycle
                 }
+                if copies.contains_key(&next) {
+                    var = next;
+                } else {
+                    break;
+                }
+            } else {
+                break;
             }
         }
-        
-        copies = new_copies;
+        // If we followed a chain, update to the final target
+        if var != start {
+            if let Some(final_op) = copies.get(&var).cloned() {
+                copies.insert(start, final_op);
+            }
+        }
     }
 
     // Track which variables are used after propagation
@@ -152,18 +158,6 @@ pub fn copy_propagation(func: &mut Function) {
             }
         });
     }
-}
-
-fn would_create_cycle(dest: &VarId, src: &Operand, copies: &HashMap<VarId, Operand>) -> bool {
-    if let Operand::Var(src_var) = src {
-        if src_var == dest {
-            return true;
-        }
-        if let Some(next_src) = copies.get(src_var) {
-            return would_create_cycle(dest, next_src, copies);
-        }
-    }
-    false
 }
 
 fn replace_operand(op: &mut Operand, copies: &HashMap<VarId, Operand>) {

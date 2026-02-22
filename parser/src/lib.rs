@@ -466,4 +466,51 @@ mod tests {
             panic!("Expected nested Call");
         }
     }
+
+    #[test]
+    fn parse_function_prototype() {
+        let src = "int compute(int a, int b); int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert_eq!(program.prototypes.len(), 1);
+        assert_eq!(program.prototypes[0].name, "compute");
+        assert_eq!(program.prototypes[0].params.len(), 2);
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn parse_extern_global() {
+        let src = "extern int external_val; int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(program.globals.iter().any(|g| g.name == "external_val" && g.is_extern));
+    }
+
+    #[test]
+    fn parse_static_function() {
+        let src = "static int helper(int x) { return x + 1; } int main() { return helper(0); }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let helper = program.functions.iter().find(|f| f.name == "helper").unwrap();
+        assert!(helper.is_static);
+        let main_fn = program.functions.iter().find(|f| f.name == "main").unwrap();
+        assert!(!main_fn.is_static);
+    }
+
+    #[test]
+    fn parse_static_global() {
+        let src = "static int counter = 5; int main() { return counter; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        let counter = program.globals.iter().find(|g| g.name == "counter").unwrap();
+        assert!(counter.is_static);
+    }
+
+    #[test]
+    fn parse_forward_struct() {
+        let src = "struct opaque; int main() { return 0; }";
+        let tokens = lex(src).unwrap();
+        let program = parse_tokens(&tokens).unwrap();
+        assert!(program.forward_structs.contains(&"opaque".to_string()));
+    }
 }

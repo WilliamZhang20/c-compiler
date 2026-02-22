@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use crate::x86::{X86Reg, X86Operand, X86Instr};
 use model::Type;
-use ir::{Function as IrFunction, VarId, Operand, Instruction as IrInstruction, Terminator as IrTerminator};
+use ir::{Function as IrFunction, VarId, BlockId, Operand, Instruction as IrInstruction, Terminator as IrTerminator};
 use crate::regalloc::{PhysicalReg, allocate_registers};
 use crate::instructions::InstructionGenerator;
 use crate::types::TypeCalculator;
@@ -30,6 +30,7 @@ pub struct FunctionGenerator<'a> {
     pub(crate) alloca_buffers: HashMap<VarId, i32>,
     pub(crate) current_saved_regs: Vec<X86Reg>,
     pub(crate) enable_regalloc: bool,
+    pub(crate) current_block: BlockId,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -57,6 +58,7 @@ impl<'a> FunctionGenerator<'a> {
             alloca_buffers: HashMap::new(),
             current_saved_regs: Vec::new(),
             enable_regalloc,
+            current_block: BlockId(0),
         }
     }
 
@@ -283,6 +285,7 @@ impl<'a> FunctionGenerator<'a> {
                 continue;
             }
             
+            self.current_block = block.id;
             self.asm.push(X86Instr::Label(format!("{}_{}", func.name, block.id.0)));
             for inst in &block.instructions {
                 self.gen_instr(inst);
@@ -718,8 +721,9 @@ impl<'a> FunctionGenerator<'a> {
     }
     
     pub(crate) fn get_or_create_float_const(&mut self, value: f64) -> String {
+        let bits = value.to_bits();
         for (label, &v) in self.float_constants.iter() {
-            if (v - value).abs() < f64::EPSILON {
+            if v.to_bits() == bits {
                 return label.clone();
             }
         }

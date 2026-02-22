@@ -17,20 +17,17 @@ use std::collections::HashMap;
 pub fn load_forwarding(func: &mut Function) {
     for block in &mut func.blocks {
         // Map from address operand → (stored value operand, value_type)
-        // We key on the string representation of the operand for simplicity
-        let mut known_stores: HashMap<String, (Operand, Type)> = HashMap::new();
+        let mut known_stores: HashMap<Operand, (Operand, Type)> = HashMap::new();
         let mut replacements: Vec<(usize, Instruction)> = Vec::new();
 
         for (i, inst) in block.instructions.iter().enumerate() {
             match inst {
                 Instruction::Store { addr, src, value_type } => {
                     // Record that this address now holds this value
-                    let key = format!("{:?}", addr);
-                    known_stores.insert(key, (src.clone(), value_type.clone()));
+                    known_stores.insert(addr.clone(), (src.clone(), value_type.clone()));
                 }
                 Instruction::Load { dest, addr, value_type } => {
-                    let key = format!("{:?}", addr);
-                    if let Some((stored_val, stored_type)) = known_stores.get(&key) {
+                    if let Some((stored_val, stored_type)) = known_stores.get(addr) {
                         // Types must match for the forwarding to be correct
                         if stored_type == value_type {
                             // Replace load with copy from the stored value
@@ -83,24 +80,22 @@ fn dead_store_elimination(func: &mut Function) {
     for block in &mut func.blocks {
         // Scan backwards to find dead stores
         // Track addresses that are stored to without being loaded
-        let mut overwritten: HashSet<String> = HashSet::new();
+        let mut overwritten: HashSet<Operand> = HashSet::new();
         let mut dead_indices: Vec<usize> = Vec::new();
 
         for i in (0..block.instructions.len()).rev() {
             match &block.instructions[i] {
                 Instruction::Store { addr, .. } => {
-                    let key = format!("{:?}", addr);
-                    if overwritten.contains(&key) {
+                    if overwritten.contains(addr) {
                         // This store is dead — a later store overwrites it
                         dead_indices.push(i);
                     } else {
-                        overwritten.insert(key);
+                        overwritten.insert(addr.clone());
                     }
                 }
                 Instruction::Load { addr, .. } => {
                     // A load reads from this address — earlier stores are NOT dead
-                    let key = format!("{:?}", addr);
-                    overwritten.remove(&key);
+                    overwritten.remove(addr);
                 }
                 // Calls/asm may read any memory — clear all
                 Instruction::Call { .. } | Instruction::IndirectCall { .. }

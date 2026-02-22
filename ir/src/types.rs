@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use model::{BinaryOp, UnaryOp, Type, GlobalVar as AstGlobalVar};
 
 /// Variable identifier in IR
@@ -16,6 +17,20 @@ pub enum Operand {
     FloatConstant(f64),
     Var(VarId),
     Global(String),
+}
+
+impl Eq for Operand {}
+
+impl Hash for Operand {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Operand::Constant(v) => v.hash(state),
+            Operand::FloatConstant(v) => v.to_bits().hash(state),
+            Operand::Var(v) => v.hash(state),
+            Operand::Global(s) => s.hash(state),
+        }
+    }
 }
 
 /// IR Instructions in SSA form
@@ -148,6 +163,8 @@ pub struct Function {
     pub var_types: HashMap<VarId, Type>,
     /// Function attributes (weak, section, noreturn, etc.)
     pub attributes: Vec<model::Attribute>,
+    /// Whether this function has internal (static) linkage
+    pub is_static: bool,
 }
 
 /// Complete IR program

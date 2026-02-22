@@ -41,7 +41,7 @@ impl<'a> AttributeParser for Parser<'a> {
                         // Parse aligned(N)
                         if self.match_token(|t| matches!(t, Token::OpenParenthesis)) {
                             match self.advance() {
-                                Some(Token::Constant { value }) => {
+                                Some(Token::Constant { value, .. }) => {
                                     attributes.push(Attribute::Aligned(*value as usize));
                                 }
                                 other => {

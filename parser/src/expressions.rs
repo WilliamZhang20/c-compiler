@@ -592,7 +592,7 @@ impl<'a> Parser<'a> {
                     _ => Ok(Expr::Variable(value.clone())),
                 }
             }
-            Some(Token::Constant { value }) => Ok(Expr::Constant(*value)),
+            Some(Token::Constant { value, .. }) => Ok(Expr::Constant(*value)),
             Some(Token::FloatLiteral { value }) => Ok(Expr::FloatConstant(*value)),
             Some(Token::StringLiteral { value }) => Ok(Expr::StringLiteral(value.clone())),
             Some(Token::OpenParenthesis) => {

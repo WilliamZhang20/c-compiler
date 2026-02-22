@@ -36,12 +36,16 @@ struct Args {
     parse: bool,
 
     /// Run lexer, parser, and codegen only
-    #[arg(short, long)]
+    #[arg(long)]
     codegen: bool,
 
     /// Emit assembly but do not assemble or link
     #[arg(short = 'S', long)]
     emit_asm: bool,
+
+    /// Compile and assemble but do not link (produce .o files)
+    #[arg(short = 'c')]
+    compile_only: bool,
 
     /// Keep intermediate files (.i, .s)
     #[arg(long, default_value_t = false)]
@@ -50,6 +54,30 @@ struct Args {
     /// Enable debug output
     #[arg(short, long, default_value_t = false)]
     debug: bool,
+
+    /// Preprocessor macro definitions (-DNAME or -DNAME=VALUE)
+    #[arg(short = 'D', value_name = "MACRO")]
+    defines: Vec<String>,
+
+    /// Undefine preprocessor macros (-UNAME)
+    #[arg(short = 'U', value_name = "MACRO")]
+    undefines: Vec<String>,
+
+    /// Additional include paths (-Ipath)
+    #[arg(short = 'I', value_name = "PATH")]
+    include_paths: Vec<String>,
+
+    /// Force-include a header file (-include file)
+    #[arg(long = "include", value_name = "FILE")]
+    force_includes: Vec<String>,
+
+    /// Build without standard library
+    #[arg(long)]
+    nostdlib: bool,
+
+    /// Freestanding environment (no hosted assumptions)
+    #[arg(long)]
+    ffreestanding: bool,
 }
 
 fn main() {
@@ -68,7 +96,29 @@ fn main() {
     let stop_after_codegen = args.codegen;
     let stop_after_parse = args.parse;
     let stop_after_lex = args.lex;
+    let compile_only = args.compile_only;
+    let nostdlib = args.nostdlib;
+    let ffreestanding = args.ffreestanding;
     let keep_intermediates = args.keep_intermediates || stop_after_emit_asm;
+
+    // Build extra preprocessor flags from -D, -U, -I, -include
+    let mut cpp_extra_args = Vec::new();
+    for d in &args.defines {
+        cpp_extra_args.push(format!("-D{}", d));
+    }
+    for u in &args.undefines {
+        cpp_extra_args.push(format!("-U{}", u));
+    }
+    for i in &args.include_paths {
+        cpp_extra_args.push(format!("-I{}", i));
+    }
+    for inc in &args.force_includes {
+        cpp_extra_args.push("-include".to_string());
+        cpp_extra_args.push(inc.clone());
+    }
+    if ffreestanding {
+        cpp_extra_args.push("-ffreestanding".to_string());
+    }
 
     log!("DEBUG: Checking gcc...");
     // Check for gcc
@@ -97,7 +147,7 @@ fn main() {
 
         log!("Processing file: {}", input_path);
         log!("Step 1: Preprocessing...");
-        let preprocessed_path = preprocess(&input_path, input_file);
+        let preprocessed_path = preprocess(&input_path, input_file, &cpp_extra_args);
         log!("Step 1: Done");
 
         let src = std::fs::read_to_string(&preprocessed_path).expect("failed to read preprocessed file");
@@ -175,6 +225,26 @@ fn main() {
         return;
     }
 
+    // -c: assemble each .s to .o, skip linking
+    if compile_only {
+        for asm_path in &asm_paths {
+            let obj_path = if let Some(ref out) = args.output {
+                // -o overrides output name (only valid for single file)
+                out.clone()
+            } else {
+                asm_path.replace(".s", ".o")
+            };
+            assemble(asm_path, &obj_path);
+        }
+        for path in preprocessed_paths {
+            cleanup(&path);
+        }
+        for path in asm_paths {
+            cleanup(&path);
+        }
+        return;
+    }
+
     // Determine output executable name
     let output_name = if let Some(name) = args.output {
         name
@@ -188,7 +258,7 @@ fn main() {
     };
 
     log!("Step 8: Linking...");
-    run_linker(&asm_paths, &output_name);
+    run_linker(&asm_paths, &output_name, nostdlib, ffreestanding);
     log!("Step 8: Done");
     println!("Compilation successful. Generated executable: {}", output_name);
 
@@ -201,12 +271,21 @@ fn main() {
     }
 }
 
-fn preprocess(input_path: &str, input_file: &Path) -> String {
+fn preprocess(input_path: &str, input_file: &Path, extra_args: &[String]) -> String {
     let mut preprocessed_path = input_file.file_stem().unwrap().to_string_lossy().to_string();
     preprocessed_path.push_str(".i");
 
-    let exit_code = Command::new("gcc")
-        .args(["-E", "-P", "-Iinclude", input_path, "-o", &preprocessed_path])
+    let mut cmd = Command::new("gcc");
+    cmd.args(["-E", "-P", "-Iinclude"]);
+    
+    // Forward extra preprocessor flags (-D, -U, -I, -include)
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    
+    cmd.args([input_path, "-o", &preprocessed_path]);
+
+    let exit_code = cmd
         .status()
         .expect("failed to execute process");
 
@@ -219,7 +298,21 @@ fn preprocess(input_path: &str, input_file: &Path) -> String {
     preprocessed_path
 }
 
-fn run_linker(asm_paths: &[String], output_file: &str) {
+fn assemble(asm_path: &str, obj_path: &str) {
+    let exit_code = Command::new("gcc")
+        .args(["-c", asm_path, "-o", obj_path])
+        .status()
+        .expect("failed to run gcc assembler");
+
+    if !exit_code.success() {
+        if let Some(code) = exit_code.code() {
+            panic!("gcc assembly failed with exit code {}", code);
+        }
+        panic!("gcc assembly was terminated by a signal");
+    }
+}
+
+fn run_linker(asm_paths: &[String], output_file: &str, nostdlib: bool, ffreestanding: bool) {
     let platform = model::Platform::host();
 
     let mut args = Vec::new();
@@ -235,6 +328,14 @@ fn run_linker(asm_paths: &[String], output_file: &str) {
     // Add platform-specific linker flags
     if platform.needs_console_flag() {
         args.push("-mconsole".to_string());
+    }
+    
+    // Freestanding/nostdlib flags
+    if nostdlib {
+        args.push("-nostdlib".to_string());
+    }
+    if ffreestanding {
+        args.push("-ffreestanding".to_string());
     }
 
     let exit_code = Command::new("gcc")

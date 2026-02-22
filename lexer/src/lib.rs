@@ -16,6 +16,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::IntegerSuffix;
 
     #[test]
     fn lex_simple_identifier_and_constant() {
@@ -25,7 +26,7 @@ mod tests {
             tokens,
             vec![
                 Token::Identifier { value: "foo".to_string() },
-                Token::Constant { value: 123 },
+                Token::Constant { value: 123, suffix: IntegerSuffix::None },
             ]
         );
     }
@@ -40,13 +41,13 @@ mod tests {
                 Token::Int,
                 Token::Identifier { value: "x".to_string() },
                 Token::Equal,
-                Token::Constant { value: 1 },
+                Token::Constant { value: 1, suffix: IntegerSuffix::None },
                 Token::Semicolon,
                 Token::If,
                 Token::OpenParenthesis,
                 Token::Identifier { value: "x".to_string() },
                 Token::EqualEqual,
-                Token::Constant { value: 1 },
+                Token::Constant { value: 1, suffix: IntegerSuffix::None },
                 Token::CloseParenthesis,
                 Token::Return,
                 Token::Semicolon,
@@ -67,7 +68,7 @@ mod tests {
                 Token::Int,
                 Token::Identifier { value: "x".to_string() },
                 Token::Equal,
-                Token::Constant { value: 2 },
+                Token::Constant { value: 2, suffix: IntegerSuffix::None },
                 Token::Semicolon,
             ]
         );
@@ -101,13 +102,13 @@ mod tests {
     #[test]
     fn lex_char_literal() {
         let tokens = lex("'A'").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 65 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 65, suffix: IntegerSuffix::None }]);
     }
 
     #[test]
     fn lex_char_newline_escape() {
         let tokens = lex(r"'\n'").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 10 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 10, suffix: IntegerSuffix::None }]);
     }
 
     #[test]
@@ -115,26 +116,26 @@ mod tests {
         // Multi-character constant 'AB' should pack big-endian: 'A'<<8 | 'B'
         let tokens = lex("'AB'").unwrap();
         let expected = (b'A' as i64) << 8 | (b'B' as i64);
-        assert_eq!(tokens, vec![Token::Constant { value: expected }]);
+        assert_eq!(tokens, vec![Token::Constant { value: expected, suffix: IntegerSuffix::None }]);
     }
 
     // ─── Numeric literal tests ──────────────────────────────────
     #[test]
     fn lex_hex_constant() {
         let tokens = lex("0x1F").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 31 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 31, suffix: IntegerSuffix::None }]);
     }
 
     #[test]
     fn lex_hex_uppercase() {
         let tokens = lex("0XFF").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 255 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 255, suffix: IntegerSuffix::None }]);
     }
 
     #[test]
     fn lex_zero() {
         let tokens = lex("0").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 0 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 0, suffix: IntegerSuffix::None }]);
     }
 
     #[test]
@@ -155,31 +156,82 @@ mod tests {
     fn lex_integer_suffix_u() {
         // Integer with U suffix should still produce a Constant
         let tokens = lex("42U").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 42 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 42, suffix: IntegerSuffix::U }]);
     }
 
     #[test]
     fn lex_integer_suffix_ul() {
         let tokens = lex("100UL").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 100 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 100, suffix: IntegerSuffix::UL }]);
     }
 
     #[test]
     fn lex_integer_suffix_ull() {
         let tokens = lex("999ULL").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 999 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 999, suffix: IntegerSuffix::ULL }]);
     }
 
     #[test]
     fn lex_integer_suffix_ll() {
         let tokens = lex("123LL").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 123 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 123, suffix: IntegerSuffix::LL }]);
     }
 
     #[test]
     fn lex_hex_with_suffix() {
         let tokens = lex("0xFFUL").unwrap();
-        assert_eq!(tokens, vec![Token::Constant { value: 255 }]);
+        assert_eq!(tokens, vec![Token::Constant { value: 255, suffix: IntegerSuffix::UL }]);
+    }
+
+    // ─── Octal literal tests ────────────────────────────────────
+    #[test]
+    fn lex_octal_simple() {
+        let tokens = lex("0777").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 0o777, suffix: IntegerSuffix::None }]); // 511
+    }
+
+    #[test]
+    fn lex_octal_permissions() {
+        let tokens = lex("0644").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 0o644, suffix: IntegerSuffix::None }]); // 420
+    }
+
+    #[test]
+    fn lex_octal_small() {
+        let tokens = lex("01").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 1, suffix: IntegerSuffix::None }]);
+    }
+
+    #[test]
+    fn lex_octal_with_suffix() {
+        let tokens = lex("0777UL").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 0o777, suffix: IntegerSuffix::UL }]);
+    }
+
+    #[test]
+    fn lex_zero_still_works() {
+        // Plain 0 should still be 0, not octal
+        let tokens = lex("0").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 0, suffix: IntegerSuffix::None }]);
+    }
+
+    // ─── Binary literal tests ───────────────────────────────────
+    #[test]
+    fn lex_binary_simple() {
+        let tokens = lex("0b1010").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 10, suffix: IntegerSuffix::None }]);
+    }
+
+    #[test]
+    fn lex_binary_uppercase() {
+        let tokens = lex("0B11111111").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 255, suffix: IntegerSuffix::None }]);
+    }
+
+    #[test]
+    fn lex_binary_with_suffix() {
+        let tokens = lex("0b1010UL").unwrap();
+        assert_eq!(tokens, vec![Token::Constant { value: 10, suffix: IntegerSuffix::UL }]);
     }
 
     // ─── Operator tests ─────────────────────────────────────────
@@ -297,7 +349,7 @@ mod tests {
             Token::OpenParenthesis,
             Token::Identifier { value: "x".to_string() },
             Token::Plus,
-            Token::Constant { value: 1 },
+            Token::Constant { value: 1, suffix: IntegerSuffix::None },
             Token::CloseParenthesis,
         ]);
     }
@@ -324,7 +376,7 @@ mod tests {
             Token::Dot,
             Token::Identifier { value: "c".to_string() },
             Token::OpenBracket,
-            Token::Constant { value: 0 },
+            Token::Constant { value: 0, suffix: IntegerSuffix::None },
             Token::CloseBracket,
         ]);
     }
