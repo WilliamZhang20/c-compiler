@@ -184,3 +184,65 @@ pub fn gen_float_unary_op(generator: &mut FunctionGenerator, dest: VarId, op: &U
     }
     generator.asm.push(movfp(is_double, d_op, X86Operand::Reg(X86Reg::Xmm0)));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn xmm0() -> X86Operand { X86Operand::Reg(X86Reg::Xmm0) }
+    fn xmm1() -> X86Operand { X86Operand::Reg(X86Reg::Xmm1) }
+
+    #[test]
+    fn movfp_single() {
+        let i = movfp(false, xmm0(), xmm1());
+        assert!(matches!(i, X86Instr::Movss(..)));
+    }
+
+    #[test]
+    fn movfp_double() {
+        let i = movfp(true, xmm0(), xmm1());
+        assert!(matches!(i, X86Instr::Movsd(..)));
+    }
+
+    #[test]
+    fn addfp_dispatch() {
+        assert!(matches!(addfp(false, xmm0(), xmm1()), X86Instr::Addss(..)));
+        assert!(matches!(addfp(true, xmm0(), xmm1()), X86Instr::Addsd(..)));
+    }
+
+    #[test]
+    fn subfp_dispatch() {
+        assert!(matches!(subfp(false, xmm0(), xmm1()), X86Instr::Subss(..)));
+        assert!(matches!(subfp(true, xmm0(), xmm1()), X86Instr::Subsd(..)));
+    }
+
+    #[test]
+    fn mulfp_dispatch() {
+        assert!(matches!(mulfp(false, xmm0(), xmm1()), X86Instr::Mulss(..)));
+        assert!(matches!(mulfp(true, xmm0(), xmm1()), X86Instr::Mulsd(..)));
+    }
+
+    #[test]
+    fn divfp_dispatch() {
+        assert!(matches!(divfp(false, xmm0(), xmm1()), X86Instr::Divss(..)));
+        assert!(matches!(divfp(true, xmm0(), xmm1()), X86Instr::Divsd(..)));
+    }
+
+    #[test]
+    fn ucomifp_dispatch() {
+        assert!(matches!(ucomifp(false, xmm0(), xmm1()), X86Instr::Ucomiss(..)));
+        assert!(matches!(ucomifp(true, xmm0(), xmm1()), X86Instr::Ucomisd(..)));
+    }
+
+    #[test]
+    fn cvtsi2fp_dispatch() {
+        assert!(matches!(cvtsi2fp(false, xmm0(), xmm1()), X86Instr::Cvtsi2ss(..)));
+        assert!(matches!(cvtsi2fp(true, xmm0(), xmm1()), X86Instr::Cvtsi2sd(..)));
+    }
+
+    #[test]
+    fn xorpfp_dispatch() {
+        assert!(matches!(xorpfp(false, xmm0(), xmm1()), X86Instr::Xorps(..)));
+        assert!(matches!(xorpfp(true, xmm0(), xmm1()), X86Instr::Xorpd(..)));
+    }
+}

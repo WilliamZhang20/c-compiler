@@ -14,9 +14,10 @@ pub fn simplify_cfg(func: &mut Function) {
         
         // Run optimizations in sequence
         let changed0 = fold_constant_branches(func);
-        let changed1 = merge_blocks(func);
-        let changed2 = remove_empty_blocks(func);
-        if !changed0 && !changed1 && !changed2 {
+        let changed1 = eliminate_dead_blocks(func);
+        let changed2 = merge_blocks(func);
+        let changed3 = remove_empty_blocks(func);
+        if !changed0 && !changed1 && !changed2 && !changed3 {
             break;
         }
     }
@@ -33,6 +34,45 @@ fn fold_constant_branches(func: &mut Function) -> bool {
                 block.terminator = Terminator::Br(target);
                 changed = true;
             }
+        }
+    }
+    changed
+}
+
+/// Eliminate blocks not reachable from the entry block.
+/// This removes dead code left behind after constant branch folding.
+fn eliminate_dead_blocks(func: &mut Function) -> bool {
+    if func.blocks.is_empty() {
+        return false;
+    }
+    
+    // BFS from entry block to find reachable blocks
+    let mut reachable: HashSet<BlockId> = HashSet::new();
+    let mut worklist = vec![func.entry_block];
+    while let Some(bid) = worklist.pop() {
+        if !reachable.insert(bid) {
+            continue;
+        }
+        // Find the block and add its successors
+        if let Some(block) = func.blocks.iter().find(|b| b.id == bid) {
+            match &block.terminator {
+                Terminator::Br(t) => { worklist.push(*t); }
+                Terminator::CondBr { then_block, else_block, .. } => {
+                    worklist.push(*then_block);
+                    worklist.push(*else_block);
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // Mark unreachable blocks as dead
+    let mut changed = false;
+    for block in &mut func.blocks {
+        if !reachable.contains(&block.id) && !block.instructions.is_empty() {
+            block.instructions.clear();
+            block.terminator = Terminator::Unreachable;
+            changed = true;
         }
     }
     changed

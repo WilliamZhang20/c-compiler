@@ -211,3 +211,196 @@ impl Codegen {
         size
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Codegen;
+    use model::Type;
+
+    fn cg() -> Codegen { Codegen::new() }
+
+    // ─── type_size ──────────────────────────────────────────────
+
+    #[test]
+    fn type_size_primitives() {
+        let c = cg();
+        assert_eq!(c.type_size(&Type::Bool), 1);
+        assert_eq!(c.type_size(&Type::Char), 1);
+        assert_eq!(c.type_size(&Type::UnsignedChar), 1);
+        assert_eq!(c.type_size(&Type::Short), 2);
+        assert_eq!(c.type_size(&Type::UnsignedShort), 2);
+        assert_eq!(c.type_size(&Type::Int), 4);
+        assert_eq!(c.type_size(&Type::UnsignedInt), 4);
+        assert_eq!(c.type_size(&Type::Float), 4);
+        assert_eq!(c.type_size(&Type::Long), 8);
+        assert_eq!(c.type_size(&Type::UnsignedLong), 8);
+        assert_eq!(c.type_size(&Type::Double), 8);
+        assert_eq!(c.type_size(&Type::Void), 0);
+    }
+
+    #[test]
+    fn type_size_pointer() {
+        let c = cg();
+        assert_eq!(c.type_size(&Type::Pointer(Box::new(Type::Int))), 8);
+        assert_eq!(c.type_size(&Type::Pointer(Box::new(Type::Char))), 8);
+    }
+
+    #[test]
+    fn type_size_array() {
+        let c = cg();
+        // int[10] = 4 * 10 = 40
+        assert_eq!(c.type_size(&Type::Array(Box::new(Type::Int), 10)), 40);
+        // char[5] = 1 * 5 = 5
+        assert_eq!(c.type_size(&Type::Array(Box::new(Type::Char), 5)), 5);
+    }
+
+    #[test]
+    fn type_size_nested_array() {
+        let c = cg();
+        // int[3][4] = 4 * 3 * 4 = 48
+        let inner = Type::Array(Box::new(Type::Int), 4);
+        assert_eq!(c.type_size(&Type::Array(Box::new(inner), 3)), 48);
+    }
+
+    // ─── type_alignment ─────────────────────────────────────────
+
+    #[test]
+    fn type_alignment_primitives() {
+        let c = cg();
+        assert_eq!(c.type_alignment(&Type::Char), 1);
+        assert_eq!(c.type_alignment(&Type::Short), 2);
+        assert_eq!(c.type_alignment(&Type::Int), 4);
+        assert_eq!(c.type_alignment(&Type::Long), 8);
+        assert_eq!(c.type_alignment(&Type::Pointer(Box::new(Type::Int))), 8);
+    }
+
+    #[test]
+    fn type_alignment_array_inherits_element() {
+        let c = cg();
+        // Array alignment follows element alignment
+        assert_eq!(c.type_alignment(&Type::Array(Box::new(Type::Int), 5)), 4);
+        assert_eq!(c.type_alignment(&Type::Array(Box::new(Type::Long), 3)), 8);
+    }
+
+    // ─── struct_size ────────────────────────────────────────────
+
+    #[test]
+    fn struct_size_simple() {
+        let c = cg();
+        // struct { int a; int b; } → size 8, no padding needed
+        let s = model::StructDef {
+            name: "test".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        };
+        assert_eq!(c.struct_size(&s, false), 8);
+    }
+
+    #[test]
+    fn struct_size_with_padding() {
+        let c = cg();
+        // struct { char a; int b; } → 1 + 3 padding + 4 = 8
+        let s = model::StructDef {
+            name: "test".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        };
+        assert_eq!(c.struct_size(&s, false), 8);
+    }
+
+    #[test]
+    fn struct_size_with_trailing_padding() {
+        let c = cg();
+        // struct { long a; char b; } → 8 + 1 + 7 trailing = 16
+        let s = model::StructDef {
+            name: "test".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Long, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Char, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        };
+        assert_eq!(c.struct_size(&s, false), 16);
+    }
+
+    #[test]
+    fn struct_size_packed() {
+        let c = cg();
+        // __attribute__((packed)) struct { char a; int b; } → 1 + 4 = 5 (no padding)
+        let s = model::StructDef {
+            name: "test".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![model::Attribute::Packed],
+        };
+        assert_eq!(c.struct_size(&s, true), 5);
+    }
+
+    // ─── emit_scalar_data ───────────────────────────────────────
+
+    #[test]
+    fn emit_scalar_byte() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Char, 65);
+        assert_eq!(out, "    .byte 65\n");
+    }
+
+    #[test]
+    fn emit_scalar_short() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Short, 1234);
+        assert_eq!(out, "    .short 1234\n");
+    }
+
+    #[test]
+    fn emit_scalar_int() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Int, 42);
+        assert_eq!(out, "    .long 42\n");
+    }
+
+    #[test]
+    fn emit_scalar_long() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Long, 1_000_000);
+        assert_eq!(out, "    .quad 1000000\n");
+    }
+
+    #[test]
+    fn emit_scalar_pointer() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Pointer(Box::new(Type::Void)), 0);
+        assert_eq!(out, "    .quad 0\n");
+    }
+
+    // ─── emit_zero_data ─────────────────────────────────────────
+
+    #[test]
+    fn emit_zero_int() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_zero_data(&mut out, &Type::Int);
+        assert_eq!(out, "    .zero 4\n");
+    }
+
+    #[test]
+    fn emit_zero_array() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_zero_data(&mut out, &Type::Array(Box::new(Type::Int), 10));
+        assert_eq!(out, "    .zero 40\n");
+    }
+}

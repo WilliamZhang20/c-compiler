@@ -330,3 +330,122 @@ fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, Has
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ir::VarId;
+
+    fn vid(n: usize) -> VarId { VarId(n) }
+
+    // ─── PhysicalReg methods ────────────────────────────────────
+
+    #[test]
+    fn physical_reg_to_x86_mapping() {
+        assert_eq!(PhysicalReg::Rax.to_x86(), crate::x86::X86Reg::Rax);
+        assert_eq!(PhysicalReg::R15.to_x86(), crate::x86::X86Reg::R15);
+        assert_eq!(PhysicalReg::Rdi.to_x86(), crate::x86::X86Reg::Rdi);
+    }
+
+    #[test]
+    fn caller_saved_system_v() {
+        let target = model::TargetConfig {
+            calling_convention: model::CallingConvention::SystemV,
+            ..model::TargetConfig::host()
+        };
+        let regs = PhysicalReg::caller_saved(&target);
+        // System V: rax, rcx, rdx, rsi, rdi, r8-r11
+        assert!(regs.contains(&PhysicalReg::Rax));
+        assert!(regs.contains(&PhysicalReg::Rdi));
+        assert!(regs.contains(&PhysicalReg::Rsi));
+        assert!(!regs.contains(&PhysicalReg::Rbx)); // callee-saved
+    }
+
+    #[test]
+    fn callee_saved_system_v() {
+        let target = model::TargetConfig {
+            calling_convention: model::CallingConvention::SystemV,
+            ..model::TargetConfig::host()
+        };
+        let regs = PhysicalReg::callee_saved(&target);
+        assert!(regs.contains(&PhysicalReg::Rbx));
+        assert!(regs.contains(&PhysicalReg::R12));
+        assert!(!regs.contains(&PhysicalReg::Rax)); // caller-saved
+        assert!(!regs.contains(&PhysicalReg::Rdi)); // caller-saved on SysV
+    }
+
+    #[test]
+    fn allocatable_excludes_scratch() {
+        let target = model::TargetConfig {
+            calling_convention: model::CallingConvention::SystemV,
+            ..model::TargetConfig::host()
+        };
+        let regs = PhysicalReg::allocatable(&target);
+        // Rax, Rcx, Rdx excluded (scratch), R10, R11 excluded (address loading)
+        assert!(!regs.contains(&PhysicalReg::Rax));
+        assert!(!regs.contains(&PhysicalReg::Rcx));
+        assert!(!regs.contains(&PhysicalReg::Rdx));
+        assert!(!regs.contains(&PhysicalReg::R10));
+        assert!(!regs.contains(&PhysicalReg::R11));
+        // But these should be available
+        assert!(regs.contains(&PhysicalReg::Rbx));
+        assert!(regs.contains(&PhysicalReg::R8));
+    }
+
+    // ─── Interference graph ─────────────────────────────────────
+
+    #[test]
+    fn interference_overlapping_intervals() {
+        let intervals = vec![
+            LiveInterval { var: vid(0), start: 0, end: 10, reg: None, spill_slot: None },
+            LiveInterval { var: vid(1), start: 5, end: 15, reg: None, spill_slot: None },
+        ];
+        let graph = build_interference_graph(&intervals);
+        // Overlapping intervals should interfere
+        assert!(graph.get(&vid(0)).unwrap().contains(&vid(1)));
+        assert!(graph.get(&vid(1)).unwrap().contains(&vid(0)));
+    }
+
+    #[test]
+    fn interference_non_overlapping_intervals() {
+        let intervals = vec![
+            LiveInterval { var: vid(0), start: 0, end: 5, reg: None, spill_slot: None },
+            LiveInterval { var: vid(1), start: 10, end: 15, reg: None, spill_slot: None },
+        ];
+        let graph = build_interference_graph(&intervals);
+        // Non-overlapping: no interference edge
+        assert!(graph.get(&vid(0)).map(|s| !s.contains(&vid(1))).unwrap_or(true));
+    }
+
+    #[test]
+    fn interference_touching_at_boundary() {
+        // end=5 and start=5 → they overlap at point 5
+        let intervals = vec![
+            LiveInterval { var: vid(0), start: 0, end: 5, reg: None, spill_slot: None },
+            LiveInterval { var: vid(1), start: 5, end: 10, reg: None, spill_slot: None },
+        ];
+        let graph = build_interference_graph(&intervals);
+        assert!(graph.get(&vid(0)).unwrap().contains(&vid(1)));
+    }
+
+    #[test]
+    fn interference_three_way() {
+        let intervals = vec![
+            LiveInterval { var: vid(0), start: 0, end: 20, reg: None, spill_slot: None },
+            LiveInterval { var: vid(1), start: 5, end: 15, reg: None, spill_slot: None },
+            LiveInterval { var: vid(2), start: 10, end: 25, reg: None, spill_slot: None },
+        ];
+        let graph = build_interference_graph(&intervals);
+        // All three overlap with each other
+        assert!(graph[&vid(0)].contains(&vid(1)));
+        assert!(graph[&vid(0)].contains(&vid(2)));
+        assert!(graph[&vid(1)].contains(&vid(2)));
+    }
+
+    #[test]
+    fn interference_empty_intervals() {
+        let intervals: Vec<LiveInterval> = vec![];
+        let graph = build_interference_graph(&intervals);
+        assert!(graph.is_empty());
+    }
+}

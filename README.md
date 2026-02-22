@@ -4,7 +4,7 @@ A C compiler targeting x86-64 Linux and Windows, written in Rust. It handles the
 
 Originally based on [_Writing a C Compiler_](https://norasandler.com/book/) by Nora Sandler, the project has been extended well beyond the book's scope with C99/C11 features, GCC extensions, SSA-based optimizations, and graph-coloring register allocation.
 
-**Performance**: The compiler **beats or ties GCC -O0** on all 5 benchmark programs (matrix multiply, fibonacci, array sum, bitwise ops, struct access). This comes from SSA-level optimizations (constant folding, strength reduction, CSE, copy propagation, DCE) and hint-driven register allocation that minimizes spills.
+**Performance**: The compiler **beats or ties GCC -O0** on all 5 benchmark programs (matrix multiply, fibonacci, array sum, bitwise ops, struct access). This comes from a 14-pass SSA optimization pipeline (constant folding, strength reduction, CSE, copy propagation, DCE, auto-vectorization, LICM, loop interchange, prefetching, block layout) and graph-coloring register allocation that minimizes spills.
 
 ## Building and Running
 
@@ -81,8 +81,9 @@ On Windows, the same binary works with MinGW GCC. The compiler auto-detects the 
 └──────┬───────┘
        ▼
 ┌──────────────┐
-│  Optimizer   │  mem2reg → algebraic → strength → copy prop → CSE
-│              │  → constant fold/DCE → phi removal → CFG simplify
+│  Optimizer   │  mem2reg → algebraic → strength → copy prop → load fwd
+│              │  → CSE → fold/DCE → loop interchange → LICM → prefetch
+│              │  → auto-vectorize → phi removal → CFG simplify → layout
 └──────┬───────┘
        ▼
 ┌──────────────┐
@@ -111,7 +112,7 @@ The workspace is split into 8 crates with clear dependency flow:
 | **parser** | Recursive descent parser producing AST `Program` | `parser::parse_tokens(tokens)` |
 | **semantic** | Name resolution, qualifier enforcement, control flow checks | `SemanticAnalyzer::analyze(program)` |
 | **ir** | AST → SSA IR lowering with Braun et al. phi construction | `Lowerer::lower_program(program)` |
-| **optimizer** | 8-pass optimization pipeline over SSA IR | `optimizer::optimize(ir_program)` |
+| **optimizer** | 14-pass optimization pipeline over SSA IR | `optimizer::optimize(ir_program)` |
 | **codegen** | x86-64 assembly generation with graph-coloring register allocation | `Codegen::gen_program(ir_program)` |
 | **driver** | CLI entry point, orchestrates the full pipeline | `cargo run -- file.c` |
 
@@ -184,16 +185,22 @@ Dependency graph: `driver` → `codegen` → `optimizer` → `ir` → `semantic`
 
 ## Optimization Pipeline
 
-The optimizer runs 8 passes in a fixed sequence:
+The optimizer runs 14 passes in a fixed sequence:
 
 1. **mem2reg** — promotes `alloca`/`load`/`store` of scalar locals to SSA registers via phi-node insertion
 2. **Algebraic simplification** — identity removal (`x+0`, `x*1`, `x&-1`), strength patterns (`x-x→0`, `x^x→0`, `x*-1→-x`, `x/x→1`), comparison normalization
 3. **Strength reduction** — `x * 2^k → x << k`, `x / 2^k → x >> k`, `x % 2^k → x & (2^k-1)`
 4. **Copy propagation** — transitive resolution of copy chains with dead copy removal
-5. **Common subexpression elimination** — per-block hash-based deduplication with commutativity-aware canonicalization
-6. **Constant folding + DCE** — fixpoint loop: evaluate compile-time constant operations, fold constant branches, then remove dead instructions
-7. **Phi removal** — deconstructs phi nodes into copies at predecessor block ends
-8. **CFG simplification** — merge single-successor/single-predecessor block pairs, bypass empty blocks
+5. **Load forwarding** — replaces loads with previously stored values within a basic block
+6. **Common subexpression elimination** — per-block hash-based deduplication with commutativity-aware canonicalization
+7. **Constant folding + DCE** — fixpoint loop: evaluate compile-time constant operations, fold constant branches, then remove dead instructions
+8. **Loop interchange** — swaps nested loop iteration order when the inner loop has stride-N access on the outer induction variable, converting column-major to row-major traversal for cache locality
+9. **Loop-invariant code motion (LICM)** — hoists computations whose operands are loop-invariant into the loop preheader using fixed-point iteration
+10. **Software prefetch insertion** — emits `prefetcht0` hints for IV-indexed array accesses in loops with trip count ≥ 64, prefetching 16 elements ahead
+11. **Auto-vectorization** — transforms scalar loops into SIMD operations (SSE2 4-wide / AVX2 8-wide) for consecutive IV-indexed loads, stores, and arithmetic; generates a vectorized body plus scalar remainder loop
+12. **Phi removal** — deconstructs phi nodes into copies at predecessor block ends
+13. **CFG simplification** — merge single-successor/single-predecessor block pairs, bypass empty blocks, eliminate dead blocks, fold constant branches
+14. **Block layout** — reorders basic blocks for I-cache locality, keeping hot loop bodies tight and deferring cold exit paths
 
 ## Testing
 
@@ -204,13 +211,30 @@ cargo test
 # Run only unit tests (fast)
 cargo test --lib
 
-# Run only integration tests (compiles 142 C programs)
+# Run only integration tests (compiles 165 C programs)
 cargo test --test integration_tests
 ```
 
 The integration test harness (`driver/tests/integration_tests.rs`) discovers all `.c` files in `testing/`, compiles each one using the compiler, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the source file.
 
-**Current status**: 146 integration test programs, all passing. 251 unit tests across all crates (252 total with integration harness).
+**Current status**: 165 integration test programs (160 with EXPECT annotations), all passing. 268 unit tests across all crates.
+
+Run `./coverage.sh` for line-level coverage analysis via `cargo-tarpaulin` (use `--quick` to reuse the last report).
+
+### Auto-Vectorization
+
+The auto-vectorizer (pass 11) analyzes loop bodies for consecutive IV-indexed loads/stores with compatible arithmetic (Add, Sub, Mul). When a loop qualifies:
+- Detects hardware SIMD support (SSE2 → 4-wide, AVX2 → 8-wide)
+- Generates a vectorized loop body using SIMD IR instructions (`SimdLoad`, `SimdStore`, `SimdAdd`, etc.)
+- Adjusts the induction variable stride to the vector width
+- Emits a scalar remainder loop for iterations not divisible by the vector factor
+
+### Cache Locality Optimizations
+
+Three passes target memory hierarchy performance:
+- **Loop interchange** (pass 8) — detects nested loops where reordering improves spatial locality. Counts which induction variable dominates array index expressions; if the outer IV has more references, swapping gives sequential access.
+- **Software prefetch** (pass 10) — for large loops (trip count ≥ 64) with IV-indexed array loads, inserts `prefetcht0` hints to bring cache lines into L1 before they're needed, hiding memory latency.
+- **Block layout** (pass 14) — reorders the CFG so hot loop bodies are contiguous in the instruction stream, keeping tight loops within a single I-cache line and deferring cold error/exit paths.
 
 ## Benchmarks
 
