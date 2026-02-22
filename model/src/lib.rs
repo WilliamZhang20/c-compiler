@@ -1,6 +1,6 @@
 // Target platform configuration
-mod target;
-pub use target::{Platform, CallingConvention, TargetConfig};
+pub mod target;
+pub use target::{Platform, CallingConvention, TargetConfig, SimdLevel};
 
 /// Suffix on an integer constant, controlling its type.
 #[derive(Debug, PartialEq, Clone, Copy, Default)]

@@ -41,7 +41,7 @@ pub fn common_subexpression_elimination(func: &mut Function) {
                 Operand::Constant(c) => (0, *c),
                 Operand::Var(v) => (1, v.0 as i64),
                 Operand::Global(_) => (2, 0), // Globals need more care
-                Operand::FloatConstant(_) => (3, 0), // Skip float constants for now
+                Operand::FloatConstant(f) => (3, f.to_bits() as i64),
             }
         }
     }

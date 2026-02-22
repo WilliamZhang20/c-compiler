@@ -57,11 +57,63 @@ impl CallingConvention {
     }
 }
 
+/// SIMD instruction set level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SimdLevel {
+    /// No SIMD (scalar only)
+    None,
+    /// SSE2: 128-bit registers, baseline for x86-64
+    SSE2,
+    /// SSE4.1: adds integer multiply, blend, etc.
+    SSE41,
+    /// AVX: 256-bit registers, 3-operand encoding
+    AVX,
+    /// AVX2: 256-bit integer operations
+    AVX2,
+}
+
+impl SimdLevel {
+    /// Detect the SIMD level supported by the current CPU
+    pub fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return SimdLevel::AVX2;
+            }
+            if is_x86_feature_detected!("avx") {
+                return SimdLevel::AVX;
+            }
+            if is_x86_feature_detected!("sse4.1") {
+                return SimdLevel::SSE41;
+            }
+            // SSE2 is always available on x86-64
+            return SimdLevel::SSE2;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        SimdLevel::None
+    }
+
+    /// Number of 32-bit elements per vector register
+    pub fn vector_width_32(self) -> usize {
+        match self {
+            SimdLevel::None => 1,
+            SimdLevel::SSE2 | SimdLevel::SSE41 => 4,
+            SimdLevel::AVX | SimdLevel::AVX2 => 8,
+        }
+    }
+
+    /// Whether this level supports 256-bit operations
+    pub fn has_256bit(self) -> bool {
+        self >= SimdLevel::AVX
+    }
+}
+
 /// Complete target configuration
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
     pub platform: Platform,
     pub calling_convention: CallingConvention,
+    pub simd_level: SimdLevel,
 }
 
 impl TargetConfig {
@@ -71,6 +123,7 @@ impl TargetConfig {
         Self {
             platform,
             calling_convention: CallingConvention::for_platform(platform),
+            simd_level: SimdLevel::detect(),
         }
     }
 
@@ -79,6 +132,7 @@ impl TargetConfig {
         Self {
             platform,
             calling_convention: CallingConvention::for_platform(platform),
+            simd_level: SimdLevel::detect(),
         }
     }
 }

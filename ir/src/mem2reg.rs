@@ -383,6 +383,11 @@ impl<'a> Mem2RegPass<'a> {
                         }
                     }
                     Instruction::Alloca { .. } => {}
+                    Instruction::Simd { operands, .. } => {
+                        for op in operands.iter_mut() {
+                            resolve_operand(op, &resolved_map);
+                        }
+                    }
                 }
             }
             // Also fix terminators
@@ -475,6 +480,10 @@ impl<'a> Mem2RegPass<'a> {
                 inputs.iter().any(|input| Self::operand_uses_var(input, var_id))
                 || outputs.contains(&var_id),
             Instruction::Phi { .. } | Instruction::Alloca { .. } => false,
+            Instruction::Simd { operands, dest, .. } => {
+                operands.iter().any(|op| Self::operand_uses_var(op, var_id))
+                || dest.map_or(false, |d| d == var_id)
+            }
         }
     }
 

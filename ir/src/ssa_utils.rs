@@ -33,6 +33,9 @@ pub fn verify_ssa(func: &Function) -> Result<(), String> {
                 }
                 Instruction::Store { .. } | Instruction::VaStart { .. } |
                 Instruction::VaEnd { .. } | Instruction::VaCopy { .. } => {}
+                Instruction::Simd { dest, .. } => {
+                    if let Some(d) = dest { defs.insert(*d); }
+                }
             }
         }
     }
@@ -100,6 +103,9 @@ pub fn verify_ssa(func: &Function) -> Result<(), String> {
                     for input in inputs { check_operand(input, &defs, &ctx)?; }
                 }
                 Instruction::Alloca { .. } => {}
+                Instruction::Simd { operands, .. } => {
+                    for op in operands { check_operand(op, &defs, &ctx)?; }
+                }
             }
         }
         // Check terminator operands

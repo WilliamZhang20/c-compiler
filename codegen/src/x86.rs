@@ -10,6 +10,9 @@ pub enum X86Reg {
     Al, Cl, // 8-bit low bytes of rax, rcx
     Ax, Cx, // 16-bit registers
     Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7, // SSE float registers
+    Xmm8, Xmm9, Xmm10, Xmm11, Xmm12, Xmm13, Xmm14, Xmm15, // SSE extended
+    Ymm0, Ymm1, Ymm2, Ymm3, Ymm4, Ymm5, Ymm6, Ymm7, // AVX 256-bit registers
+    Ymm8, Ymm9, Ymm10, Ymm11, Ymm12, Ymm13, Ymm14, Ymm15, // AVX extended
 }
 
 impl X86Reg {
@@ -27,6 +30,12 @@ impl X86Reg {
             Self::Ax => "ax", Self::Cx => "cx",
             Self::Xmm0 => "xmm0", Self::Xmm1 => "xmm1", Self::Xmm2 => "xmm2", Self::Xmm3 => "xmm3",
             Self::Xmm4 => "xmm4", Self::Xmm5 => "xmm5", Self::Xmm6 => "xmm6", Self::Xmm7 => "xmm7",
+            Self::Xmm8 => "xmm8", Self::Xmm9 => "xmm9", Self::Xmm10 => "xmm10", Self::Xmm11 => "xmm11",
+            Self::Xmm12 => "xmm12", Self::Xmm13 => "xmm13", Self::Xmm14 => "xmm14", Self::Xmm15 => "xmm15",
+            Self::Ymm0 => "ymm0", Self::Ymm1 => "ymm1", Self::Ymm2 => "ymm2", Self::Ymm3 => "ymm3",
+            Self::Ymm4 => "ymm4", Self::Ymm5 => "ymm5", Self::Ymm6 => "ymm6", Self::Ymm7 => "ymm7",
+            Self::Ymm8 => "ymm8", Self::Ymm9 => "ymm9", Self::Ymm10 => "ymm10", Self::Ymm11 => "ymm11",
+            Self::Ymm12 => "ymm12", Self::Ymm13 => "ymm13", Self::Ymm14 => "ymm14", Self::Ymm15 => "ymm15",
         }
     }
 }
@@ -43,6 +52,8 @@ pub enum X86Operand {
     GlobalMem(String), // RIP-relative global: label[rip]
     RipRelLabel(String), // For LEA: label[rip]
     FloatMem(X86Reg, i32), // [reg + offset] for float ops (no PTR directive for SSE)
+    XmmwordMem(X86Reg, i32), // [reg + offset] - 128-bit (XMMWORD PTR)
+    YmmwordMem(X86Reg, i32), // [reg + offset] - 256-bit (YMMWORD PTR)
 }
 
 impl fmt::Display for X86Operand {
@@ -58,6 +69,8 @@ impl fmt::Display for X86Operand {
             Self::GlobalMem(name) => write!(f, "DWORD PTR {}[rip]", name),
             Self::RipRelLabel(name) => write!(f, "{}[rip]", name),
             Self::FloatMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::XmmwordMem(r, offset) => write!(f, "XMMWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::YmmwordMem(r, offset) => write!(f, "YMMWORD PTR [{}{:+}]", r.to_str(), offset),
         }
     }
 }
@@ -104,6 +117,41 @@ pub enum X86Instr {
     Cvttss2si(X86Operand, X86Operand), // Convert float to int (truncate)
     Xorps(X86Operand, X86Operand), // XOR packed single-precision (for negation)
     Neg(X86Operand), // TWO'S COMPLEMENT NEGATION
+    // Packed SSE instructions (128-bit, 4x float)
+    Movaps(X86Operand, X86Operand),   // Move aligned packed single-precision
+    Movups(X86Operand, X86Operand),   // Move unaligned packed single-precision
+    Addps(X86Operand, X86Operand),    // Add packed single-precision (4x)
+    Subps(X86Operand, X86Operand),    // Subtract packed single-precision (4x)
+    Mulps(X86Operand, X86Operand),    // Multiply packed single-precision (4x)
+    Divps(X86Operand, X86Operand),    // Divide packed single-precision (4x)
+    // Packed SSE2 instructions (128-bit, 4x int32)
+    Movdqa(X86Operand, X86Operand),   // Move aligned packed integers
+    Movdqu(X86Operand, X86Operand),   // Move unaligned packed integers
+    Paddd(X86Operand, X86Operand),    // Add packed 32-bit integers
+    Psubd(X86Operand, X86Operand),    // Subtract packed 32-bit integers
+    Pmulld(X86Operand, X86Operand),   // Multiply packed 32-bit integers (SSE4.1)
+    // AVX instructions (256-bit, 8x float)
+    Vmovaps(X86Operand, X86Operand),  // AVX move aligned packed single
+    Vmovups(X86Operand, X86Operand),  // AVX move unaligned packed single
+    Vaddps(X86Operand, X86Operand, X86Operand),   // AVX add packed single (3-operand)
+    Vsubps(X86Operand, X86Operand, X86Operand),   // AVX subtract packed single
+    Vmulps(X86Operand, X86Operand, X86Operand),   // AVX multiply packed single
+    Vdivps(X86Operand, X86Operand, X86Operand),   // AVX divide packed single
+    // AVX2 instructions (256-bit, 8x int32)
+    Vmovdqa(X86Operand, X86Operand),  // AVX move aligned packed integers
+    Vmovdqu(X86Operand, X86Operand),  // AVX move unaligned packed integers
+    Vpaddd(X86Operand, X86Operand, X86Operand),   // AVX2 add packed 32-bit integers
+    Vpsubd(X86Operand, X86Operand, X86Operand),   // AVX2 subtract packed 32-bit integers
+    Vpmulld(X86Operand, X86Operand, X86Operand),  // AVX2 multiply packed 32-bit integers
+    Vxorps(X86Operand, X86Operand, X86Operand),   // AVX XOR packed
+    Vzeroupper,                                     // Clear upper bits of YMM registers
+    // SIMD utility instructions
+    Pshufd(X86Operand, X86Operand, u8),             // Shuffle packed doublewords
+    Movd(X86Operand, X86Operand),                   // Move doubleword (GPR <-> XMM)
+    Pxor(X86Operand, X86Operand),                   // Packed XOR integers
+    // AVX2 utility instructions
+    Vextracti128(X86Operand, X86Operand, u8),       // Extract 128-bit from 256-bit
+    Vpxor(X86Operand, X86Operand, X86Operand),      // AVX packed XOR
     Raw(String), // Raw assembly string (for inline asm)
 }
 
@@ -153,6 +201,40 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Cvtsi2ss(d, src) => { let _ = write!(s, "  cvtsi2ss {}, {}\n", d, src); }
             X86Instr::Cvttss2si(d, src) => { let _ = write!(s, "  cvttss2si {}, {}\n", d, src); }
             X86Instr::Xorps(d, src) => { let _ = write!(s, "  xorps {}, {}\n", d, src); }
+            // Packed SSE
+            X86Instr::Movaps(d, src) => { let _ = write!(s, "  movaps {}, {}\n", d, src); }
+            X86Instr::Movups(d, src) => { let _ = write!(s, "  movups {}, {}\n", d, src); }
+            X86Instr::Addps(d, src) => { let _ = write!(s, "  addps {}, {}\n", d, src); }
+            X86Instr::Subps(d, src) => { let _ = write!(s, "  subps {}, {}\n", d, src); }
+            X86Instr::Mulps(d, src) => { let _ = write!(s, "  mulps {}, {}\n", d, src); }
+            X86Instr::Divps(d, src) => { let _ = write!(s, "  divps {}, {}\n", d, src); }
+            // Packed SSE2 integer
+            X86Instr::Movdqa(d, src) => { let _ = write!(s, "  movdqa {}, {}\n", d, src); }
+            X86Instr::Movdqu(d, src) => { let _ = write!(s, "  movdqu {}, {}\n", d, src); }
+            X86Instr::Paddd(d, src) => { let _ = write!(s, "  paddd {}, {}\n", d, src); }
+            X86Instr::Psubd(d, src) => { let _ = write!(s, "  psubd {}, {}\n", d, src); }
+            X86Instr::Pmulld(d, src) => { let _ = write!(s, "  pmulld {}, {}\n", d, src); }
+            // AVX
+            X86Instr::Vmovaps(d, src) => { let _ = write!(s, "  vmovaps {}, {}\n", d, src); }
+            X86Instr::Vmovups(d, src) => { let _ = write!(s, "  vmovups {}, {}\n", d, src); }
+            X86Instr::Vaddps(d, s1, s2) => { let _ = write!(s, "  vaddps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vsubps(d, s1, s2) => { let _ = write!(s, "  vsubps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vmulps(d, s1, s2) => { let _ = write!(s, "  vmulps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vdivps(d, s1, s2) => { let _ = write!(s, "  vdivps {}, {}, {}\n", d, s1, s2); }
+            // AVX2
+            X86Instr::Vmovdqa(d, src) => { let _ = write!(s, "  vmovdqa {}, {}\n", d, src); }
+            X86Instr::Vmovdqu(d, src) => { let _ = write!(s, "  vmovdqu {}, {}\n", d, src); }
+            X86Instr::Vpaddd(d, s1, s2) => { let _ = write!(s, "  vpaddd {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpsubd(d, s1, s2) => { let _ = write!(s, "  vpsubd {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpmulld(d, s1, s2) => { let _ = write!(s, "  vpmulld {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vxorps(d, s1, s2) => { let _ = write!(s, "  vxorps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vzeroupper => { s.push_str("  vzeroupper\n"); }
+            // SIMD utility
+            X86Instr::Pshufd(d, src, imm) => { let _ = write!(s, "  pshufd {}, {}, {}\n", d, src, imm); }
+            X86Instr::Movd(d, src) => { let _ = write!(s, "  movd {}, {}\n", d, src); }
+            X86Instr::Pxor(d, src) => { let _ = write!(s, "  pxor {}, {}\n", d, src); }
+            X86Instr::Vextracti128(d, src, imm) => { let _ = write!(s, "  vextracti128 {}, {}, {}\n", d, src, imm); }
+            X86Instr::Vpxor(d, s1, s2) => { let _ = write!(s, "  vpxor {}, {}, {}\n", d, s1, s2); }
             X86Instr::Raw(asm_str) => { let _ = write!(s, "  {}\n", asm_str); }
         }
     }

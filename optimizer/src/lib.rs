@@ -19,6 +19,8 @@ mod folding;
 mod utils;
 mod cfg_simplify;
 mod load_forwarding;
+pub mod loop_analysis;
+pub mod vectorize;
 
 use ir::IRProgram;
 use algebraic::algebraic_simplification;
@@ -28,6 +30,7 @@ use cse::common_subexpression_elimination;
 use folding::optimize_function;
 use cfg_simplify::simplify_cfg;
 use load_forwarding::load_forwarding;
+use model::target::SimdLevel;
 
 /// Main optimization entry point
 ///
@@ -48,7 +51,12 @@ use load_forwarding::load_forwarding;
 ///
 /// # Returns
 /// * Optimized IR program with improved code quality and performance
-pub fn optimize(mut program: IRProgram) -> IRProgram {
+pub fn optimize(program: IRProgram) -> IRProgram {
+    optimize_with_simd(program, SimdLevel::detect())
+}
+
+/// Optimize with explicit SIMD level control
+pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRProgram {
     for func in &mut program.functions {
         ir::mem2reg(func);
         algebraic_simplification(func);
@@ -57,6 +65,16 @@ pub fn optimize(mut program: IRProgram) -> IRProgram {
         load_forwarding(func);
         common_subexpression_elimination(func);
         optimize_function(func); // Includes constant folding and DCE
+
+        // Auto-vectorization: analyze loops and emit vectorized IR
+        if simd_level >= SimdLevel::SSE2 {
+            let vec_level = match simd_level {
+                SimdLevel::AVX2 | SimdLevel::AVX => vectorize::SimdLevel::AVX2,
+                _ => vectorize::SimdLevel::SSE2,
+            };
+            vectorize::vectorize_function(func, vec_level);
+        }
+
         ir::remove_phis(func);
         simplify_cfg(func);  // Run AFTER phi removal (only uses remove_empty_blocks now)
     }

@@ -17,6 +17,7 @@ pub fn optimize_function(func: &mut Function) {
         iterations += 1;
 
         let mut constants: HashMap<VarId, i64> = HashMap::new();
+        let mut float_constants: HashMap<VarId, f64> = HashMap::new();
 
         for block in &mut func.blocks {
             let mut new_instructions = Vec::new();
@@ -50,6 +51,44 @@ pub fn optimize_function(func: &mut Function) {
                             right: r,
                         });
                     }
+                    Instruction::FloatBinary {
+                        dest,
+                        op,
+                        left,
+                        right,
+                    } => {
+                        let l = resolve_float_operand(&left, &constants, &float_constants);
+                        let r = resolve_float_operand(&right, &constants, &float_constants);
+
+                        if let (Operand::FloatConstant(lf), Operand::FloatConstant(rf)) = (&l, &r) {
+                            if let Some(val) = fold_float_binary(&op, *lf, *rf) {
+                                match val {
+                                    FloatFoldResult::Float(f) => {
+                                        float_constants.insert(dest, f);
+                                        new_instructions.push(Instruction::Copy {
+                                            dest,
+                                            src: Operand::FloatConstant(f),
+                                        });
+                                    }
+                                    FloatFoldResult::Int(i) => {
+                                        constants.insert(dest, i);
+                                        new_instructions.push(Instruction::Copy {
+                                            dest,
+                                            src: Operand::Constant(i),
+                                        });
+                                    }
+                                }
+                                changed = true;
+                                continue;
+                            }
+                        }
+                        new_instructions.push(Instruction::FloatBinary {
+                            dest,
+                            op,
+                            left: l,
+                            right: r,
+                        });
+                    }
                     Instruction::Unary { dest, op, src } => {
                         let s = resolve_operand(&src, &constants);
 
@@ -66,18 +105,61 @@ pub fn optimize_function(func: &mut Function) {
                         }
                         new_instructions.push(Instruction::Unary { dest, op, src: s });
                     }
+                    Instruction::FloatUnary { dest, op, src } => {
+                        let s = resolve_float_operand(&src, &constants, &float_constants);
+
+                        if let Operand::FloatConstant(sf) = s {
+                            if let Some(val) = fold_float_unary(&op, sf) {
+                                match val {
+                                    FloatFoldResult::Float(f) => {
+                                        float_constants.insert(dest, f);
+                                        new_instructions.push(Instruction::Copy {
+                                            dest,
+                                            src: Operand::FloatConstant(f),
+                                        });
+                                    }
+                                    FloatFoldResult::Int(i) => {
+                                        constants.insert(dest, i);
+                                        new_instructions.push(Instruction::Copy {
+                                            dest,
+                                            src: Operand::Constant(i),
+                                        });
+                                    }
+                                }
+                                changed = true;
+                                continue;
+                            }
+                        }
+                        new_instructions.push(Instruction::FloatUnary { dest, op, src: s });
+                    }
                     Instruction::Copy { dest, src } => {
                         let s = resolve_operand(&src, &constants);
-                        if let Operand::Constant(sc) = s {
-                            constants.insert(dest, sc);
+                        if let Operand::Constant(sc) = &s {
+                            constants.insert(dest, *sc);
+                        } else if let Operand::FloatConstant(fc) = &s {
+                            float_constants.insert(dest, *fc);
+                        }
+                        // Also check if a float var is being copied
+                        let s = resolve_float_operand(&s, &constants, &float_constants);
+                        if let Operand::FloatConstant(fc) = &s {
+                            float_constants.insert(dest, *fc);
                         }
                         new_instructions.push(Instruction::Copy { dest, src: s });
                     }
                     Instruction::Cast { dest, src, r#type } => {
-                        let s = resolve_operand(&src, &constants);
-                        // Constant folding for casts: if the source is a
-                        // constant, truncate/extend at compile time.
+                        let s = resolve_float_operand(&src, &constants, &float_constants);
+                        // Int constant → float type
                         if let Operand::Constant(val) = &s {
+                            if r#type == Type::Float || r#type == Type::Double {
+                                let f = *val as f64;
+                                float_constants.insert(dest, f);
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: Operand::FloatConstant(f),
+                                });
+                                changed = true;
+                                continue;
+                            }
                             if let Some(folded) = fold_cast(*val, &r#type) {
                                 constants.insert(dest, folded);
                                 new_instructions.push(Instruction::Copy {
@@ -86,6 +168,35 @@ pub fn optimize_function(func: &mut Function) {
                                 });
                                 changed = true;
                                 continue;
+                            }
+                        }
+                        // Float constant → int type
+                        if let Operand::FloatConstant(f) = &s {
+                            match &r#type {
+                                Type::Float | Type::Double => {
+                                    // float → float cast (e.g., double → float)
+                                    let f_val = if r#type == Type::Float { (*f as f32) as f64 } else { *f };
+                                    float_constants.insert(dest, f_val);
+                                    new_instructions.push(Instruction::Copy {
+                                        dest,
+                                        src: Operand::FloatConstant(f_val),
+                                    });
+                                    changed = true;
+                                    continue;
+                                }
+                                _ => {
+                                    // float → int
+                                    let i = *f as i64;
+                                    if let Some(folded) = fold_cast(i, &r#type) {
+                                        constants.insert(dest, folded);
+                                        new_instructions.push(Instruction::Copy {
+                                            dest,
+                                            src: Operand::Constant(folded),
+                                        });
+                                        changed = true;
+                                        continue;
+                                    }
+                                }
                             }
                         }
                         new_instructions.push(Instruction::Cast { dest, src: s, r#type });
@@ -187,6 +298,55 @@ fn resolve_operand(op: &Operand, constants: &HashMap<VarId, i64>) -> Operand {
             .map(|&c| Operand::Constant(c))
             .unwrap_or_else(|| op.clone()),
         _ => op.clone(),
+    }
+}
+
+/// Resolve an operand, checking both int and float constant maps.
+/// If it's a Var known to be a float constant, return FloatConstant.
+/// Also resolves int constants via the regular map.
+fn resolve_float_operand(op: &Operand, constants: &HashMap<VarId, i64>, float_constants: &HashMap<VarId, f64>) -> Operand {
+    match op {
+        Operand::Var(v) => {
+            if let Some(&f) = float_constants.get(v) {
+                Operand::FloatConstant(f)
+            } else if let Some(&c) = constants.get(v) {
+                Operand::Constant(c)
+            } else {
+                op.clone()
+            }
+        }
+        _ => op.clone(),
+    }
+}
+
+enum FloatFoldResult {
+    Float(f64),
+    Int(i64),
+}
+
+fn fold_float_binary(op: &BinaryOp, l: f64, r: f64) -> Option<FloatFoldResult> {
+    match op {
+        BinaryOp::Add => Some(FloatFoldResult::Float(l + r)),
+        BinaryOp::Sub => Some(FloatFoldResult::Float(l - r)),
+        BinaryOp::Mul => Some(FloatFoldResult::Float(l * r)),
+        BinaryOp::Div => Some(FloatFoldResult::Float(l / r)), // IEEE 754: div by 0 → ±Inf, NaN propagates
+        // Comparisons return integers (0 or 1), with IEEE 754 NaN semantics
+        BinaryOp::EqualEqual => Some(FloatFoldResult::Int((l == r) as i64)),
+        BinaryOp::NotEqual => Some(FloatFoldResult::Int((l != r) as i64)),
+        BinaryOp::Less => Some(FloatFoldResult::Int((l < r) as i64)),
+        BinaryOp::LessEqual => Some(FloatFoldResult::Int((l <= r) as i64)),
+        BinaryOp::Greater => Some(FloatFoldResult::Int((l > r) as i64)),
+        BinaryOp::GreaterEqual => Some(FloatFoldResult::Int((l >= r) as i64)),
+        _ => None,
+    }
+}
+
+fn fold_float_unary(op: &UnaryOp, s: f64) -> Option<FloatFoldResult> {
+    match op {
+        UnaryOp::Minus => Some(FloatFoldResult::Float(-s)),
+        UnaryOp::Plus => Some(FloatFoldResult::Float(s)),
+        UnaryOp::LogicalNot => Some(FloatFoldResult::Int((s == 0.0) as i64)),
+        _ => None,
     }
 }
 

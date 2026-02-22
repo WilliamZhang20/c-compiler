@@ -104,6 +104,11 @@ fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<Var
         Instruction::VaArg { list, .. } => {
             add_operand_var(list, used_vars);
         }
+        Instruction::Simd { operands, .. } => {
+            for op in operands {
+                add_operand_var(op, used_vars);
+            }
+        }
     }
 }
 
@@ -147,6 +152,7 @@ fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
         | Instruction::VaStart { .. }
         | Instruction::VaEnd { .. }
         | Instruction::VaCopy { .. }
-        | Instruction::VaArg { .. } => true,
+        | Instruction::VaArg { .. }
+        | Instruction::Simd { .. } => true,
     }
 }

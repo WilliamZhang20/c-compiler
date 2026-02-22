@@ -354,7 +354,7 @@ impl Codegen {
     fn is_zero_init(init: &model::Expr) -> bool {
         match init {
             model::Expr::Constant(0) => true,
-            model::Expr::FloatConstant(f) => *f == 0.0,
+            model::Expr::FloatConstant(f) => f.to_bits() == 0,
             model::Expr::InitList(items) => {
                 items.iter().all(|item| Self::is_zero_init(&item.value))
             }

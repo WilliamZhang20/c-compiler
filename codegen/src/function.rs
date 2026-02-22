@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use crate::x86::{X86Reg, X86Operand, X86Instr};
 use model::Type;
-use ir::{Function as IrFunction, VarId, BlockId, Operand, Instruction as IrInstruction, Terminator as IrTerminator};
+use ir::{Function as IrFunction, VarId, BlockId, Operand, Instruction as IrInstruction, Terminator as IrTerminator, SimdOp};
 use crate::regalloc::{PhysicalReg, allocate_registers};
 use crate::instructions::InstructionGenerator;
 use crate::types::TypeCalculator;
@@ -31,6 +31,9 @@ pub struct FunctionGenerator<'a> {
     pub(crate) current_saved_regs: Vec<X86Reg>,
     pub(crate) enable_regalloc: bool,
     pub(crate) current_block: BlockId,
+    /// Maps IR VarIds to XMM/YMM register indices for vector operations
+    pub(crate) simd_reg_map: HashMap<VarId, u8>,
+    pub(crate) next_simd_reg: u8,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -59,6 +62,8 @@ impl<'a> FunctionGenerator<'a> {
             current_saved_regs: Vec::new(),
             enable_regalloc,
             current_block: BlockId(0),
+            simd_reg_map: HashMap::new(),
+            next_simd_reg: 0,
         }
     }
 
@@ -382,6 +387,15 @@ impl<'a> FunctionGenerator<'a> {
                     }
                     IrInstruction::Store { .. } | IrInstruction::VaStart { .. } |
                     IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => {}
+                    IrInstruction::Simd { dest, .. } => {
+                        // Vector vars use XMM/YMM registers, not GPR stack slots
+                        // But we need a slot for the scalar dest of HorizontalAdd
+                        if let Some(d) = dest {
+                            if !self.reg_alloc.contains_key(d) {
+                                self.get_or_create_slot(*d);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -675,6 +689,9 @@ impl<'a> FunctionGenerator<'a> {
             IrInstruction::VaArg { .. } => {
                 // Needs implementation if __builtin_va_arg is used
             }
+            IrInstruction::Simd { op, dest, operands, elem_type, width } => {
+                self.gen_simd_instruction(op, dest, operands, elem_type, *width);
+            }
         }
     }
 
@@ -736,5 +753,224 @@ impl<'a> FunctionGenerator<'a> {
     pub(crate) fn get_type_size(&self, r#type: &model::Type) -> usize {
         let calculator = TypeCalculator::new(self.structs, self.unions);
         calculator.get_type_size(r#type)
+    }
+
+    /// Allocate the next available XMM register for a vector variable
+    fn alloc_simd_reg(&mut self, var: VarId) -> u8 {
+        if let Some(&r) = self.simd_reg_map.get(&var) {
+            return r;
+        }
+        let r = self.next_simd_reg;
+        self.next_simd_reg = (self.next_simd_reg + 1).min(15);
+        self.simd_reg_map.insert(var, r);
+        r
+    }
+
+    /// Get the XMM register (as X86Reg) for a given index
+    fn xmm_reg(index: u8) -> X86Reg {
+        match index {
+            0 => X86Reg::Xmm0, 1 => X86Reg::Xmm1, 2 => X86Reg::Xmm2, 3 => X86Reg::Xmm3,
+            4 => X86Reg::Xmm4, 5 => X86Reg::Xmm5, 6 => X86Reg::Xmm6, 7 => X86Reg::Xmm7,
+            8 => X86Reg::Xmm8, 9 => X86Reg::Xmm9, 10 => X86Reg::Xmm10, 11 => X86Reg::Xmm11,
+            12 => X86Reg::Xmm12, 13 => X86Reg::Xmm13, 14 => X86Reg::Xmm14, _ => X86Reg::Xmm15,
+        }
+    }
+
+    /// Get the YMM register (as X86Reg) for a given index
+    fn ymm_reg(index: u8) -> X86Reg {
+        match index {
+            0 => X86Reg::Ymm0, 1 => X86Reg::Ymm1, 2 => X86Reg::Ymm2, 3 => X86Reg::Ymm3,
+            4 => X86Reg::Ymm4, 5 => X86Reg::Ymm5, 6 => X86Reg::Ymm6, 7 => X86Reg::Ymm7,
+            8 => X86Reg::Ymm8, 9 => X86Reg::Ymm9, 10 => X86Reg::Ymm10, 11 => X86Reg::Ymm11,
+            12 => X86Reg::Ymm12, 13 => X86Reg::Ymm13, 14 => X86Reg::Ymm14, _ => X86Reg::Ymm15,
+        }
+    }
+
+    /// Generate x86 SIMD instructions for an IR Simd instruction
+    fn gen_simd_instruction(
+        &mut self,
+        op: &SimdOp,
+        dest: &Option<VarId>,
+        operands: &[Operand],
+        elem_type: &Type,
+        width: usize,
+    ) {
+        let is_float = matches!(elem_type, Type::Float | Type::Double);
+        let use_avx = width > 4;
+
+        match op {
+            SimdOp::Load => {
+                // operands[0] = address (Var holding pointer)
+                let dest_var = dest.expect("VectorLoad must have dest");
+                let reg_idx = self.alloc_simd_reg(dest_var);
+
+                // Load address into R10
+                let addr_op = self.operand_to_op(&operands[0]);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), addr_op));
+
+                if use_avx {
+                    let ymm = X86Operand::Reg(Self::ymm_reg(reg_idx));
+                    let mem = X86Operand::YmmwordMem(X86Reg::R10, 0);
+                    if is_float {
+                        self.asm.push(X86Instr::Vmovups(ymm, mem));
+                    } else {
+                        self.asm.push(X86Instr::Vmovdqu(ymm, mem));
+                    }
+                } else {
+                    let xmm = X86Operand::Reg(Self::xmm_reg(reg_idx));
+                    let mem = X86Operand::XmmwordMem(X86Reg::R10, 0);
+                    if is_float {
+                        self.asm.push(X86Instr::Movups(xmm, mem));
+                    } else {
+                        self.asm.push(X86Instr::Movdqu(xmm, mem));
+                    }
+                }
+            }
+
+            SimdOp::Store => {
+                // operands[0] = address, operands[1] = Var(source vector)
+                let src_var = match &operands[1] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let src_idx = self.simd_reg_map.get(&src_var).copied().unwrap_or(0);
+
+                // Load address into R10
+                let addr_op = self.operand_to_op(&operands[0]);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), addr_op));
+
+                if use_avx {
+                    let ymm = X86Operand::Reg(Self::ymm_reg(src_idx));
+                    let mem = X86Operand::YmmwordMem(X86Reg::R10, 0);
+                    if is_float {
+                        self.asm.push(X86Instr::Vmovups(mem, ymm));
+                    } else {
+                        self.asm.push(X86Instr::Vmovdqu(mem, ymm));
+                    }
+                } else {
+                    let xmm = X86Operand::Reg(Self::xmm_reg(src_idx));
+                    let mem = X86Operand::XmmwordMem(X86Reg::R10, 0);
+                    if is_float {
+                        self.asm.push(X86Instr::Movups(mem, xmm));
+                    } else {
+                        self.asm.push(X86Instr::Movdqu(mem, xmm));
+                    }
+                }
+            }
+
+            SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+                // operands[0] = Var(left), operands[1] = Var(right)
+                let dest_var = dest.expect("VectorBinary must have dest");
+                let left_var = match &operands[0] { Operand::Var(v) => *v, _ => return };
+                let right_var = match &operands[1] { Operand::Var(v) => *v, _ => return };
+
+                let left_idx = self.simd_reg_map.get(&left_var).copied().unwrap_or(0);
+                let right_idx = self.simd_reg_map.get(&right_var).copied().unwrap_or(0);
+                let dest_idx = self.alloc_simd_reg(dest_var);
+
+                if use_avx {
+                    let dst = X86Operand::Reg(Self::ymm_reg(dest_idx));
+                    let s1 = X86Operand::Reg(Self::ymm_reg(left_idx));
+                    let s2 = X86Operand::Reg(Self::ymm_reg(right_idx));
+                    if is_float {
+                        match op {
+                            SimdOp::Add => self.asm.push(X86Instr::Vaddps(dst, s1, s2)),
+                            SimdOp::Sub => self.asm.push(X86Instr::Vsubps(dst, s1, s2)),
+                            SimdOp::Mul => self.asm.push(X86Instr::Vmulps(dst, s1, s2)),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        match op {
+                            SimdOp::Add => self.asm.push(X86Instr::Vpaddd(dst, s1, s2)),
+                            SimdOp::Sub => self.asm.push(X86Instr::Vpsubd(dst, s1, s2)),
+                            SimdOp::Mul => self.asm.push(X86Instr::Vpmulld(dst, s1, s2)),
+                            _ => unreachable!(),
+                        }
+                    }
+                } else {
+                    // SSE: 2-operand form, dest = left op right
+                    // Copy left to dest first if needed
+                    let dst_xmm = X86Operand::Reg(Self::xmm_reg(dest_idx));
+                    let left_xmm = X86Operand::Reg(Self::xmm_reg(left_idx));
+                    let right_xmm = X86Operand::Reg(Self::xmm_reg(right_idx));
+
+                    if dest_idx != left_idx {
+                        if is_float {
+                            self.asm.push(X86Instr::Movaps(dst_xmm.clone(), left_xmm));
+                        } else {
+                            self.asm.push(X86Instr::Movdqa(dst_xmm.clone(), left_xmm));
+                        }
+                    }
+
+                    if is_float {
+                        match op {
+                            SimdOp::Add => self.asm.push(X86Instr::Addps(dst_xmm, right_xmm)),
+                            SimdOp::Sub => self.asm.push(X86Instr::Subps(dst_xmm, right_xmm)),
+                            SimdOp::Mul => self.asm.push(X86Instr::Mulps(dst_xmm, right_xmm)),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        match op {
+                            SimdOp::Add => self.asm.push(X86Instr::Paddd(dst_xmm, right_xmm)),
+                            SimdOp::Sub => self.asm.push(X86Instr::Psubd(dst_xmm, right_xmm)),
+                            SimdOp::Mul => self.asm.push(X86Instr::Pmulld(dst_xmm, right_xmm)),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+
+            SimdOp::HorizontalAdd => {
+                // operands[0] = Var(vector to reduce)
+                // dest = scalar VarId to receive the sum
+                let dest_var = dest.expect("HorizontalAdd must have dest");
+                let src_var = match &operands[0] { Operand::Var(v) => *v, _ => return };
+                let src_idx = self.simd_reg_map.get(&src_var).copied().unwrap_or(0);
+
+                if use_avx {
+                    // AVX2: ymm → xmm reduction
+                    // Step 1: extract high 128 bits and add to low 128 bits
+                    let ymm_src = X86Operand::Reg(Self::ymm_reg(src_idx));
+                    let xmm_src = X86Operand::Reg(Self::xmm_reg(src_idx));
+                    let xmm_tmp = X86Operand::Reg(X86Reg::Xmm15);
+                    self.asm.push(X86Instr::Vextracti128(xmm_tmp.clone(), ymm_src, 1));
+                    if is_float {
+                        self.asm.push(X86Instr::Addps(xmm_src.clone(), xmm_tmp));
+                    } else {
+                        self.asm.push(X86Instr::Paddd(xmm_src.clone(), xmm_tmp));
+                    }
+                    // Now reduce the 128-bit xmm_src
+                }
+
+                // Reduce 128-bit XMM register to scalar
+                let xmm_src = X86Operand::Reg(Self::xmm_reg(src_idx));
+                let xmm_tmp = X86Operand::Reg(X86Reg::Xmm15);
+
+                if is_float {
+                    // [a,b,c,d] → pshufd tmp, src, 0x4E (swap halves) → addps → pshufd → addps → movd
+                    self.asm.push(X86Instr::Pshufd(xmm_tmp.clone(), xmm_src.clone(), 0x4E));
+                    self.asm.push(X86Instr::Addps(xmm_src.clone(), xmm_tmp.clone()));
+                    self.asm.push(X86Instr::Pshufd(xmm_tmp.clone(), xmm_src.clone(), 0xB1));
+                    self.asm.push(X86Instr::Addps(xmm_src.clone(), xmm_tmp));
+                    // Move scalar float to dest
+                    let d_op = self.var_to_op(dest_var);
+                    self.asm.push(X86Instr::Movss(d_op, xmm_src));
+                } else {
+                    // [a,b,c,d] → pshufd tmp, src, 0x4E → paddd → pshufd → paddd → movd
+                    self.asm.push(X86Instr::Pshufd(xmm_tmp.clone(), xmm_src.clone(), 0x4E));
+                    self.asm.push(X86Instr::Paddd(xmm_src.clone(), xmm_tmp.clone()));
+                    self.asm.push(X86Instr::Pshufd(xmm_tmp.clone(), xmm_src.clone(), 0xB1));
+                    self.asm.push(X86Instr::Paddd(xmm_src.clone(), xmm_tmp));
+                    // movd eax, xmm_src; mov dest, eax
+                    self.asm.push(X86Instr::Movd(X86Operand::Reg(X86Reg::Eax), xmm_src));
+                    let d_op = self.var_to_op(dest_var);
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                }
+
+                if use_avx {
+                    self.asm.push(X86Instr::Vzeroupper);
+                }
+            }
+        }
     }
 }

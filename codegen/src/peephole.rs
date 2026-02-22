@@ -817,6 +817,32 @@ fn is_reg_live_from(
             X86Instr::Cvttss2si(dest, src) | X86Instr::Xorps(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
+            // Packed SSE/AVX instructions
+            X86Instr::Movaps(dest, src) | X86Instr::Movups(dest, src) |
+            X86Instr::Addps(dest, src) | X86Instr::Subps(dest, src) |
+            X86Instr::Mulps(dest, src) | X86Instr::Divps(dest, src) |
+            X86Instr::Movdqa(dest, src) | X86Instr::Movdqu(dest, src) |
+            X86Instr::Paddd(dest, src) | X86Instr::Psubd(dest, src) |
+            X86Instr::Pmulld(dest, src) |
+            X86Instr::Pxor(dest, src) | X86Instr::Movd(dest, src) |
+            X86Instr::Vmovaps(dest, src) | X86Instr::Vmovups(dest, src) |
+            X86Instr::Vmovdqa(dest, src) | X86Instr::Vmovdqu(dest, src) => {
+                if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
+            }
+            X86Instr::Pshufd(dest, src, _) | X86Instr::Vextracti128(dest, src, _) => {
+                if reads_reg(src, reg) { return true; }
+                if reads_reg_direct(dest, reg) { return false; }
+            }
+            X86Instr::Vaddps(dest, s1, s2) | X86Instr::Vsubps(dest, s1, s2) |
+            X86Instr::Vmulps(dest, s1, s2) | X86Instr::Vdivps(dest, s1, s2) |
+            X86Instr::Vpaddd(dest, s1, s2) | X86Instr::Vpsubd(dest, s1, s2) |
+            X86Instr::Vpmulld(dest, s1, s2) | X86Instr::Vxorps(dest, s1, s2) |
+            X86Instr::Vpxor(dest, s1, s2) => {
+                if reads_reg(dest, reg) || reads_reg(s1, reg) || reads_reg(s2, reg) { return true; }
+            }
+            X86Instr::Vzeroupper => {
+                // Clears upper bits of all YMM registers, doesn't affect XMM bottom halves
+            }
             X86Instr::Cqto => {
                 // cqto sign-extends rax into rdx:rax. Reads rax, writes rdx.
                 if is_rax { return true; } // reads rax
@@ -853,8 +879,24 @@ fn instr_touches_reg(inst: &X86Instr, reg: &X86Reg) -> bool {
         X86Instr::Shl(d, s) | X86Instr::Shr(d, s) | X86Instr::Sar(d, s) |
         X86Instr::Movss(d, s) | X86Instr::Addss(d, s) | X86Instr::Subss(d, s) |
         X86Instr::Mulss(d, s) | X86Instr::Divss(d, s) | X86Instr::Ucomiss(d, s) |
-        X86Instr::Cvtsi2ss(d, s) | X86Instr::Cvttss2si(d, s) | X86Instr::Xorps(d, s) => {
+        X86Instr::Cvtsi2ss(d, s) | X86Instr::Cvttss2si(d, s) | X86Instr::Xorps(d, s) |
+        X86Instr::Movaps(d, s) | X86Instr::Movups(d, s) |
+        X86Instr::Addps(d, s) | X86Instr::Subps(d, s) |
+        X86Instr::Mulps(d, s) | X86Instr::Divps(d, s) |
+        X86Instr::Movdqa(d, s) | X86Instr::Movdqu(d, s) |
+        X86Instr::Paddd(d, s) | X86Instr::Psubd(d, s) | X86Instr::Pmulld(d, s) |
+        X86Instr::Pxor(d, s) | X86Instr::Movd(d, s) | X86Instr::Pshufd(d, s, _) |
+        X86Instr::Vmovaps(d, s) | X86Instr::Vmovups(d, s) |
+        X86Instr::Vmovdqa(d, s) | X86Instr::Vmovdqu(d, s) |
+        X86Instr::Vextracti128(d, s, _) => {
             reads_reg(d, reg) || reads_reg(s, reg)
+        }
+        X86Instr::Vaddps(d, s1, s2) | X86Instr::Vsubps(d, s1, s2) |
+        X86Instr::Vmulps(d, s1, s2) | X86Instr::Vdivps(d, s1, s2) |
+        X86Instr::Vpaddd(d, s1, s2) | X86Instr::Vpsubd(d, s1, s2) |
+        X86Instr::Vpmulld(d, s1, s2) | X86Instr::Vxorps(d, s1, s2) |
+        X86Instr::Vpxor(d, s1, s2) => {
+            reads_reg(d, reg) || reads_reg(s1, reg) || reads_reg(s2, reg)
         }
         X86Instr::Neg(o) | X86Instr::Not(o) | X86Instr::Idiv(o) => reads_reg(o, reg),
         X86Instr::Set(_, o) => reads_reg(o, reg),
@@ -911,6 +953,27 @@ fn is_reg_read_in_block(instructions: &[X86Instr], start: usize, reg: &X86Reg) -
             X86Instr::Xorps(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
+            // Packed SSE/AVX
+            X86Instr::Movaps(dest, src) | X86Instr::Movups(dest, src) |
+            X86Instr::Addps(dest, src) | X86Instr::Subps(dest, src) |
+            X86Instr::Mulps(dest, src) | X86Instr::Divps(dest, src) |
+            X86Instr::Movdqa(dest, src) | X86Instr::Movdqu(dest, src) |
+            X86Instr::Paddd(dest, src) | X86Instr::Psubd(dest, src) |
+            X86Instr::Pmulld(dest, src) | X86Instr::Pxor(dest, src) |
+            X86Instr::Movd(dest, src) | X86Instr::Pshufd(dest, src, _) |
+            X86Instr::Vmovaps(dest, src) | X86Instr::Vmovups(dest, src) |
+            X86Instr::Vmovdqa(dest, src) | X86Instr::Vmovdqu(dest, src) |
+            X86Instr::Vextracti128(dest, src, _) => {
+                if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
+            }
+            X86Instr::Vaddps(dest, s1, s2) | X86Instr::Vsubps(dest, s1, s2) |
+            X86Instr::Vmulps(dest, s1, s2) | X86Instr::Vdivps(dest, s1, s2) |
+            X86Instr::Vpaddd(dest, s1, s2) | X86Instr::Vpsubd(dest, s1, s2) |
+            X86Instr::Vpmulld(dest, s1, s2) | X86Instr::Vxorps(dest, s1, s2) |
+            X86Instr::Vpxor(dest, s1, s2) => {
+                if reads_reg(dest, reg) || reads_reg(s1, reg) || reads_reg(s2, reg) { return true; }
+            }
+            X86Instr::Vzeroupper => {}
             _ => { return true; } // conservative
         }
     }
@@ -923,7 +986,8 @@ fn reads_reg(operand: &X86Operand, reg: &X86Reg) -> bool {
     match operand {
         X86Operand::Reg(r) => same_physical_reg(r, reg),
         X86Operand::Mem(r, _) | X86Operand::DwordMem(r, _) | X86Operand::WordMem(r, _) |
-        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) => {
+        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) |
+        X86Operand::XmmwordMem(r, _) | X86Operand::YmmwordMem(r, _) => {
             same_physical_reg(r, reg)
         }
         _ => false,
@@ -942,7 +1006,8 @@ fn reads_reg_direct(operand: &X86Operand, reg: &X86Reg) -> bool {
 fn uses_reg_as_base(operand: &X86Operand, reg: &X86Reg) -> bool {
     match operand {
         X86Operand::Mem(r, _) | X86Operand::DwordMem(r, _) | X86Operand::WordMem(r, _) |
-        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) => {
+        X86Operand::ByteMem(r, _) | X86Operand::FloatMem(r, _) |
+        X86Operand::XmmwordMem(r, _) | X86Operand::YmmwordMem(r, _) => {
             same_physical_reg(r, reg)
         }
         _ => false,
@@ -981,5 +1046,29 @@ fn physical_reg_id(r: &X86Reg) -> u8 {
         X86Reg::Xmm5 => 21,
         X86Reg::Xmm6 => 22,
         X86Reg::Xmm7 => 23,
+        X86Reg::Xmm8 => 24,
+        X86Reg::Xmm9 => 25,
+        X86Reg::Xmm10 => 26,
+        X86Reg::Xmm11 => 27,
+        X86Reg::Xmm12 => 28,
+        X86Reg::Xmm13 => 29,
+        X86Reg::Xmm14 => 30,
+        X86Reg::Xmm15 => 31,
+        X86Reg::Ymm0 => 16,  // YMM aliases XMM (same physical register)
+        X86Reg::Ymm1 => 17,
+        X86Reg::Ymm2 => 18,
+        X86Reg::Ymm3 => 19,
+        X86Reg::Ymm4 => 20,
+        X86Reg::Ymm5 => 21,
+        X86Reg::Ymm6 => 22,
+        X86Reg::Ymm7 => 23,
+        X86Reg::Ymm8 => 24,
+        X86Reg::Ymm9 => 25,
+        X86Reg::Ymm10 => 26,
+        X86Reg::Ymm11 => 27,
+        X86Reg::Ymm12 => 28,
+        X86Reg::Ymm13 => 29,
+        X86Reg::Ymm14 => 30,
+        X86Reg::Ymm15 => 31,
     }
 }

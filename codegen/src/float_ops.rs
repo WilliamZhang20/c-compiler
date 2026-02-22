@@ -58,17 +58,37 @@ pub fn gen_float_binary_op(generator: &mut FunctionGenerator, dest: VarId, op: &
         }
         BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual | BinaryOp::EqualEqual | BinaryOp::NotEqual => {
             generator.var_types.insert(dest, Type::Int);
-            generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
-            let cond = match op {
-                BinaryOp::Less => "b",
-                BinaryOp::LessEqual => "be",
-                BinaryOp::Greater => "a",
-                BinaryOp::GreaterEqual => "ae",
-                BinaryOp::EqualEqual => "e",
-                BinaryOp::NotEqual => "ne",
+            // IEEE 754 NaN handling: ucomiss sets PF=1 for unordered (NaN) operands.
+            // - For Less/LessEqual: swap operands and use seta/setae (CF=0 for NaN → false)
+            // - For Greater/GreaterEqual: seta/setae already correct (CF=1 for NaN → false)
+            // - For EqualEqual: sete AND setnp (must be equal AND ordered)
+            // - For NotEqual: setne OR setp (not-equal OR unordered)
+            match op {
+                BinaryOp::Less | BinaryOp::LessEqual => {
+                    // Swap operands: a < b ≡ b above a
+                    generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm1), X86Operand::Reg(X86Reg::Xmm0)));
+                    let cond = if *op == BinaryOp::Less { "a" } else { "ae" };
+                    generator.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
+                }
+                BinaryOp::Greater | BinaryOp::GreaterEqual => {
+                    generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
+                    let cond = if *op == BinaryOp::Greater { "a" } else { "ae" };
+                    generator.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
+                }
+                BinaryOp::EqualEqual => {
+                    generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
+                    generator.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
+                    generator.asm.push(X86Instr::Set("np".to_string(), X86Operand::Reg(X86Reg::Cl)));
+                    generator.asm.push(X86Instr::And(X86Operand::Reg(X86Reg::Al), X86Operand::Reg(X86Reg::Cl)));
+                }
+                BinaryOp::NotEqual => {
+                    generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
+                    generator.asm.push(X86Instr::Set("ne".to_string(), X86Operand::Reg(X86Reg::Al)));
+                    generator.asm.push(X86Instr::Set("p".to_string(), X86Operand::Reg(X86Reg::Cl)));
+                    generator.asm.push(X86Instr::Or(X86Operand::Reg(X86Reg::Al), X86Operand::Reg(X86Reg::Cl)));
+                }
                 _ => unreachable!(),
-            };
-            generator.asm.push(X86Instr::Set(cond.to_string(), X86Operand::Reg(X86Reg::Al)));
+            }
             let dest_op = generator.var_to_op(dest); 
             generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
             generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
@@ -108,10 +128,15 @@ pub fn gen_float_unary_op(generator: &mut FunctionGenerator, dest: VarId, op: &U
             generator.asm.push(X86Instr::Xorps(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
         }
         UnaryOp::LogicalNot => {
-            generator.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(X86Reg::Eax), X86Operand::Reg(X86Reg::Xmm0)));
-            generator.asm.push(X86Instr::Cmp(X86Operand::Reg(X86Reg::Eax), X86Operand::Imm(0)));
+            // !float: compare against 0.0, must be ordered AND equal
+            // NaN → unordered → setnp=0 → result=0 (correct: !NaN = false)
+            // denormals → not equal to 0.0 → sete=0 → result=0 (correct)
+            generator.asm.push(X86Instr::Xorps(X86Operand::Reg(X86Reg::Xmm1), X86Operand::Reg(X86Reg::Xmm1)));
+            generator.asm.push(X86Instr::Ucomiss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm1)));
             generator.asm.push(X86Instr::Set("e".to_string(), X86Operand::Reg(X86Reg::Al)));
-            generator.asm.push(X86Instr::Movsx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
+            generator.asm.push(X86Instr::Set("np".to_string(), X86Operand::Reg(X86Reg::Cl)));
+            generator.asm.push(X86Instr::And(X86Operand::Reg(X86Reg::Al), X86Operand::Reg(X86Reg::Cl)));
+            generator.asm.push(X86Instr::Movzx(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Al)));
             generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             return;
         }

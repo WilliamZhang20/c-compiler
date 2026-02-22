@@ -59,6 +59,7 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::VaArg { dest, .. } => Some(*dest),
                 IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
                 | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
+                IrInstruction::Simd { dest, .. } => *dest,
             };
             if let Some(var) = def_var {
                 if !alloca_vars.contains(&var) {
@@ -171,6 +172,7 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 IrInstruction::VaArg { dest, .. } => Some(*dest),
                 IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
                 | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
+                IrInstruction::Simd { dest, .. } => *dest,
             };
             
             if let Some(var) = def_var {
@@ -315,5 +317,10 @@ where F: FnMut(VarId) {
             if let Operand::Var(v) = list { f(*v); }
         }
         IrInstruction::Alloca { .. } => {}
+        IrInstruction::Simd { operands, .. } => {
+            for op in operands {
+                if let Operand::Var(v) = op { f(*v); }
+            }
+        }
     }
 }
