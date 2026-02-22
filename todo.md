@@ -510,8 +510,8 @@ These must be implemented before any kernel source file can be processed:
 12. **`asm goto`** — static branches, alternatives framework
 13. **`asm volatile` enforcement** — `volatile` flag must prevent movement/elimination
 14. **Clobber list enforcement** — save/restore registers; respect `"memory"` and `"cc"` clobbers
-15. **`.bss` section** — uninitialized data
-16. **`.rodata` section** — read-only data
+15. ~~**`.bss` section** — uninitialized data~~ ✅
+16. ~~**`.rodata` section** — read-only data~~ ✅
 17. **`.type` / `.size` directives** — ELF symbol metadata
 18. **Bitfield layout and codegen** — correct packing, shift/mask access
 19. **`va_arg` codegen** — needed for `printk` and variadic functions
