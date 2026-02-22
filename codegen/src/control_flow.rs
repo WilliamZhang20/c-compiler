@@ -31,24 +31,46 @@ impl<'a> FunctionGenerator<'a> {
                                   self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
                                   self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
                               } else {
-                                  // Handle size mismatch between source and dest
-                                  let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
-                                  let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                                  // Check if we can emit a direct move (no intermediate register needed)
+                                  let src_is_mem = matches!(s_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
+                                  let dst_is_mem = matches!(d_op, X86Operand::Mem(..) | X86Operand::DwordMem(..) | X86Operand::WordMem(..) | X86Operand::ByteMem(..) | X86Operand::FloatMem(..) | X86Operand::GlobalMem(..));
                                   
-                                  if src_is_dword && dst_is_dword {
-                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
-                                  } else if src_is_dword {
-                                      // 32-bit source to 64-bit dest
-                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                                  } else if dst_is_dword {
-                                      // 64-bit source to 32-bit dest
-                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                  if !src_is_mem || !dst_is_mem {
+                                      // At least one is a register or immediate — direct move is valid
+                                      // But handle size mismatches
+                                      let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+                                      let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                                      
+                                      if src_is_dword && !dst_is_dword && matches!(d_op, X86Operand::Reg(_)) {
+                                          // 32-bit mem → 64-bit reg: need movsx or two-step
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                      } else if !src_is_dword && dst_is_dword && matches!(s_op, X86Operand::Reg(_)) {
+                                          // 64-bit reg → 32-bit mem: need truncation
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                      } else {
+                                          // Direct move is safe (reg←reg, reg←imm, mem←imm, etc.)
+                                          self.asm.push(X86Instr::Mov(d_op, s_op));
+                                      }
                                   } else {
-                                      self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                                      self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                      // Both are memory — need intermediate register
+                                      let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+                                      let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+                                      
+                                      if src_is_dword && dst_is_dword {
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                      } else if src_is_dword {
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                      } else if dst_is_dword {
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                                      } else {
+                                          self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                                          self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                                      }
                                   }
                               }
                          }
