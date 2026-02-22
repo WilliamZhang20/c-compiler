@@ -151,7 +151,8 @@ impl<'a> TypeParser for Parser<'a> {
                     }
                     self.advance();
                     let (struct_type, _) = self.parse_struct_type()?;
-                    return Ok((struct_type, qualifiers));
+                    base_type = Some(struct_type);
+                    break;
                 }
                 Some(Token::Union) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
@@ -159,7 +160,8 @@ impl<'a> TypeParser for Parser<'a> {
                     }
                     self.advance();
                     let (union_type, _) = self.parse_union_type()?;
-                    return Ok((union_type, qualifiers));
+                    base_type = Some(union_type);
+                    break;
                 }
                 Some(Token::Enum) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
@@ -167,7 +169,8 @@ impl<'a> TypeParser for Parser<'a> {
                     }
                     self.advance();
                     let (enum_type, _) = self.parse_enum_type()?;
-                    return Ok((enum_type, qualifiers));
+                    base_type = Some(enum_type);
+                    break;
                 }
                 Some(Token::Typeof) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {
@@ -184,7 +187,8 @@ impl<'a> TypeParser for Parser<'a> {
                         Type::TypeofExpr(Box::new(expr))
                     };
                     self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-                    return Ok((ty, qualifiers));
+                    base_type = Some(ty);
+                    break;
                 }
                 Some(Token::Identifier { value }) if self.typedefs.contains(value) => {
                     if is_unsigned || is_signed || long_count > 0 || is_short {

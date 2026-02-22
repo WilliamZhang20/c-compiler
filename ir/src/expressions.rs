@@ -820,8 +820,28 @@ impl Lowerer {
                     return Ok(Operand::Var(dest));
                 }
                 
-                // For other casts (like int to int of different sizes, or pointer casts),
-                // just return the source value (no conversion needed in SSA form)
+                // For other casts (int-to-int with different signedness or width),
+                // emit a Cast so the optimizer can fold with correct truncation/masking.
+                let is_int_type = |t: &Type| matches!(t,
+                    Type::Char | Type::UnsignedChar |
+                    Type::Short | Type::UnsignedShort |
+                    Type::Int | Type::UnsignedInt |
+                    Type::Long | Type::UnsignedLong |
+                    Type::LongLong | Type::UnsignedLongLong
+                );
+                if is_int_type(&src_type) && is_int_type(ty) && src_type != *ty {
+                    let dest = self.new_var();
+                    self.var_types.insert(dest, ty.clone());
+                    let bid = self.current_block.ok_or("Cast outside block")?;
+                    self.blocks[bid.0].instructions.push(Instruction::Cast {
+                        dest,
+                        src: src_val,
+                        r#type: ty.clone(),
+                    });
+                    return Ok(Operand::Var(dest));
+                }
+
+                // For pointer casts etc, just return the source value
                 Ok(src_val)
             }
             AstExpr::Conditional { condition, then_expr, else_expr } => {

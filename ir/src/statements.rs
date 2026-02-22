@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use model::{Type, Stmt as AstStmt, Block as AstBlock, Expr as AstExpr, BinaryOp};
-use crate::types::{Operand, Instruction, Terminator};
+use crate::types::{VarId, Operand, Instruction, Terminator};
 use crate::lowerer::Lowerer;
 
 /// Statement lowering implementation
@@ -210,7 +211,39 @@ impl Lowerer {
                 self.lower_expr(e)?;
             }
             AstStmt::Block(b) => {
+                // Save scope state before entering nested block so that
+                // variable shadowing is properly undone when the block ends.
+                let saved_allocas = self.variable_allocas.clone();
+                let saved_symbol_table = self.symbol_table.clone();
+
+                // Save variable_defs for the current block for all known variables
+                let saved_bid = self.current_block;
+                let mut saved_var_defs: HashMap<String, VarId> = HashMap::new();
+                if let Some(block_id) = saved_bid {
+                    for (name, block_map) in &self.variable_defs {
+                        if let Some(&var) = block_map.get(&block_id) {
+                            saved_var_defs.insert(name.clone(), var);
+                        }
+                    }
+                }
+
                 self.lower_block(b)?;
+
+                // Restore scope: allocas and symbol table
+                self.variable_allocas = saved_allocas;
+                self.symbol_table = saved_symbol_table;
+
+                // Write outer-scope variable values to the current block
+                // (which may differ from saved_bid if control flow occurred
+                // inside the inner block).
+                if let Some(block_id) = self.current_block {
+                    for (name, var) in &saved_var_defs {
+                        self.variable_defs
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(block_id, *var);
+                    }
+                }
             }            AstStmt::MultiDecl(stmts) => {
                 // Flat multi-variable declaration — lower each in the current scope.
                 for s in stmts {
@@ -269,7 +302,11 @@ impl Lowerer {
 
                 self.current_block = Some(header_id);
                 let cond_val = self.lower_expr(cond)?;
-                self.blocks[header_id.0].terminator = Terminator::CondBr {
+                // Use current_block (not header_id) because LogicalAnd/Or
+                // may have created short-circuit blocks, moving current_block
+                // to a merge block.
+                let cond_block = self.current_block.ok_or("While cond ended outside block")?;
+                self.blocks[cond_block.0].terminator = Terminator::CondBr {
                     cond: cond_val,
                     then_block: body_id,
                     else_block: exit_id,
@@ -308,7 +345,10 @@ impl Lowerer {
                 self.sealed_blocks.insert(latch_id);
                 self.current_block = Some(latch_id);
                 let cond_val = self.lower_expr(cond)?;
-                self.blocks[latch_id.0].terminator = Terminator::CondBr {
+                // Use current_block (not latch_id) because LogicalAnd/Or
+                // may have created short-circuit blocks.
+                let cond_block = self.current_block.ok_or("DoWhile cond ended outside block")?;
+                self.blocks[cond_block.0].terminator = Terminator::CondBr {
                     cond: cond_val,
                     then_block: body_id,
                     else_block: exit_id,
@@ -337,7 +377,10 @@ impl Lowerer {
                 self.current_block = Some(header_id);
                 if let Some(c) = cond {
                     let cond_val = self.lower_expr(c)?;
-                    self.blocks[header_id.0].terminator = Terminator::CondBr {
+                    // Use current_block (not header_id) because LogicalAnd/Or
+                    // may have created short-circuit blocks.
+                    let cond_block = self.current_block.ok_or("For cond ended outside block")?;
+                    self.blocks[cond_block.0].terminator = Terminator::CondBr {
                         cond: cond_val,
                         then_block: body_id,
                         else_block: exit_id,
