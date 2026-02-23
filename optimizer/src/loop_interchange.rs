@@ -71,13 +71,11 @@ pub fn try_loop_interchange(func: &mut Function) {
         let outer_stride = count_gep_stride_refs(func, inner_body_blocks, outer_iv.var);
         let inner_stride = count_gep_stride_refs(func, inner_body_blocks, inner_iv.var);
 
-        // If outer IV is used more in GEP indices in the innermost position,
-        // that means the inner loop has stride proportional to array dimensions
-        // when iterating over the outer IV. Interchanging would be beneficial.
-        // Heuristic: if outer IV appears in more GEP indices than inner IV,
-        // interchanging will improve locality.
-        if outer_stride <= inner_stride {
-            continue; // Already good stride order, no interchange needed
+        // If the inner IV has more non-unit stride (row-level) GEP accesses,
+        // interchanging to make the outer IV the innermost will improve locality
+        // because the outer IV has fewer cache-miss-inducing accesses.
+        if inner_stride <= outer_stride {
+            continue; // Inner loop already has good stride, no interchange needed
         }
 
         // Perform the interchange by swapping the IV parameters
@@ -116,6 +114,7 @@ fn is_perfectly_nested(func: &Function, outer: &NaturalLoop, inner: &NaturalLoop
                         }
                     }
                     Instruction::Copy { .. } => {} // OK
+                    Instruction::GetElementPtr { .. } => {} // OK: just pointer arithmetic
                     _ => return false, // Has real computation in outer-only blocks
                 }
             }
@@ -126,8 +125,10 @@ fn is_perfectly_nested(func: &Function, outer: &NaturalLoop, inner: &NaturalLoop
 }
 
 /// Count how many GEP instructions in the given blocks use a specific variable
-/// as their index operand. This estimates the "stride exposure" of that variable
-/// in the innermost loop — more GEP index uses = more cache-line crossings.
+/// as their index operand with non-unit stride (i.e., the element_type is an array,
+/// meaning changing this index moves by a whole row rather than a single element).
+/// High non-unit stride count means the variable causes poor cache locality when
+/// it's the innermost loop IV.
 fn count_gep_stride_refs(
     func: &Function,
     blocks: &HashSet<BlockId>,
@@ -139,9 +140,17 @@ fn count_gep_stride_refs(
             continue;
         }
         for inst in &block.instructions {
-            if let Instruction::GetElementPtr { index, .. } = inst {
+            if let Instruction::GetElementPtr { index, element_type, .. } = inst {
                 if matches!(index, Operand::Var(v) if *v == var) {
-                    count += 1;
+                    // Only count as "bad stride" if the element_type is an array
+                    // (row-level access: stride = array_size)
+                    // A scalar element_type means this is the innermost dimension (stride-1)
+                    match element_type {
+                        model::Type::Array(_, _) => {
+                            count += 1; // Row-level stride — bad for cache
+                        }
+                        _ => {} // Element-level stride — good for cache
+                    }
                 }
             }
         }
@@ -156,6 +165,10 @@ fn count_gep_stride_refs(
 /// - The comparison bounds in the headers
 /// - The init values in the phi nodes
 /// - The step values in the body
+///
+/// Note: For loops with identical parameters (same init, bound, step), this is
+/// a no-op since swapping identical values has no effect. True interchange for
+/// same-parameter loops requires CFG restructuring, which is not yet implemented.
 fn swap_loop_ivs(
     func: &mut Function,
     outer: &NaturalLoop,
@@ -163,22 +176,20 @@ fn swap_loop_ivs(
     outer_iv: &InductionVar,
     inner_iv: &InductionVar,
 ) {
-    // Strategy: swap the bounds and init values between the two loop headers.
-    // The outer header's cmp should use inner_iv's bound, and vice versa.
-    // The outer header's phi should use inner_iv's init, and vice versa.
-    
-    // Collect the info we need
-    let outer_init = outer_iv.init;
     let outer_bound = outer_iv.bound;
-    let outer_step = outer_iv.step;
-    let inner_init = inner_iv.init;
     let inner_bound = inner_iv.bound;
+    let outer_init = outer_iv.init;
+    let inner_init = inner_iv.init;
+    let outer_step = outer_iv.step;
     let inner_step = inner_iv.step;
-    
+
+    // Skip if all params are the same — no-op swap
+    if outer_bound == inner_bound && outer_init == inner_init && outer_step == inner_step {
+        return;
+    }
+
     // Swap bound constants in header comparison instructions
-    // Outer header: change comparison from 'outer_bound' to 'inner_bound'
     swap_comparison_bound(func, outer.header, outer_iv.var, inner_bound);
-    // Inner header: change comparison from 'inner_bound' to 'outer_bound'
     swap_comparison_bound(func, inner.header, inner_iv.var, outer_bound);
 
     // Swap init values in phi nodes
@@ -192,6 +203,8 @@ fn swap_loop_ivs(
     }
 }
 
+/// Rename all USES (not defs) of `old_var` to `new_var` in operands of
+/// instructions within the specified blocks.
 /// Change the comparison bound in a loop header
 fn swap_comparison_bound(func: &mut Function, header: BlockId, iv_var: VarId, new_bound: i64) {
     if let Some(block) = func.blocks.iter_mut().find(|b| b.id == header) {

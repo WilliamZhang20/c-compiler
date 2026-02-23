@@ -38,6 +38,29 @@ impl X86Reg {
             Self::Ymm12 => "ymm12", Self::Ymm13 => "ymm13", Self::Ymm14 => "ymm14", Self::Ymm15 => "ymm15",
         }
     }
+
+    /// Convert a 64-bit GPR to its 32-bit variant. Non-GPR registers are returned unchanged.
+    pub fn to_32bit(&self) -> Self {
+        match self {
+            Self::Rax | Self::Eax => Self::Eax,
+            Self::Rcx | Self::Ecx => Self::Ecx,
+            Self::Rdx | Self::Edx => Self::Edx,
+            Self::Rbx | Self::Ebx => Self::Ebx,
+            Self::Rsp | Self::Esp => Self::Esp,
+            Self::Rbp | Self::Ebp => Self::Ebp,
+            Self::Rsi | Self::Esi => Self::Esi,
+            Self::Rdi | Self::Edi => Self::Edi,
+            Self::R8 | Self::R8d => Self::R8d,
+            Self::R9 | Self::R9d => Self::R9d,
+            Self::R10 | Self::R10d => Self::R10d,
+            Self::R11 | Self::R11d => Self::R11d,
+            Self::R12 | Self::R12d => Self::R12d,
+            Self::R13 | Self::R13d => Self::R13d,
+            Self::R14 | Self::R14d => Self::R14d,
+            Self::R15 | Self::R15d => Self::R15d,
+            other => other.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,20 +85,29 @@ impl fmt::Display for X86Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Reg(r) => f.write_str(r.to_str()),
-            Self::Mem(r, offset) => write!(f, "QWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::DwordMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::WordMem(r, offset) => write!(f, "WORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::ByteMem(r, offset) => write!(f, "BYTE PTR [{}{:+}]", r.to_str(), offset),
+            Self::Mem(r, offset) => fmt_mem(f, "QWORD PTR", r, *offset),
+            Self::DwordMem(r, offset) => fmt_mem(f, "DWORD PTR", r, *offset),
+            Self::WordMem(r, offset) => fmt_mem(f, "WORD PTR", r, *offset),
+            Self::ByteMem(r, offset) => fmt_mem(f, "BYTE PTR", r, *offset),
             Self::Imm(i) => write!(f, "{}", i),
             Self::Label(s) => f.write_str(s),
             Self::GlobalMem(name) => write!(f, "DWORD PTR {}[rip]", name),
             Self::RipRelLabel(name) => write!(f, "{}[rip]", name),
-            Self::FloatMem(r, offset) => write!(f, "DWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::DoubleMem(r, offset) => write!(f, "QWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::FloatMem(r, offset) => fmt_mem(f, "DWORD PTR", r, *offset),
+            Self::DoubleMem(r, offset) => fmt_mem(f, "QWORD PTR", r, *offset),
             Self::GlobalQwordMem(name) => write!(f, "QWORD PTR {}[rip]", name),
-            Self::XmmwordMem(r, offset) => write!(f, "XMMWORD PTR [{}{:+}]", r.to_str(), offset),
-            Self::YmmwordMem(r, offset) => write!(f, "YMMWORD PTR [{}{:+}]", r.to_str(), offset),
+            Self::XmmwordMem(r, offset) => fmt_mem(f, "XMMWORD PTR", r, *offset),
+            Self::YmmwordMem(r, offset) => fmt_mem(f, "YMMWORD PTR", r, *offset),
         }
+    }
+}
+
+/// Format a memory operand, omitting the offset when it's zero.
+fn fmt_mem(f: &mut fmt::Formatter<'_>, size: &str, reg: &X86Reg, offset: i32) -> fmt::Result {
+    if offset == 0 {
+        write!(f, "{} [{}]", size, reg.to_str())
+    } else {
+        write!(f, "{} [{}{:+}]", size, reg.to_str(), offset)
     }
 }
 
@@ -168,6 +200,7 @@ pub enum X86Instr {
     // AVX2 utility instructions
     Vextracti128(X86Operand, X86Operand, u8),       // Extract 128-bit from 256-bit
     Vpxor(X86Operand, X86Operand, X86Operand),      // AVX packed XOR
+    Vpbroadcastd(X86Operand, X86Operand),            // AVX2 broadcast dword to all lanes
     Raw(String), // Raw assembly string (for inline asm)
 }
 
@@ -263,6 +296,7 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Pxor(d, src) => { let _ = write!(s, "  pxor {}, {}\n", d, src); }
             X86Instr::Vextracti128(d, src, imm) => { let _ = write!(s, "  vextracti128 {}, {}, {}\n", d, src, imm); }
             X86Instr::Vpxor(d, s1, s2) => { let _ = write!(s, "  vpxor {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpbroadcastd(d, src) => { let _ = write!(s, "  vpbroadcastd {}, {}\n", d, src); }
             X86Instr::Raw(asm_str) => { let _ = write!(s, "  {}\n", asm_str); }
         }
     }
@@ -333,7 +367,9 @@ mod tests {
     #[test]
     fn operand_byte_mem() {
         let op = X86Operand::ByteMem(X86Reg::Rsp, 0);
-        assert_eq!(op.to_string(), "BYTE PTR [rsp+0]");
+        assert_eq!(op.to_string(), "BYTE PTR [rsp]");
+        let op2 = X86Operand::ByteMem(X86Reg::Rsp, 4);
+        assert_eq!(op2.to_string(), "BYTE PTR [rsp+4]");
     }
 
     #[test]

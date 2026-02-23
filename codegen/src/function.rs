@@ -969,6 +969,35 @@ impl<'a> FunctionGenerator<'a> {
                 }
             }
 
+            SimdOp::Splat => {
+                // operands[0] = scalar value to broadcast
+                let dest_var = dest.expect("Splat must have dest");
+                let dest_idx = self.alloc_simd_reg(dest_var);
+
+                // Move scalar into eax first (32-bit for i32 elements)
+                let scalar_op = self.operand_to_op(&operands[0]);
+                // Convert operand to 32-bit for eax destination
+                let scalar_op_32 = match scalar_op {
+                    X86Operand::Mem(reg, offset) => X86Operand::DwordMem(reg, offset),
+                    X86Operand::Reg(r) => X86Operand::Reg(r.to_32bit()),
+                    other => other,
+                };
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), scalar_op_32));
+
+                if use_avx {
+                    // AVX2: movd xmm_dst, eax; vpbroadcastd ymm_dst, xmm_dst
+                    let xmm_dst = X86Operand::Reg(Self::xmm_reg(dest_idx));
+                    let ymm_dst = X86Operand::Reg(Self::ymm_reg(dest_idx));
+                    self.asm.push(X86Instr::Movd(xmm_dst.clone(), X86Operand::Reg(X86Reg::Eax)));
+                    self.asm.push(X86Instr::Vpbroadcastd(ymm_dst, xmm_dst));
+                } else {
+                    // SSE: movd xmm_dst, eax; pshufd xmm_dst, xmm_dst, 0x00
+                    let xmm_dst = X86Operand::Reg(Self::xmm_reg(dest_idx));
+                    self.asm.push(X86Instr::Movd(xmm_dst.clone(), X86Operand::Reg(X86Reg::Eax)));
+                    self.asm.push(X86Instr::Pshufd(xmm_dst.clone(), xmm_dst, 0x00));
+                }
+            }
+
             SimdOp::HorizontalAdd => {
                 // operands[0] = Var(vector to reduce)
                 // dest = scalar VarId to receive the sum

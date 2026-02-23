@@ -1,5 +1,5 @@
 // Register allocation with graph coloring
-use ir::{VarId, Function as IrFunction, Instruction as IrInstruction, Operand};
+use ir::{VarId, Function as IrFunction, Instruction as IrInstruction, Terminator as IrTerminator, Operand};
 use std::collections::{HashMap, HashSet};
 use crate::liveness::compute_live_intervals;
 
@@ -115,10 +115,13 @@ pub fn allocate_registers(func: &IrFunction, target: &model::TargetConfig) -> Ha
     // These variables cannot use caller-saved registers
     let live_across_call = compute_live_across_call(&intervals, func);
     
-    // 7. Graph coloring with copy coalescing and parameter hints
-    color_graph(&mut intervals, &interference, &copy_hints, &param_hints, use_callee_saved, &live_across_call, target);
+    // 7. Compute use counts for spill-cost heuristic
+    let use_counts = compute_use_counts(func);
     
-    // 8. Build result map
+    // 8. Graph coloring with copy coalescing and parameter hints
+    color_graph(&mut intervals, &interference, &copy_hints, &param_hints, use_callee_saved, &live_across_call, &use_counts, target);
+    
+    // 9. Build result map
     let mut reg_alloc = HashMap::new();
     for interval in &intervals {
         if let Some(reg) = interval.reg {
@@ -161,6 +164,61 @@ fn collect_copy_hints(func: &IrFunction) -> HashMap<VarId, VarId> {
     }
     
     hints
+}
+
+/// Count how many times each variable is referenced (used or defined) in the IR.
+/// Variables with more references have higher spill cost and should be prioritized
+/// for register allocation.
+fn compute_use_counts(func: &IrFunction) -> HashMap<VarId, usize> {
+    use crate::liveness::visit_operands;
+    let mut counts: HashMap<VarId, usize> = HashMap::new();
+    
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            // Count uses
+            visit_operands(inst, |var| {
+                *counts.entry(var).or_insert(0) += 1;
+            });
+            
+            // Count defs
+            let def_var = match inst {
+                IrInstruction::Binary { dest, .. } |
+                IrInstruction::FloatBinary { dest, .. } |
+                IrInstruction::Unary { dest, .. } |
+                IrInstruction::FloatUnary { dest, .. } |
+                IrInstruction::Phi { dest, .. } |
+                IrInstruction::Copy { dest, .. } |
+                IrInstruction::Cast { dest, .. } |
+                IrInstruction::Load { dest, .. } |
+                IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
+                IrInstruction::Call { dest, .. } => *dest,
+                IrInstruction::IndirectCall { dest, .. } => *dest,
+                IrInstruction::InlineAsm { outputs, .. } => outputs.first().copied(),
+                IrInstruction::VaArg { dest, .. } => Some(*dest),
+                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
+                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
+                IrInstruction::Simd { dest, .. } => *dest,
+            };
+            if let Some(var) = def_var {
+                *counts.entry(var).or_insert(0) += 1;
+            }
+        }
+        
+        // Count terminator uses
+        match &block.terminator {
+            IrTerminator::CondBr { cond, .. } => {
+                if let Operand::Var(v) = cond {
+                    *counts.entry(*v).or_insert(0) += 1;
+                }
+            }
+            IrTerminator::Ret(Some(Operand::Var(v))) => {
+                *counts.entry(*v).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+    
+    counts
 }
 
 /// Build hints for parameter variables to prefer their incoming registers
@@ -241,9 +299,22 @@ fn compute_live_across_call(intervals: &[LiveInterval], func: &IrFunction) -> Ha
     live_across_call
 }
 
-fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>, copy_hints: &HashMap<VarId, VarId>, param_hints: &HashMap<VarId, PhysicalReg>, use_callee_saved: bool, live_across_call: &HashSet<VarId>, target: &model::TargetConfig) {
-    // Sort by spill cost heuristic (shorter intervals = higher priority)
-    intervals.sort_by_key(|i| i.end - i.start);
+fn color_graph(intervals: &mut [LiveInterval], interference: &HashMap<VarId, HashSet<VarId>>, copy_hints: &HashMap<VarId, VarId>, param_hints: &HashMap<VarId, PhysicalReg>, use_callee_saved: bool, live_across_call: &HashSet<VarId>, use_counts: &HashMap<VarId, usize>, target: &model::TargetConfig) {
+    // Sort by spill cost: HIGH spill cost first → gets a register first.
+    // Spill cost = use_count * 1000 / interval_length.
+    // Variables with many uses relative to their interval length are expensive to spill
+    // (they'd require frequent loads/stores). Long-lived loop counters with many uses
+    // get priority over short-lived temporaries used once.
+    intervals.sort_by(|a, b| {
+        let len_a = (a.end - a.start).max(1) as u64;
+        let len_b = (b.end - b.start).max(1) as u64;
+        let uses_a = *use_counts.get(&a.var).unwrap_or(&1) as u64;
+        let uses_b = *use_counts.get(&b.var).unwrap_or(&1) as u64;
+        let cost_a = uses_a * 1000 / len_a;
+        let cost_b = uses_b * 1000 / len_b;
+        // Descending: highest spill cost first (most important to keep in register)
+        cost_b.cmp(&cost_a).then_with(|| b.end.cmp(&a.end))
+    });
     
     let available_regs = PhysicalReg::allocatable(target);
     

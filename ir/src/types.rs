@@ -151,6 +151,8 @@ pub enum SimdOp {
     Mul,
     /// Horizontal add — reduces vector to scalar sum
     HorizontalAdd,
+    /// Broadcast scalar to all vector lanes
+    Splat,
 }
 
 /// Control flow terminators for basic blocks

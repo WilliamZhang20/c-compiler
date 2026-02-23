@@ -234,6 +234,18 @@ fn analyze_loop_body(
         return None;
     }
 
+    // Check for stores whose data depends on the induction variable (e.g., arr[i] = i).
+    // A Splat would incorrectly broadcast a single IV value to all lanes.
+    // We can only vectorize stores whose data is either:
+    //   - A loop-invariant scalar (correct to splat), or
+    //   - Derived from a vector load (will be remapped to a vector register)
+    let load_vars: HashSet<VarId> = loads.iter().filter_map(|l| l.dest).collect();
+    for store in &stores {
+        if is_iv_or_iv_derived(&store.data, iv.var, &arithmetic_ops, &load_vars) {
+            return None;
+        }
+    }
+
     Some(VectorizationPlan {
         trip_count,
         loads,
@@ -248,6 +260,37 @@ fn is_iv_derived(op: &Operand, iv_var: VarId) -> bool {
     match op {
         Operand::Var(v) => *v == iv_var,
         _ => false,
+    }
+}
+
+/// Check if an operand depends on the induction variable, either directly or
+/// through arithmetic operations, but NOT through vector loads (which are safely
+/// remapped during vectorization).
+fn is_iv_or_iv_derived(
+    op: &Operand,
+    iv_var: VarId,
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+    load_vars: &HashSet<VarId>,
+) -> bool {
+    match op {
+        Operand::Var(v) => {
+            if *v == iv_var {
+                return true;
+            }
+            // If this variable comes from a load, it will be vectorized properly
+            if load_vars.contains(v) {
+                return false;
+            }
+            // Check if produced by an arithmetic op that depends on the IV
+            for (dest, _, left, right, _) in arith_ops {
+                if *dest == *v {
+                    return is_iv_or_iv_derived(left, iv_var, arith_ops, load_vars)
+                        || is_iv_or_iv_derived(right, iv_var, arith_ops, load_vars);
+                }
+            }
+            false
+        }
+        Operand::Constant(_) | Operand::FloatConstant(_) | Operand::Global(_) => false,
     }
 }
 
@@ -491,20 +534,34 @@ fn apply_vectorization(
         op_vec_vars.insert(dest, vec_dest);
     }
 
-    // For each store, generate: GEP + Simd::Store (only if data is vector)
+    // For each store, generate: GEP + Simd::Store
+    // If the store data is scalar (not from a vector load/op), insert a Splat
+    // to broadcast the scalar to all lanes before the vector store.
     let mut valid_simd_stores = 0;
     for store in &plan.stores {
         let vec_src = remap_vec_operand(&store.data, &load_vec_vars, &op_vec_vars);
 
-        // Check if the store data was actually remapped to a vector value.
-        // If the data is still scalar (e.g., storing the IV itself), skip this store.
+        // Check if the store data was remapped to a vector value
         let is_remapped = match (&store.data, &vec_src) {
             (Operand::Var(orig), Operand::Var(mapped)) => orig != mapped,
             _ => false,
         };
-        if !is_remapped {
-            continue; // Store data is scalar, can't vectorize this store
-        }
+
+        // If scalar, insert a Splat to broadcast the value to all vector lanes
+        let final_vec_src = if !is_remapped {
+            let splat_dest = VarId(next_var);
+            next_var += 1;
+            vec_body_insts.push(Instruction::Simd {
+                op: SimdOp::Splat,
+                dest: Some(splat_dest),
+                operands: vec![store.data.clone()],
+                elem_type: store.elem_type.clone(),
+                width: vf,
+            });
+            Operand::Var(splat_dest)
+        } else {
+            vec_src
+        };
 
         let gep_dest = VarId(next_var);
         next_var += 1;
@@ -519,7 +576,7 @@ fn apply_vectorization(
         vec_body_insts.push(Instruction::Simd {
             op: SimdOp::Store,
             dest: None,
-            operands: vec![Operand::Var(gep_dest), vec_src],
+            operands: vec![Operand::Var(gep_dest), final_vec_src],
             elem_type: store.elem_type.clone(),
             width: vf,
         });
@@ -675,6 +732,9 @@ fn find_max_var_id(func: &Function) -> usize {
                         max = max.max(o.0);
                     }
                 }
+                Instruction::Simd { dest: Some(d), .. } => {
+                    max = max.max(d.0);
+                }
                 _ => {}
             }
         }
@@ -708,6 +768,28 @@ fn _type_str(ty: &Type) -> &'static str {
 mod tests {
     use super::*;
 
+    fn make_func(blocks: Vec<BasicBlock>) -> Function {
+        Function {
+            name: "test".to_string(),
+            return_type: Type::Int,
+            params: vec![],
+            entry_block: BlockId(0),
+            blocks,
+            var_types: HashMap::new(),
+            attributes: vec![],
+            is_static: false,
+        }
+    }
+
+    fn ret_block(id: usize) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(id),
+            instructions: vec![],
+            terminator: Terminator::Ret(Some(Operand::Constant(0))),
+            is_label_target: false,
+        }
+    }
+
     #[test]
     fn test_detect_simd() {
         let level = detect_simd_level();
@@ -719,5 +801,505 @@ mod tests {
     fn test_simd_vector_width() {
         assert_eq!(SimdLevel::SSE2.vector_width(), 4);
         assert_eq!(SimdLevel::AVX2.vector_width(), 8);
+    }
+
+    // ─── is_iv_derived ──────────────────────────────────────────
+
+    #[test]
+    fn test_is_iv_derived_var_match() {
+        assert!(is_iv_derived(&Operand::Var(VarId(5)), VarId(5)));
+    }
+
+    #[test]
+    fn test_is_iv_derived_var_no_match() {
+        assert!(!is_iv_derived(&Operand::Var(VarId(3)), VarId(5)));
+    }
+
+    #[test]
+    fn test_is_iv_derived_constant() {
+        assert!(!is_iv_derived(&Operand::Constant(5), VarId(5)));
+    }
+
+    // ─── check_memory_safety ────────────────────────────────────
+
+    #[test]
+    fn test_check_memory_safety_different_arrays() {
+        let load = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: true, data: Operand::Var(VarId(2)), dest: Some(VarId(2)),
+        };
+        let store = MemAccess {
+            base_var: VarId(3), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(2)), dest: None,
+        };
+        assert!(check_memory_safety(&[load], &[store]));
+    }
+
+    #[test]
+    fn test_check_memory_safety_same_array_read_write() {
+        // a[i] = a[i] + 1 pattern — allowed
+        let load = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: true, data: Operand::Var(VarId(2)), dest: Some(VarId(2)),
+        };
+        let store = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(3)), dest: None,
+        };
+        assert!(check_memory_safety(&[load], &[store]));
+    }
+
+    #[test]
+    fn test_check_memory_safety_double_store_same_array() {
+        let s1 = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(4)), dest: None,
+        };
+        let s2 = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(5)), dest: None,
+        };
+        assert!(!check_memory_safety(&[], &[s1, s2]));
+    }
+
+    #[test]
+    fn test_check_memory_safety_empty() {
+        assert!(check_memory_safety(&[], &[]));
+    }
+
+    #[test]
+    fn test_check_memory_safety_stores_different_arrays() {
+        let s1 = MemAccess {
+            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(4)), dest: None,
+        };
+        let s2 = MemAccess {
+            base_var: VarId(2), index_var: VarId(0), elem_type: Type::Int,
+            is_load: false, data: Operand::Var(VarId(5)), dest: None,
+        };
+        assert!(check_memory_safety(&[], &[s1, s2]));
+    }
+
+    // ─── remap_vec_operand ──────────────────────────────────────
+
+    #[test]
+    fn test_remap_vec_operand_load_map() {
+        let mut load_map = HashMap::new();
+        load_map.insert(VarId(1), VarId(100));
+        let op_map = HashMap::new();
+        assert_eq!(
+            remap_vec_operand(&Operand::Var(VarId(1)), &load_map, &op_map),
+            Operand::Var(VarId(100))
+        );
+    }
+
+    #[test]
+    fn test_remap_vec_operand_op_map() {
+        let load_map = HashMap::new();
+        let mut op_map = HashMap::new();
+        op_map.insert(VarId(2), VarId(200));
+        assert_eq!(
+            remap_vec_operand(&Operand::Var(VarId(2)), &load_map, &op_map),
+            Operand::Var(VarId(200))
+        );
+    }
+
+    #[test]
+    fn test_remap_vec_operand_not_in_map() {
+        let load_map = HashMap::new();
+        let op_map = HashMap::new();
+        assert_eq!(
+            remap_vec_operand(&Operand::Var(VarId(99)), &load_map, &op_map),
+            Operand::Var(VarId(99))
+        );
+    }
+
+    #[test]
+    fn test_remap_vec_operand_constant() {
+        let load_map = HashMap::new();
+        let op_map = HashMap::new();
+        assert_eq!(
+            remap_vec_operand(&Operand::Constant(42), &load_map, &op_map),
+            Operand::Constant(42)
+        );
+    }
+
+    #[test]
+    fn test_remap_vec_operand_load_takes_priority() {
+        let mut load_map = HashMap::new();
+        load_map.insert(VarId(1), VarId(100));
+        let mut op_map = HashMap::new();
+        op_map.insert(VarId(1), VarId(200));
+        // load_map takes priority via or_else
+        assert_eq!(
+            remap_vec_operand(&Operand::Var(VarId(1)), &load_map, &op_map),
+            Operand::Var(VarId(100))
+        );
+    }
+
+    // ─── find_gep_for_var ───────────────────────────────────────
+
+    #[test]
+    fn test_find_gep_for_var_found() {
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::GetElementPtr {
+                        dest: VarId(5),
+                        base: Operand::Var(VarId(10)),
+                        index: Operand::Var(VarId(0)),
+                        element_type: Type::Int,
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+        ]);
+
+        let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        assert_eq!(result, Some((VarId(10), VarId(0))));
+    }
+
+    #[test]
+    fn test_find_gep_for_var_wrong_iv() {
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::GetElementPtr {
+                        dest: VarId(5),
+                        base: Operand::Var(VarId(10)),
+                        index: Operand::Var(VarId(99)), // different IV
+                        element_type: Type::Int,
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+        ]);
+
+        let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_gep_for_var_not_in_body() {
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::GetElementPtr {
+                        dest: VarId(5),
+                        base: Operand::Var(VarId(10)),
+                        index: Operand::Var(VarId(0)),
+                        element_type: Type::Int,
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+        ]);
+
+        let body: HashSet<BlockId> = vec![BlockId(2)].into_iter().collect(); // Block 1 not in body
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_gep_for_var_constant_base() {
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::GetElementPtr {
+                        dest: VarId(5),
+                        base: Operand::Constant(0), // Not a Var
+                        index: Operand::Var(VarId(0)),
+                        element_type: Type::Int,
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+        ]);
+
+        let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        assert_eq!(result, None);
+    }
+
+    // ─── find_max_var_id ────────────────────────────────────────
+
+    #[test]
+    fn test_find_max_var_id_basic() {
+        let func = make_func(vec![BasicBlock {
+            id: BlockId(0),
+            instructions: vec![
+                Instruction::Binary {
+                    dest: VarId(3),
+                    op: BinaryOp::Add,
+                    left: Operand::Constant(1),
+                    right: Operand::Constant(2),
+                },
+                Instruction::Copy { dest: VarId(7), src: Operand::Constant(0) },
+            ],
+            terminator: Terminator::Ret(Some(Operand::Constant(0))),
+            is_label_target: false,
+        }]);
+        assert_eq!(find_max_var_id(&func), 7);
+    }
+
+    #[test]
+    fn test_find_max_var_id_empty() {
+        let func = make_func(vec![ret_block(0)]);
+        assert_eq!(find_max_var_id(&func), 0);
+    }
+
+    #[test]
+    fn test_find_max_var_id_simd() {
+        let func = make_func(vec![BasicBlock {
+            id: BlockId(0),
+            instructions: vec![
+                Instruction::Simd {
+                    op: SimdOp::Load,
+                    dest: Some(VarId(42)),
+                    operands: vec![],
+                    elem_type: Type::Int,
+                    width: 8,
+                },
+            ],
+            terminator: Terminator::Ret(Some(Operand::Constant(0))),
+            is_label_target: false,
+        }]);
+        assert_eq!(find_max_var_id(&func), 42);
+    }
+
+    // ─── analyze_loop_body ──────────────────────────────────────
+
+    #[test]
+    fn test_analyze_loop_body_no_iv() {
+        use crate::loop_analysis::NaturalLoop;
+
+        let func = make_func(vec![ret_block(0)]);
+        let lp = NaturalLoop {
+            header: BlockId(0),
+            latch: BlockId(0),
+            body: vec![BlockId(0)].into_iter().collect(),
+            exit: None,
+            preheader: None,
+            induction_var: None,
+            trip_count: Some(100),
+        };
+
+        assert!(analyze_loop_body(&func, &lp).is_none());
+    }
+
+    #[test]
+    fn test_analyze_loop_body_too_small() {
+        use crate::loop_analysis::{NaturalLoop, InductionVar};
+
+        let func = make_func(vec![ret_block(0)]);
+        let lp = NaturalLoop {
+            header: BlockId(0),
+            latch: BlockId(0),
+            body: vec![BlockId(0)].into_iter().collect(),
+            exit: None,
+            preheader: None,
+            induction_var: Some(InductionVar {
+                var: VarId(0), init: 0, step: 1, bound: 3,
+                cmp_op: BinaryOp::Less,
+            }),
+            trip_count: Some(3), // < 4
+        };
+
+        assert!(analyze_loop_body(&func, &lp).is_none());
+    }
+
+    #[test]
+    fn test_analyze_loop_body_with_calls() {
+        use crate::loop_analysis::{NaturalLoop, InductionVar};
+
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction::Phi {
+                        dest: VarId(0),
+                        preds: vec![(BlockId(0), VarId(0))],
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::Call {
+                        dest: None,
+                        name: "printf".to_string(),
+                        args: vec![],
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(0)),
+                is_label_target: false,
+            },
+        ]);
+
+        let lp = NaturalLoop {
+            header: BlockId(0),
+            latch: BlockId(1),
+            body: vec![BlockId(0), BlockId(1)].into_iter().collect(),
+            exit: None,
+            preheader: None,
+            induction_var: Some(InductionVar {
+                var: VarId(0), init: 0, step: 1, bound: 100,
+                cmp_op: BinaryOp::Less,
+            }),
+            trip_count: Some(100),
+        };
+
+        assert!(analyze_loop_body(&func, &lp).is_none());
+    }
+
+    #[test]
+    fn test_analyze_loop_body_complex_control_flow() {
+        use crate::loop_analysis::{NaturalLoop, InductionVar};
+
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction::Phi {
+                        dest: VarId(0),
+                        preds: vec![(BlockId(0), VarId(0))],
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(1)),
+                is_label_target: false,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![],
+                terminator: Terminator::CondBr {
+                    cond: Operand::Var(VarId(0)),
+                    then_block: BlockId(2),
+                    else_block: BlockId(0),
+                },
+                is_label_target: false,
+            },
+            ret_block(2),
+        ]);
+
+        let lp = NaturalLoop {
+            header: BlockId(0),
+            latch: BlockId(1),
+            body: vec![BlockId(0), BlockId(1)].into_iter().collect(),
+            exit: Some(BlockId(2)),
+            preheader: None,
+            induction_var: Some(InductionVar {
+                var: VarId(0), init: 0, step: 1, bound: 100,
+                cmp_op: BinaryOp::Less,
+            }),
+            trip_count: Some(100),
+        };
+
+        // Body block 1 has CondBr → complex control flow → None
+        assert!(analyze_loop_body(&func, &lp).is_none());
+    }
+
+    #[test]
+    fn test_analyze_loop_body_vectorizable_copy() {
+        use crate::loop_analysis::{NaturalLoop, InductionVar};
+
+        // for (i=0; i<100; i++) { b[i] = a[i]; }
+        let func = make_func(vec![
+            BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction::Phi {
+                        dest: VarId(0), // IV
+                        preds: vec![
+                            (BlockId(99), VarId(0)),
+                            (BlockId(1), VarId(5)),
+                        ],
+                    },
+                ],
+                terminator: Terminator::CondBr {
+                    cond: Operand::Var(VarId(0)),
+                    then_block: BlockId(1),
+                    else_block: BlockId(2),
+                },
+                is_label_target: false,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                instructions: vec![
+                    Instruction::GetElementPtr {
+                        dest: VarId(1),
+                        base: Operand::Var(VarId(10)), // array a
+                        index: Operand::Var(VarId(0)),
+                        element_type: Type::Int,
+                    },
+                    Instruction::Load {
+                        dest: VarId(2),
+                        addr: Operand::Var(VarId(1)),
+                        value_type: Type::Int,
+                    },
+                    Instruction::GetElementPtr {
+                        dest: VarId(3),
+                        base: Operand::Var(VarId(11)), // array b
+                        index: Operand::Var(VarId(0)),
+                        element_type: Type::Int,
+                    },
+                    Instruction::Store {
+                        addr: Operand::Var(VarId(3)),
+                        src: Operand::Var(VarId(2)),
+                        value_type: Type::Int,
+                    },
+                    Instruction::Binary {
+                        dest: VarId(5),
+                        op: BinaryOp::Add,
+                        left: Operand::Var(VarId(0)),
+                        right: Operand::Constant(1),
+                    },
+                ],
+                terminator: Terminator::Br(BlockId(0)),
+                is_label_target: false,
+            },
+            ret_block(2),
+        ]);
+
+        let lp = NaturalLoop {
+            header: BlockId(0),
+            latch: BlockId(1),
+            body: vec![BlockId(0), BlockId(1)].into_iter().collect(),
+            exit: Some(BlockId(2)),
+            preheader: None,
+            induction_var: Some(InductionVar {
+                var: VarId(0), init: 0, step: 1, bound: 100,
+                cmp_op: BinaryOp::Less,
+            }),
+            trip_count: Some(100),
+        };
+
+        let plan = analyze_loop_body(&func, &lp);
+        assert!(plan.is_some());
+        let plan = plan.unwrap();
+        assert_eq!(plan.loads.len(), 1);
+        assert_eq!(plan.stores.len(), 1);
+        assert_eq!(plan.trip_count, 100);
+    }
+
+    // ─── _type_str ──────────────────────────────────────────────
+
+    #[test]
+    fn test_type_str() {
+        assert_eq!(_type_str(&Type::Float), "float");
+        assert_eq!(_type_str(&Type::Double), "double");
+        assert_eq!(_type_str(&Type::Int), "int32");
+        assert_eq!(_type_str(&Type::Char), "int32");
     }
 }

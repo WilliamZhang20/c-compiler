@@ -353,13 +353,76 @@ fn find_iv_init(func: &Function, iv_var: VarId, header: BlockId, body: &HashSet<
 
 /// Try to find the constant value of a variable in a given block
 fn find_constant_value(func: &Function, var: VarId, block_id: BlockId) -> Option<i64> {
-    let block = func.blocks.iter().find(|b| b.id == block_id)?;
-    for inst in &block.instructions {
-        match inst {
-            Instruction::Copy { dest, src: Operand::Constant(c) } if *dest == var => {
-                return Some(*c);
+    // First try: look for a constant definition of `var` in the specified block
+    if let Some(block) = func.blocks.iter().find(|b| b.id == block_id) {
+        for inst in &block.instructions {
+            match inst {
+                Instruction::Copy { dest, src: Operand::Constant(c) } if *dest == var => {
+                    return Some(*c);
+                }
+                _ => {}
             }
-            _ => {}
+        }
+    }
+
+    // Second try: search ALL blocks for a constant definition of `var`
+    // (the defining instruction may have been moved by optimization passes)
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                Instruction::Copy { dest, src: Operand::Constant(c) } if *dest == var => {
+                    return Some(*c);
+                }
+                // Also check for a Copy from another variable, and trace through
+                Instruction::Copy { dest, src: Operand::Var(src_var) } if *dest == var => {
+                    // Recurse to find the constant value of src_var
+                    return find_constant_in_all_blocks(func, *src_var);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Third try: check if var itself is defined by a phi with a constant value
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::Phi { dest, preds } = inst {
+                if *dest == var {
+                    // Check if all incoming values are the same constant
+                    let mut constant_val = None;
+                    let mut all_same = true;
+                    for (_pred_block, pred_var) in preds {
+                        if let Some(c) = find_constant_in_all_blocks(func, *pred_var) {
+                            if let Some(prev) = constant_val {
+                                if prev != c { all_same = false; break; }
+                            }
+                            constant_val = Some(c);
+                        } else {
+                            all_same = false;
+                            break;
+                        }
+                    }
+                    if all_same {
+                        return constant_val;
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Find a constant value for a variable by searching all blocks
+fn find_constant_in_all_blocks(func: &Function, var: VarId) -> Option<i64> {
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                Instruction::Copy { dest, src: Operand::Constant(c) } if *dest == var => {
+                    return Some(*c);
+                }
+                _ => {}
+            }
         }
     }
     None

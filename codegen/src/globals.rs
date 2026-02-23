@@ -403,4 +403,567 @@ mod tests {
         c.emit_zero_data(&mut out, &Type::Array(Box::new(Type::Int), 10));
         assert_eq!(out, "    .zero 40\n");
     }
+
+    // ─── emit_scalar_data: additional types ─────────────────────
+
+    #[test]
+    fn emit_scalar_float() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Float, 42);
+        assert_eq!(out, "    .long 42\n");
+    }
+
+    #[test]
+    fn emit_scalar_unsigned_char() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::UnsignedChar, 200);
+        assert_eq!(out, "    .byte 200\n");
+    }
+
+    #[test]
+    fn emit_scalar_unsigned_short() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::UnsignedShort, 5000);
+        assert_eq!(out, "    .short 5000\n");
+    }
+
+    #[test]
+    fn emit_scalar_unsigned_int() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::UnsignedInt, 100);
+        assert_eq!(out, "    .long 100\n");
+    }
+
+    #[test]
+    fn emit_scalar_function_pointer() {
+        let c = cg();
+        let mut out = String::new();
+        let fptr_type = Type::FunctionPointer {
+            return_type: Box::new(Type::Int),
+            param_types: vec![Type::Int],
+        };
+        c.emit_scalar_data(&mut out, &fptr_type, 0);
+        assert_eq!(out, "    .quad 0\n");
+    }
+
+    #[test]
+    fn emit_scalar_double_fallback() {
+        let c = cg();
+        let mut out = String::new();
+        c.emit_scalar_data(&mut out, &Type::Double, 0);
+        // Double is not in the specific arms → falls through to default `.long`
+        assert_eq!(out, "    .long 0\n");
+    }
+
+    #[test]
+    fn emit_scalar_bool_fallback() {
+        let c = cg();
+        let mut out = String::new();
+        // Bool is not specifically matched → hits the fallback `.long`
+        c.emit_scalar_data(&mut out, &Type::Bool, 1);
+        assert_eq!(out, "    .long 1\n");
+    }
+
+    // ─── type_size: structs, unions, typedef, typeof ────────────
+
+    #[test]
+    fn type_size_struct() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "Point".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "x".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "y".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        assert_eq!(c.type_size(&Type::Struct("Point".to_string())), 8);
+    }
+
+    #[test]
+    fn type_size_struct_with_padding() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "S".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        // char(1) + 3 padding + int(4) = 8
+        assert_eq!(c.type_size(&Type::Struct("S".to_string())), 8);
+    }
+
+    #[test]
+    fn type_size_struct_packed() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "Packed".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![model::Attribute::Packed],
+        });
+        // packed: char(1) + int(4) = 5, no padding
+        assert_eq!(c.type_size(&Type::Struct("Packed".to_string())), 5);
+    }
+
+    #[test]
+    fn type_size_struct_missing() {
+        let c = cg();
+        // Unknown struct name → fallback 4
+        assert_eq!(c.type_size(&Type::Struct("Missing".to_string())), 4);
+    }
+
+    #[test]
+    fn type_size_union() {
+        let mut c = cg();
+        c.add_union(model::UnionDef {
+            name: "Data".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "i".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Long, name: "l".to_string(), bit_width: None },
+            ],
+        });
+        // Union size = max(int=4, long=8) = 8
+        assert_eq!(c.type_size(&Type::Union("Data".to_string())), 8);
+    }
+
+    #[test]
+    fn type_size_union_missing() {
+        let c = cg();
+        assert_eq!(c.type_size(&Type::Union("Unknown".to_string())), 4);
+    }
+
+    #[test]
+    fn type_size_typedef() {
+        let c = cg();
+        // Typedef fallback = 4
+        assert_eq!(c.type_size(&Type::Typedef("size_t".to_string())), 4);
+    }
+
+    // ─── type_alignment: structs ────────────────────────────────
+
+    #[test]
+    fn type_alignment_struct() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "S".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Long, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        // struct alignment = max field alignment = 8 (from Long)
+        assert_eq!(c.type_alignment(&Type::Struct("S".to_string())), 8);
+    }
+
+    #[test]
+    fn type_alignment_struct_missing() {
+        let c = cg();
+        assert_eq!(c.type_alignment(&Type::Struct("Missing".to_string())), 4);
+    }
+
+    #[test]
+    fn type_alignment_fallback() {
+        let c = cg();
+        // Types with no specific alignment match → fallback 4
+        assert_eq!(c.type_alignment(&Type::Typedef("foo".to_string())), 4);
+    }
+
+    // ─── find_init_item ─────────────────────────────────────────
+
+    #[test]
+    fn find_init_item_positional() {
+        let c = cg();
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(10) },
+            model::InitItem { designator: None, value: model::Expr::Constant(20) },
+            model::InitItem { designator: None, value: model::Expr::Constant(30) },
+        ];
+        assert_eq!(c.find_init_item(&items, 0).unwrap().value, model::Expr::Constant(10));
+        assert_eq!(c.find_init_item(&items, 2).unwrap().value, model::Expr::Constant(30));
+        assert!(c.find_init_item(&items, 5).is_none());
+    }
+
+    #[test]
+    fn find_init_item_designated_index() {
+        let c = cg();
+        let items = vec![
+            model::InitItem {
+                designator: Some(model::Designator::Index(2)),
+                value: model::Expr::Constant(99),
+            },
+            model::InitItem { designator: None, value: model::Expr::Constant(10) },
+        ];
+        // Designated lookup at index 2
+        assert_eq!(c.find_init_item(&items, 2).unwrap().value, model::Expr::Constant(99));
+        // Positional index 0 → first non-designated item
+        assert_eq!(c.find_init_item(&items, 0).unwrap().value, model::Expr::Constant(10));
+        // Not found
+        assert!(c.find_init_item(&items, 5).is_none());
+    }
+
+    // ─── emit_init_list_data ────────────────────────────────────
+
+    #[test]
+    fn emit_init_list_data_array_constants() {
+        let c = cg();
+        let mut out = String::new();
+        let ty = Type::Array(Box::new(Type::Int), 4);
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(10) },
+            model::InitItem { designator: None, value: model::Expr::Constant(20) },
+            // elements 2 and 3 are missing → zero-fill
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 10\n"));
+        assert!(out.contains(".long 20\n"));
+        // Two zero-filled int slots
+        let zero_count = out.matches(".zero 4\n").count();
+        assert_eq!(zero_count, 2);
+    }
+
+    #[test]
+    fn emit_init_list_data_array_float() {
+        let c = cg();
+        let mut out = String::new();
+        let ty = Type::Array(Box::new(Type::Float), 2);
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::FloatConstant(1.5),
+            },
+            model::InitItem {
+                designator: None,
+                value: model::Expr::FloatConstant(2.5),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        // Float emits .long with hex bits
+        assert!(out.contains(".long 0x"));
+        let long_count = out.matches(".long 0x").count();
+        assert_eq!(long_count, 2);
+    }
+
+    #[test]
+    fn emit_init_list_data_array_designated() {
+        let c = cg();
+        let mut out = String::new();
+        let ty = Type::Array(Box::new(Type::Int), 3);
+        // Only [2] = 42, rest zero-filled
+        let items = vec![
+            model::InitItem {
+                designator: Some(model::Designator::Index(2)),
+                value: model::Expr::Constant(42),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        // elements 0 and 1 should be zero-filled, element 2 = 42
+        assert!(out.contains(".long 42\n"));
+        let zero_count = out.matches(".zero 4\n").count();
+        assert_eq!(zero_count, 2);
+    }
+
+    #[test]
+    fn emit_init_list_data_array_nested() {
+        let c = cg();
+        let mut out = String::new();
+        // int[2][2]
+        let inner_ty = Type::Array(Box::new(Type::Int), 2);
+        let ty = Type::Array(Box::new(inner_ty), 2);
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::InitList(vec![
+                    model::InitItem { designator: None, value: model::Expr::Constant(1) },
+                    model::InitItem { designator: None, value: model::Expr::Constant(2) },
+                ]),
+            },
+            model::InitItem {
+                designator: None,
+                value: model::Expr::InitList(vec![
+                    model::InitItem { designator: None, value: model::Expr::Constant(3) },
+                    model::InitItem { designator: None, value: model::Expr::Constant(4) },
+                ]),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 1\n"));
+        assert!(out.contains(".long 2\n"));
+        assert!(out.contains(".long 3\n"));
+        assert!(out.contains(".long 4\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_array_fallback() {
+        let c = cg();
+        let mut out = String::new();
+        let ty = Type::Array(Box::new(Type::Int), 2);
+        // Using a non-constant expr → falls through to zero-fill
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::Variable("x".to_string()),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        // First element: fallback zero, second: missing → zero
+        let zero_count = out.matches(".zero 4\n").count();
+        assert_eq!(zero_count, 2);
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_simple() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "Point".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "x".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "y".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("Point".to_string());
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(10) },
+            model::InitItem { designator: None, value: model::Expr::Constant(20) },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 10\n"));
+        assert!(out.contains(".long 20\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_with_padding() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "S".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Char, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("S".to_string());
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(65) },  // char 'A'
+            model::InitItem { designator: None, value: model::Expr::Constant(42) },  // int 42
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".byte 65\n"));       // char field
+        assert!(out.contains(".zero 3\n"));        // padding char→int
+        assert!(out.contains(".long 42\n"));       // int field
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_designated_field() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "S".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "x".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "y".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("S".to_string());
+        let items = vec![
+            model::InitItem {
+                designator: Some(model::Designator::Field("y".to_string())),
+                value: model::Expr::Constant(99),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 99\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_float_field() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "F".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Float, name: "f".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("F".to_string());
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::FloatConstant(3.14),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 0x"));
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_nested_init_list() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "Inner".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Int, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        c.add_struct(model::StructDef {
+            name: "Outer".to_string(),
+            fields: vec![
+                model::StructField {
+                    field_type: Type::Struct("Inner".to_string()),
+                    name: "inner".to_string(),
+                    bit_width: None,
+                },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("Outer".to_string());
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::InitList(vec![
+                    model::InitItem { designator: None, value: model::Expr::Constant(1) },
+                    model::InitItem { designator: None, value: model::Expr::Constant(2) },
+                ]),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".long 1\n"));
+        assert!(out.contains(".long 2\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_trailing_padding() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "Trail".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Long, name: "a".to_string(), bit_width: None },
+                model::StructField { field_type: Type::Char, name: "b".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("Trail".to_string());
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(100) },
+            model::InitItem { designator: None, value: model::Expr::Constant(65) },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert!(out.contains(".quad 100\n"));
+        assert!(out.contains(".byte 65\n"));
+        // trailing padding: struct size = 16, used 9 → 7 bytes trailing
+        assert!(out.contains(".zero 7\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_struct_fallback_expr() {
+        let mut c = cg();
+        c.add_struct(model::StructDef {
+            name: "S".to_string(),
+            fields: vec![
+                model::StructField { field_type: Type::Int, name: "x".to_string(), bit_width: None },
+            ],
+            attributes: vec![],
+        });
+        let mut out = String::new();
+        let ty = Type::Struct("S".to_string());
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::Variable("runtime_val".to_string()),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        // Falls through to emit_zero_data for unknown expr type
+        assert!(out.contains(".zero 4\n"));
+    }
+
+    #[test]
+    fn emit_init_list_data_scalar_constant() {
+        let c = cg();
+        let mut out = String::new();
+        // Scalar type with init list (unusual but valid)
+        let ty = Type::Int;
+        let items = vec![
+            model::InitItem { designator: None, value: model::Expr::Constant(42) },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        assert_eq!(out, "    .long 42\n");
+    }
+
+    #[test]
+    fn emit_init_list_data_scalar_non_constant() {
+        let c = cg();
+        let mut out = String::new();
+        let ty = Type::Int;
+        let items = vec![
+            model::InitItem {
+                designator: None,
+                value: model::Expr::Variable("x".to_string()),
+            },
+        ];
+        c.emit_init_list_data(&mut out, &ty, &items);
+        // Falls through to emit_zero_data
+        assert_eq!(out, "    .zero 4\n");
+    }
+
+    // ─── type_size: long long, unsigned long long ───────────────
+
+    #[test]
+    fn type_size_longlong() {
+        let c = cg();
+        assert_eq!(c.type_size(&Type::LongLong), 8);
+        assert_eq!(c.type_size(&Type::UnsignedLongLong), 8);
+    }
+
+    #[test]
+    fn type_size_function_pointer() {
+        let c = cg();
+        let fptr = Type::FunctionPointer {
+            return_type: Box::new(Type::Void),
+            param_types: vec![],
+        };
+        assert_eq!(c.type_size(&fptr), 8);
+    }
+
+    // ─── type_alignment: function pointer, bool, double ─────────
+
+    #[test]
+    fn type_alignment_function_pointer() {
+        let c = cg();
+        let fptr = Type::FunctionPointer {
+            return_type: Box::new(Type::Int),
+            param_types: vec![],
+        };
+        assert_eq!(c.type_alignment(&fptr), 8);
+    }
+
+    #[test]
+    fn type_alignment_bool() {
+        let c = cg();
+        assert_eq!(c.type_alignment(&Type::Bool), 1);
+    }
+
+    #[test]
+    fn type_alignment_double() {
+        let c = cg();
+        assert_eq!(c.type_alignment(&Type::Double), 8);
+    }
 }

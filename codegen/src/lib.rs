@@ -47,6 +47,18 @@ impl Codegen {
         }
     }
 
+    /// Test helper: insert a struct definition for unit tests.
+    #[cfg(test)]
+    pub(crate) fn add_struct(&mut self, s_def: model::StructDef) {
+        self.structs.insert(s_def.name.clone(), s_def);
+    }
+
+    /// Test helper: insert a union definition for unit tests.
+    #[cfg(test)]
+    pub(crate) fn add_union(&mut self, u_def: model::UnionDef) {
+        self.unions.insert(u_def.name.clone(), u_def);
+    }
+
     pub fn gen_program(&mut self, prog: &IRProgram) -> String {
         // Debug output removed
         

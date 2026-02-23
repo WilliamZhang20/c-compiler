@@ -185,57 +185,98 @@ fn eliminate_jump_chains(instructions: &mut Vec<X86Instr>) {
 
 fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
     // Pattern 0: Comparison followed by set/test/branch -> direct conditional jump
-    // Looking for: cmp regA, opB; mov regC, 0; set<cond> al; mov regD, rax; test regD, regD; j<cc> label
+    // Looking for: cmp regA, opB; mov rax/eax, 0; set<cond> al; mov regD, rax; [gap]; test regD, regD; j<cc> label
+    // Allows non-interfering instructions between mov regD and test regD (e.g., stack spills).
     // Simplify to: cmp regA, opB; j<cond> label (when jcc is "ne") or j<!cond> label (when jcc is "e")
     if i + 5 < instructions.len() {
-        // First check if the pattern matches (read-only)
-        let pattern_matches = matches!(
-            (&instructions[i], &instructions[i+1], &instructions[i+2], &instructions[i+3], &instructions[i+4], &instructions[i+5]),
+        // Match the first 4 instructions contiguously
+        let first4_matches = matches!(
+            (&instructions[i], &instructions[i+1], &instructions[i+2], &instructions[i+3]),
             (
                 X86Instr::Cmp(_, _),
                 X86Instr::Mov(X86Operand::Reg(X86Reg::Rax | X86Reg::Eax), X86Operand::Imm(0)),
                 X86Instr::Set(_, X86Operand::Reg(X86Reg::Al)),
-                X86Instr::Mov(test_reg_dest, X86Operand::Reg(X86Reg::Rax | X86Reg::Eax)),
-                X86Instr::Test(test_left, test_right),
-                X86Instr::Jcc(_, _)
-            ) if test_left == test_reg_dest && test_right == test_reg_dest
+                X86Instr::Mov(_, X86Operand::Reg(X86Reg::Rax | X86Reg::Eax)),
+            )
         );
         
-        if pattern_matches {
-            // Clone the values we need before modifying
-            let cmp_left = if let X86Instr::Cmp(l, _) = &instructions[i] { l.clone() } else { unreachable!() };
-            let cmp_right = if let X86Instr::Cmp(_, r) = &instructions[i] { r.clone() } else { unreachable!() };
-            let set_cond = if let X86Instr::Set(c, _) = &instructions[i+2] { c.clone() } else { unreachable!() };
-            let (branch_cond, branch_label) = if let X86Instr::Jcc(c, l) = &instructions[i+5] { (c.clone(), l.clone()) } else { unreachable!() };
-            
-            // Map set condition to branch condition
-            let final_cond = if branch_cond == "ne" {
-                // jne means "jump if not zero", so use the set condition directly
-                set_cond
-            } else if branch_cond == "e" {
-                // je means "jump if zero", so invert the set condition
-                match set_cond.as_str() {
-                    "e" => "ne".to_string(),
-                    "ne" => "e".to_string(),
-                    "l" => "ge".to_string(),
-                    "le" => "g".to_string(),
-                    "g" => "le".to_string(),
-                    "ge" => "l".to_string(),
-                    _ => return false, // Unknown condition, don't optimize
-                }
+        if first4_matches {
+            // Get the destination register from step 4
+            let test_reg = if let X86Instr::Mov(X86Operand::Reg(r), _) = &instructions[i+3] {
+                r.clone()
             } else {
-                return false; // Not a simple ne/e branch
+                return false;
             };
             
-            // Replace with: cmp + jcc
-            instructions[i] = X86Instr::Cmp(cmp_left, cmp_right);
-            instructions[i+1] = X86Instr::Jcc(final_cond, branch_label);
-            // Remove the 4 intermediate instructions
-            instructions.remove(i+2);
-            instructions.remove(i+2);
-            instructions.remove(i+2);
-            instructions.remove(i+2);
-            return true;
+            // Scan forward from i+4 for test+jcc, allowing non-interfering gap instructions
+            let max_scan = std::cmp::min(i + 10, instructions.len());
+            let mut gap_indices = Vec::new();
+            let mut found_test_jcc = None;
+            
+            for j in (i+4)..max_scan {
+                // Check for test regD, regD followed by jcc
+                if j + 1 < instructions.len() {
+                    if let (X86Instr::Test(tl, tr), X86Instr::Jcc(_, _)) = (&instructions[j], &instructions[j+1]) {
+                        if reads_reg_direct(tl, &test_reg) && reads_reg_direct(tr, &test_reg) {
+                            found_test_jcc = Some(j);
+                            break;
+                        }
+                    }
+                }
+                // Stop at control flow
+                if matches!(instructions[j],
+                    X86Instr::Label(_) | X86Instr::Jmp(_) | X86Instr::Jcc(_, _) |
+                    X86Instr::Ret | X86Instr::Call(_) | X86Instr::CallIndirect(_)
+                ) {
+                    break;
+                }
+                // Check if gap instruction interferes with test_reg
+                if instr_touches_reg(&instructions[j], &test_reg) {
+                    break;
+                }
+                gap_indices.push(j);
+            }
+            
+            if let Some(test_idx) = found_test_jcc {
+                let set_cond = if let X86Instr::Set(c, _) = &instructions[i+2] { c.clone() } else { unreachable!() };
+                let (branch_cond, branch_label) = if let X86Instr::Jcc(c, l) = &instructions[test_idx+1] { (c.clone(), l.clone()) } else { unreachable!() };
+                
+                let final_cond = if branch_cond == "ne" {
+                    set_cond
+                } else if branch_cond == "e" {
+                    match set_cond.as_str() {
+                        "e" => "ne".to_string(),
+                        "ne" => "e".to_string(),
+                        "l" => "ge".to_string(),
+                        "le" => "g".to_string(),
+                        "g" => "le".to_string(),
+                        "ge" => "l".to_string(),
+                        _ => return false,
+                    }
+                } else {
+                    return false;
+                };
+                
+                // Build the replacement: cmp + [gap instructions] + jcc
+                // Remove: mov rax,0; set al; mov regD,rax; test regD,regD
+                let cmp_left = if let X86Instr::Cmp(l, _) = &instructions[i] { l.clone() } else { unreachable!() };
+                let cmp_right = if let X86Instr::Cmp(_, r) = &instructions[i] { r.clone() } else { unreachable!() };
+                
+                // Remove test+jcc first (higher indices), then the mov/set/mov block
+                instructions.remove(test_idx + 1); // remove jcc
+                instructions.remove(test_idx);     // remove test
+                // Remove mov rax,0; set; mov regD,rax (indices i+1, i+2, i+3)
+                instructions.remove(i + 3);
+                instructions.remove(i + 2);
+                instructions.remove(i + 1);
+                // Insert jcc after cmp + gap instructions
+                // After removing 5 instructions, the gap instructions shifted
+                // New position for jcc: i + 1 + gap_indices.len()
+                let jcc_pos = i + 1 + gap_indices.len();
+                instructions.insert(jcc_pos, X86Instr::Jcc(final_cond, branch_label));
+                instructions[i] = X86Instr::Cmp(cmp_left, cmp_right);
+                return true;
+            }
         }
     }
     
@@ -533,7 +574,7 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
                                     break;
                                 }
                             }
-                            if safe && !is_reg_read_in_block(instructions, j + 1, tmp1) {
+                            if safe && !is_reg_used_after(instructions, j + 1, tmp1) {
                                 // Replace: mov tmp, reg + add tmp, op → add reg, op
                                 instructions[i] = new_instr;
                                 instructions.remove(i + 1); // remove add/sub tmp, op
@@ -552,6 +593,69 @@ fn try_optimize_at(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
                         break;
                     }
                 }
+            }
+        }
+    }
+    
+    // Pattern 10: Copy forwarding into memory base register
+    // mov rX, rY; instr [rX+off], ... → instr [rY+off], ...  (if rX dead after)
+    // mov rX, rY; instr dest, [rX+off] → instr dest, [rY+off]  (if rX dead after)
+    // This eliminates redundant register copies used only as memory base addresses.
+    if i + 1 < instructions.len() {
+        if let X86Instr::Mov(X86Operand::Reg(copy_dest), X86Operand::Reg(copy_src)) = &instructions[i] {
+            let copy_dest_c = copy_dest.clone();
+            let copy_src_c = copy_src.clone();
+            // Try to substitute copy_dest with copy_src in the next instruction's memory operands
+            if let Some(new_instr) = substitute_base_reg(&instructions[i + 1], &copy_dest_c, &copy_src_c) {
+                // Check the copy_dest register is dead after the substituted instruction
+                if !is_reg_used_after(instructions, i + 2, &copy_dest_c) {
+                    instructions[i] = new_instr;
+                    instructions.remove(i + 1);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Pattern 11: Movsx/Movzx chain forwarding
+    // movsx rX, eY; mov rZ, rX → movsx rZ, eY  (if rX dead after)
+    // movzx rX, oY; mov rZ, rX → movzx rZ, oY  (if rX dead after)
+    if i + 1 < instructions.len() {
+        if let X86Instr::Mov(X86Operand::Reg(mov_dest), X86Operand::Reg(mov_src)) = &instructions[i + 1] {
+            match &instructions[i] {
+                X86Instr::Movsx(X86Operand::Reg(sx_dest), sx_src)
+                    if same_physical_reg(sx_dest, mov_src)
+                    && !is_reg_used_after(instructions, i + 2, sx_dest) =>
+                {
+                    instructions[i] = X86Instr::Movsx(X86Operand::Reg(mov_dest.clone()), sx_src.clone());
+                    instructions.remove(i + 1);
+                    return true;
+                }
+                X86Instr::Movzx(X86Operand::Reg(zx_dest), zx_src)
+                    if same_physical_reg(zx_dest, mov_src)
+                    && !is_reg_used_after(instructions, i + 2, zx_dest) =>
+                {
+                    instructions[i] = X86Instr::Movzx(X86Operand::Reg(mov_dest.clone()), zx_src.clone());
+                    instructions.remove(i + 1);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Pattern 12: Dead store-after-load elimination
+    // mov rX, [mem]; mov [mem], rX → remove the store (value already in memory)
+    // The load is kept if rX is used later; otherwise Pattern 9 will remove it.
+    if i + 1 < instructions.len() {
+        if let (
+            X86Instr::Mov(X86Operand::Reg(load_dest), load_src),
+            X86Instr::Mov(store_dest, X86Operand::Reg(store_src))
+        ) = (&instructions[i], &instructions[i + 1]) {
+            if same_physical_reg(load_dest, store_src) && load_src == store_dest {
+                // The store writes back the same value that was loaded — remove it
+                instructions.remove(i + 1);
+                return true;
             }
         }
     }
@@ -837,7 +941,8 @@ fn is_reg_live_from(
             X86Instr::Vmovdqa(dest, src) | X86Instr::Vmovdqu(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
-            X86Instr::Pshufd(dest, src, _) | X86Instr::Vextracti128(dest, src, _) => {
+            X86Instr::Pshufd(dest, src, _) | X86Instr::Vextracti128(dest, src, _) |
+            X86Instr::Vpbroadcastd(dest, src) => {
                 if reads_reg(src, reg) { return true; }
                 if reads_reg_direct(dest, reg) { return false; }
             }
@@ -900,7 +1005,7 @@ fn instr_touches_reg(inst: &X86Instr, reg: &X86Reg) -> bool {
         X86Instr::Pxor(d, s) | X86Instr::Movd(d, s) | X86Instr::Pshufd(d, s, _) |
         X86Instr::Vmovaps(d, s) | X86Instr::Vmovups(d, s) |
         X86Instr::Vmovdqa(d, s) | X86Instr::Vmovdqu(d, s) |
-        X86Instr::Vextracti128(d, s, _) => {
+        X86Instr::Vextracti128(d, s, _) | X86Instr::Vpbroadcastd(d, s) => {
             reads_reg(d, reg) || reads_reg(s, reg)
         }
         X86Instr::Vaddps(d, s1, s2) | X86Instr::Vsubps(d, s1, s2) |
@@ -919,6 +1024,100 @@ fn instr_touches_reg(inst: &X86Instr, reg: &X86Reg) -> bool {
         X86Instr::Push(r) | X86Instr::Pop(r) => same_physical_reg(r, reg),
         X86Instr::CallIndirect(o) => reads_reg(o, reg),
         _ => false,
+    }
+}
+
+/// Substitute a register used as a memory base in the given instruction.
+/// If `old_reg` appears as the base register of a memory operand in `instr`,
+/// replace it with `new_reg` and return the updated instruction.
+fn substitute_base_reg(instr: &X86Instr, old_reg: &X86Reg, new_reg: &X86Reg) -> Option<X86Instr> {
+    let subst_op = |op: &X86Operand| -> Option<X86Operand> {
+        match op {
+            X86Operand::Mem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::Mem(new_reg.clone(), *off)),
+            X86Operand::DwordMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::DwordMem(new_reg.clone(), *off)),
+            X86Operand::WordMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::WordMem(new_reg.clone(), *off)),
+            X86Operand::ByteMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::ByteMem(new_reg.clone(), *off)),
+            X86Operand::FloatMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::FloatMem(new_reg.clone(), *off)),
+            X86Operand::DoubleMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::DoubleMem(new_reg.clone(), *off)),
+            X86Operand::XmmwordMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::XmmwordMem(new_reg.clone(), *off)),
+            X86Operand::YmmwordMem(base, off) if same_physical_reg(base, old_reg) =>
+                Some(X86Operand::YmmwordMem(new_reg.clone(), *off)),
+            _ => None,
+        }
+    };
+
+    match instr {
+        X86Instr::Mov(dest, src) => {
+            // Try dest first (store case): mov [rX+off], val → mov [rY+off], val
+            if let Some(new_dest) = subst_op(dest) {
+                if !reads_reg_direct(src, old_reg) {
+                    return Some(X86Instr::Mov(new_dest, src.clone()));
+                }
+            }
+            // Try src (load case): mov eax, [rX+off] → mov eax, [rY+off]
+            if let Some(new_src) = subst_op(src) {
+                return Some(X86Instr::Mov(dest.clone(), new_src));
+            }
+            None
+        }
+        X86Instr::Movsx(dest, src) => {
+            if let Some(new_src) = subst_op(src) {
+                return Some(X86Instr::Movsx(dest.clone(), new_src));
+            }
+            None
+        }
+        X86Instr::Movzx(dest, src) => {
+            if let Some(new_src) = subst_op(src) {
+                return Some(X86Instr::Movzx(dest.clone(), new_src));
+            }
+            None
+        }
+        X86Instr::Add(dest, src) => {
+            if let Some(new_dest) = subst_op(dest) {
+                if !reads_reg_direct(src, old_reg) {
+                    return Some(X86Instr::Add(new_dest, src.clone()));
+                }
+            }
+            None
+        }
+        X86Instr::Sub(dest, src) => {
+            if let Some(new_dest) = subst_op(dest) {
+                if !reads_reg_direct(src, old_reg) {
+                    return Some(X86Instr::Sub(new_dest, src.clone()));
+                }
+            }
+            None
+        }
+        X86Instr::Cmp(left, right) => {
+            if let Some(new_left) = subst_op(left) {
+                if !reads_reg_direct(right, old_reg) {
+                    return Some(X86Instr::Cmp(new_left, right.clone()));
+                }
+            }
+            if let Some(new_right) = subst_op(right) {
+                if !reads_reg_direct(left, old_reg) {
+                    return Some(X86Instr::Cmp(left.clone(), new_right));
+                }
+            }
+            None
+        }
+        X86Instr::Vmovdqu(dest, src) => {
+            if let Some(new_dest) = subst_op(dest) {
+                return Some(X86Instr::Vmovdqu(new_dest, src.clone()));
+            }
+            if let Some(new_src) = subst_op(src) {
+                return Some(X86Instr::Vmovdqu(dest.clone(), new_src));
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -991,7 +1190,7 @@ fn is_reg_read_in_block(instructions: &[X86Instr], start: usize, reg: &X86Reg) -
             X86Instr::Movd(dest, src) | X86Instr::Pshufd(dest, src, _) |
             X86Instr::Vmovaps(dest, src) | X86Instr::Vmovups(dest, src) |
             X86Instr::Vmovdqa(dest, src) | X86Instr::Vmovdqu(dest, src) |
-            X86Instr::Vextracti128(dest, src, _) => {
+            X86Instr::Vextracti128(dest, src, _) | X86Instr::Vpbroadcastd(dest, src) => {
                 if reads_reg(src, reg) || reads_reg(dest, reg) { return true; }
             }
             X86Instr::Vaddps(dest, s1, s2) | X86Instr::Vsubps(dest, s1, s2) |
