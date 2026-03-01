@@ -131,9 +131,9 @@ impl Codegen {
         match ty {
             Type::Char | Type::UnsignedChar => output.push_str(&format!("    .byte {}\n", value)),
             Type::Short | Type::UnsignedShort => output.push_str(&format!("    .short {}\n", value)),
-            Type::Int | Type::UnsignedInt | Type::Float => output.push_str(&format!("    .long {}\n", value)),
+            Type::Int | Type::UnsignedInt | Type::Float | Type::Enum(_) => output.push_str(&format!("    .long {}\n", value)),
             Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
-            | Type::Pointer(_) | Type::FunctionPointer { .. } => {
+            | Type::Pointer(_, ..) | Type::FunctionPointer { .. } => {
                 output.push_str(&format!("    .quad {}\n", value));
             }
             _ => output.push_str(&format!("    .long {}\n", value)),
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn type_size_pointer() {
         let c = cg();
-        assert_eq!(c.type_size(&Type::Pointer(Box::new(Type::Int))), 8);
-        assert_eq!(c.type_size(&Type::Pointer(Box::new(Type::Char))), 8);
+        assert_eq!(c.type_size(&Type::ptr(Type::Int)), 8);
+        assert_eq!(c.type_size(&Type::ptr(Type::Char)), 8);
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(c.type_alignment(&Type::Short), 2);
         assert_eq!(c.type_alignment(&Type::Int), 4);
         assert_eq!(c.type_alignment(&Type::Long), 8);
-        assert_eq!(c.type_alignment(&Type::Pointer(Box::new(Type::Int))), 8);
+        assert_eq!(c.type_alignment(&Type::ptr(Type::Int)), 8);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
     fn emit_scalar_pointer() {
         let c = cg();
         let mut out = String::new();
-        c.emit_scalar_data(&mut out, &Type::Pointer(Box::new(Type::Void)), 0);
+        c.emit_scalar_data(&mut out, &Type::ptr(Type::Void), 0);
         assert_eq!(out, "    .quad 0\n");
     }
 

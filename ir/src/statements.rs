@@ -103,6 +103,7 @@ impl Lowerer {
                                         addr: Operand::Var(offset_var),
                                         src: Operand::Constant(ch as i64),
                                         value_type: elem_type.clone(),
+                                        volatile: false,
                                     });
                                 }
                             }
@@ -161,6 +162,7 @@ impl Lowerer {
                                     addr: Operand::Var(alloca_var),
                                     src: val.clone(),
                                     value_type: r#type.clone(),
+                                    volatile: false,
                                 });
                                 let var = match val {
                                     Operand::Var(v) => v,
@@ -195,6 +197,7 @@ impl Lowerer {
                             addr: Operand::Var(alloca_var),
                             src: val.clone(),
                             value_type: r#type.clone(),
+                            volatile: false,
                         });
                         
                         let var = match val {
@@ -610,6 +613,8 @@ impl Lowerer {
                 self.blocks[bid.0].instructions.push(Instruction::InlineAsm {
                     template: template.clone(),
                     outputs: output_vars,
+                    output_constraints: outputs.iter().map(|o| o.constraint.clone()).collect(),
+                    input_constraints: inputs.iter().map(|i| i.constraint.clone()).collect(),
                     inputs: input_ops,
                     clobbers: clobbers.clone(),
                     is_volatile: *is_volatile,

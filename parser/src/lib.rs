@@ -205,7 +205,7 @@ mod tests {
         let program = parse_tokens(&tokens).unwrap();
         let stmts = &program.functions[0].body.statements;
         if let Stmt::Declaration { r#type, .. } = &stmts[0] {
-            assert_eq!(*r#type, model::Type::Pointer(Box::new(model::Type::Int)));
+            assert_eq!(*r#type, model::Type::ptr(model::Type::Int));
         } else {
             panic!("Expected Declaration");
         }

@@ -109,7 +109,10 @@ fn is_hoistable(
         // Load from an invariant address with no stores in the loop to the same
         // address is safe to hoist. For safety, we only hoist loads from addresses
         // that are provably invariant AND the loop has no stores at all (conservative).
-        Instruction::Load { addr, .. } => {
+        Instruction::Load { addr, volatile, .. } => {
+            if *volatile {
+                return false; // Volatile loads must never be hoisted
+            }
             if !is_operand_invariant(addr, func, loop_body, already_hoisted) {
                 return false;
             }

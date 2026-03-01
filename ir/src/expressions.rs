@@ -14,10 +14,70 @@ impl Lowerer {
                     let val = self.lower_expr(right)?;
                     let addr = self.lower_to_addr(left)?;
                     let value_type = self.get_expr_type(left);
+
+                    // Check if this is a bitfield write → read-modify-write
+                    if let Some(bf_info) = self.get_bitfield_info(left) {
+                        let mask = ((1u64 << bf_info.bit_width) - 1) as i64;
+                        // Load the current storage unit
+                        let old_val = self.new_var();
+                        self.add_instruction(Instruction::Load {
+                            dest: old_val,
+                            addr: Operand::Var(addr),
+                            value_type: value_type.clone(),
+                            volatile: false,
+                        });
+                        // Clear the bitfield bits: old & ~(mask << bit_offset)
+                        let clear_mask = !(mask << bf_info.bit_offset);
+                        let cleared = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: cleared,
+                            op: BinaryOp::BitwiseAnd,
+                            left: Operand::Var(old_val),
+                            right: Operand::Constant(clear_mask),
+                        });
+                        // Mask the new value and shift into position: (val & mask) << bit_offset
+                        let masked_val = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: masked_val,
+                            op: BinaryOp::BitwiseAnd,
+                            left: val.clone(),
+                            right: Operand::Constant(mask),
+                        });
+                        let shifted_val = if bf_info.bit_offset > 0 {
+                            let sv = self.new_var();
+                            self.add_instruction(Instruction::Binary {
+                                dest: sv,
+                                op: BinaryOp::ShiftLeft,
+                                left: Operand::Var(masked_val),
+                                right: Operand::Constant(bf_info.bit_offset as i64),
+                            });
+                            sv
+                        } else {
+                            masked_val
+                        };
+                        // Combine: cleared | shifted_val
+                        let combined = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: combined,
+                            op: BinaryOp::BitwiseOr,
+                            left: Operand::Var(cleared),
+                            right: Operand::Var(shifted_val),
+                        });
+                        // Store back
+                        self.add_instruction(Instruction::Store {
+                            addr: Operand::Var(addr),
+                            src: Operand::Var(combined),
+                            value_type,
+                            volatile: false,
+                        });
+                        return Ok(val);
+                    }
+
                     self.add_instruction(Instruction::Store {
                         addr: Operand::Var(addr),
                         src: val.clone(),
                         value_type,
+                        volatile: false,
                     });
                     return Ok(val);
                 }
@@ -138,6 +198,7 @@ impl Lowerer {
                         dest: curr_val_var,
                         addr: Operand::Var(addr),
                         value_type: lhs_type.clone(),
+                        volatile: false,
                     });
                     
                     // 3. Evaluate RHS
@@ -160,11 +221,11 @@ impl Lowerer {
                     
                     // Handle pointer arithmetic for += and -=
                     let result_var = if (matches!(binary_op, BinaryOp::Add | BinaryOp::Sub)) 
-                        && (matches!(lhs_type, Type::Pointer(_) | Type::Array(..))) 
+                        && (matches!(lhs_type, Type::Pointer(_, ..) | Type::Array(..))) 
                     {
                         // Pointer arithmetic: scale the RHS by element size
                         let inner_type = match &lhs_type {
-                            Type::Pointer(inner) => inner,
+                            Type::Pointer(inner, ..) => inner,
                             Type::Array(inner, _) => inner,
                             _ => unreachable!(),
                         };
@@ -217,6 +278,7 @@ impl Lowerer {
                         addr: Operand::Var(addr),
                         src: Operand::Var(result_var),
                         value_type: lhs_type,
+                        volatile: false,
                     });
                     
                     return Ok(Operand::Var(result_var));
@@ -231,7 +293,7 @@ impl Lowerer {
                 // Handle pointer arithmetic
                 if *op == BinaryOp::Add || *op == BinaryOp::Sub {
                     // Special case: pointer - pointer = number of elements
-                    if *op == BinaryOp::Sub && matches!(l_ty, Type::Pointer(_)) && matches!(r_ty, Type::Pointer(_)) {
+                    if *op == BinaryOp::Sub && matches!(l_ty, Type::Pointer(_, ..)) && matches!(r_ty, Type::Pointer(_, ..)) {
                         // ptr - ptr: compute byte difference, then divide by element size
                         let dest = self.new_var();
                         self.add_instruction(Instruction::Binary {
@@ -242,7 +304,7 @@ impl Lowerer {
                         });
                         
                         // Divide by element size to get number of elements
-                        if let Type::Pointer(ref inner) = l_ty {
+                        if let Type::Pointer(ref inner, ..) = l_ty {
                             let size = self.get_type_size(inner);
                             if size > 1 {
                                 let result_dest = self.new_var();
@@ -259,7 +321,7 @@ impl Lowerer {
                     }
                     
                     // Regular pointer arithmetic: ptr +/- int
-                    if let Type::Pointer(ref inner) = l_ty {
+                    if let Type::Pointer(ref inner, ..) = l_ty {
                         let size = self.get_type_size(inner);
                         if size > 1 {
                             let scaled_r = self.new_var();
@@ -285,7 +347,7 @@ impl Lowerer {
                         }
                     } else if *op == BinaryOp::Add {
                         // Handle right side being a pointer (ptr + int -> int + ptr)
-                        if let Type::Pointer(ref inner) = r_ty {
+                        if let Type::Pointer(ref inner, ..) = r_ty {
                             let size = self.get_type_size(inner);
                              if size > 1 {
                                 let scaled_l = self.new_var();
@@ -362,6 +424,7 @@ impl Lowerer {
                         dest,
                         addr: Operand::Var(addr),
                         value_type: var_type,
+                        volatile: false,
                     });
                     Ok(Operand::Var(dest))
                 }
@@ -374,7 +437,7 @@ impl Lowerer {
                      if matches!(value_type, Type::Array(..)) {
                          let dest = self.new_var();
                          let elem_type = if let Type::Array(inner, _) = &value_type {
-                             Type::Pointer(inner.clone())
+                             Type::ptr((**inner).clone())
                          } else { unreachable!() };
                          self.var_types.insert(dest, elem_type);
                          self.add_instruction(Instruction::Copy {
@@ -389,6 +452,7 @@ impl Lowerer {
                         dest,
                         addr: Operand::Global(name.clone()),
                         value_type,
+                        volatile: false,
                     });
                      Ok(Operand::Var(dest))
                 } else {
@@ -400,11 +464,14 @@ impl Lowerer {
                         dest,
                         addr: Operand::Var(addr),
                         value_type,
+                        volatile: false,
                     });
                     Ok(Operand::Var(dest))
                 }
             }
             AstExpr::Index { .. } | AstExpr::Member { .. } | AstExpr::PtrMember { .. } | AstExpr::Unary { op: UnaryOp::Deref, .. } => {
+                // Check for bitfield read
+                let bf_info = self.get_bitfield_info(expr);
                 let addr = self.lower_to_addr(expr)?;
                 let dest = self.new_var();
                 let value_type = self.get_expr_type(expr);
@@ -413,16 +480,42 @@ impl Lowerer {
                     dest,
                     addr: Operand::Var(addr),
                     value_type,
+                    volatile: false,
                 });
-                Ok(Operand::Var(dest))
+                // If bitfield, extract the field: (loaded >> bit_offset) & mask
+                if let Some(bf) = bf_info {
+                    let shifted = if bf.bit_offset > 0 {
+                        let sv = self.new_var();
+                        self.add_instruction(Instruction::Binary {
+                            dest: sv,
+                            op: BinaryOp::ShiftRight,
+                            left: Operand::Var(dest),
+                            right: Operand::Constant(bf.bit_offset as i64),
+                        });
+                        sv
+                    } else {
+                        dest
+                    };
+                    let mask = ((1u64 << bf.bit_width) - 1) as i64;
+                    let masked = self.new_var();
+                    self.add_instruction(Instruction::Binary {
+                        dest: masked,
+                        op: BinaryOp::BitwiseAnd,
+                        left: Operand::Var(shifted),
+                        right: Operand::Constant(mask),
+                    });
+                    Ok(Operand::Var(masked))
+                } else {
+                    Ok(Operand::Var(dest))
+                }
             }            AstExpr::PostfixIncrement(expr) => {
                 // For postfix: return old value, but modify the variable
                 // 1. Compute type once
                 let expr_type = self.get_expr_type(expr);
                 let is_float = self.is_float_type(&expr_type);
-                let increment = if matches!(&expr_type, Type::Pointer(_) | Type::Array(..)) {
+                let increment = if matches!(&expr_type, Type::Pointer(_, ..) | Type::Array(..)) {
                     let inner_type = match &expr_type {
-                        Type::Pointer(inner) => inner,
+                        Type::Pointer(inner, ..) => inner,
                         Type::Array(inner, _) => inner,
                         _ => unreachable!(),
                     };
@@ -440,6 +533,7 @@ impl Lowerer {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
                     value_type: expr_type.clone(),
+                    volatile: false,
                 });
                 // 4. Compute new value (old + 1)
                 let new_val_var = self.new_var();
@@ -463,6 +557,7 @@ impl Lowerer {
                     addr: Operand::Var(addr),
                     src: Operand::Var(new_val_var),
                     value_type: expr_type,
+                    volatile: false,
                 });
                 // 6. Return old value
                 Ok(Operand::Var(old_val_var))
@@ -472,9 +567,9 @@ impl Lowerer {
                 // 1. Compute type once
                 let expr_type = self.get_expr_type(expr);
                 let is_float = self.is_float_type(&expr_type);
-                let increment = if matches!(&expr_type, Type::Pointer(_) | Type::Array(..)) {
+                let increment = if matches!(&expr_type, Type::Pointer(_, ..) | Type::Array(..)) {
                     let inner_type = match &expr_type {
-                        Type::Pointer(inner) => inner,
+                        Type::Pointer(inner, ..) => inner,
                         Type::Array(inner, _) => inner,
                         _ => unreachable!(),
                     };
@@ -492,6 +587,7 @@ impl Lowerer {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
                     value_type: expr_type.clone(),
+                    volatile: false,
                 });
                 // 4. Compute new value (old - 1)
                 let new_val_var = self.new_var();
@@ -515,6 +611,7 @@ impl Lowerer {
                     addr: Operand::Var(addr),
                     src: Operand::Var(new_val_var),
                     value_type: expr_type,
+                    volatile: false,
                 });
                 // 6. Return old value
                 Ok(Operand::Var(old_val_var))
@@ -524,9 +621,9 @@ impl Lowerer {
                 // 1. Compute type once
                 let expr_type = self.get_expr_type(expr);
                 let is_float = self.is_float_type(&expr_type);
-                let increment = if matches!(&expr_type, Type::Pointer(_) | Type::Array(..)) {
+                let increment = if matches!(&expr_type, Type::Pointer(_, ..) | Type::Array(..)) {
                     let inner_type = match &expr_type {
-                        Type::Pointer(inner) => inner,
+                        Type::Pointer(inner, ..) => inner,
                         Type::Array(inner, _) => inner,
                         _ => unreachable!(),
                     };
@@ -544,6 +641,7 @@ impl Lowerer {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
                     value_type: expr_type.clone(),
+                    volatile: false,
                 });
                 // 4. Compute new value (old + 1)
                 let new_val_var = self.new_var();
@@ -567,6 +665,7 @@ impl Lowerer {
                     addr: Operand::Var(addr),
                     src: Operand::Var(new_val_var),
                     value_type: expr_type,
+                    volatile: false,
                 });
                 // 6. Return new value
                 Ok(Operand::Var(new_val_var))
@@ -576,9 +675,9 @@ impl Lowerer {
                 // 1. Compute type once
                 let expr_type = self.get_expr_type(expr);
                 let is_float = self.is_float_type(&expr_type);
-                let increment = if matches!(&expr_type, Type::Pointer(_) | Type::Array(..)) {
+                let increment = if matches!(&expr_type, Type::Pointer(_, ..) | Type::Array(..)) {
                     let inner_type = match &expr_type {
-                        Type::Pointer(inner) => inner,
+                        Type::Pointer(inner, ..) => inner,
                         Type::Array(inner, _) => inner,
                         _ => unreachable!(),
                     };
@@ -596,6 +695,7 @@ impl Lowerer {
                     dest: old_val_var,
                     addr: Operand::Var(addr),
                     value_type: expr_type.clone(),
+                    volatile: false,
                 });
                 // 4. Compute new value (old - 1)
                 let new_val_var = self.new_var();
@@ -619,6 +719,7 @@ impl Lowerer {
                     addr: Operand::Var(addr),
                     src: Operand::Var(new_val_var),
                     value_type: expr_type,
+                    volatile: false,
                 });
                 // 6. Return new value
                 Ok(Operand::Var(new_val_var))
@@ -742,6 +843,74 @@ impl Lowerer {
                             }
                             // Other non-constant builtins: fall through to call (will likely fail at link)
                         }
+                    } else if name == "__builtin_bswap16" || name == "__builtin_bswap32" || name == "__builtin_bswap64" {
+                        // Byte-swap builtins
+                        if args.len() == 1 {
+                            let val = self.lower_expr(&args[0])?;
+                            if let Operand::Constant(v) = val {
+                                let result = match name.as_str() {
+                                    "__builtin_bswap16" => (v as u16).swap_bytes() as i64,
+                                    "__builtin_bswap32" => (v as u32).swap_bytes() as i64,
+                                    "__builtin_bswap64" => (v as u64).swap_bytes() as i64,
+                                    _ => unreachable!(),
+                                };
+                                return Ok(Operand::Constant(result));
+                            }
+                            // Non-constant: emit as a regular call — codegen will intercept it
+                        }
+                    } else if name == "__builtin_memcpy" || name == "memcpy" {
+                        // __builtin_memcpy(dest, src, n) → memcpy, return dest
+                        if args.len() == 3 {
+                            let dest_arg = self.lower_expr(&args[0])?;
+                            let src_arg = self.lower_expr(&args[1])?;
+                            let size_arg = self.lower_expr(&args[2])?;
+                            let bid = self.current_block.ok_or("memcpy outside block")?;
+                            let result = self.new_var();
+                            self.blocks[bid.0].instructions.push(Instruction::Call {
+                                dest: Some(result),
+                                name: "memcpy".to_string(),
+                                args: vec![dest_arg, src_arg, size_arg],
+                            });
+                            return Ok(Operand::Var(result));
+                        }
+                    } else if name == "__builtin_memset" || name == "memset" {
+                        // __builtin_memset(dest, c, n) → memset, return dest
+                        if args.len() == 3 {
+                            let dest_arg = self.lower_expr(&args[0])?;
+                            let c_arg = self.lower_expr(&args[1])?;
+                            let size_arg = self.lower_expr(&args[2])?;
+                            let bid = self.current_block.ok_or("memset outside block")?;
+                            let result = self.new_var();
+                            self.blocks[bid.0].instructions.push(Instruction::Call {
+                                dest: Some(result),
+                                name: "memset".to_string(),
+                                args: vec![dest_arg, c_arg, size_arg],
+                            });
+                            return Ok(Operand::Var(result));
+                        }
+                    } else if name == "__sync_synchronize" {
+                        // Memory fence — emit as call for codegen
+                        let bid = self.current_block.ok_or("sync outside block")?;
+                        self.blocks[bid.0].instructions.push(Instruction::Call {
+                            dest: None,
+                            name: "__sync_synchronize".to_string(),
+                            args: vec![],
+                        });
+                        return Ok(Operand::Constant(0));
+                    } else if name.starts_with("__sync_") || name.starts_with("__atomic_") {
+                        // Atomic builtins — lower args and emit as call for codegen to intercept
+                        let mut ir_args = Vec::new();
+                        for arg in args {
+                            ir_args.push(self.lower_expr(arg)?);
+                        }
+                        let bid = self.current_block.ok_or("atomic outside block")?;
+                        let result = self.new_var();
+                        self.blocks[bid.0].instructions.push(Instruction::Call {
+                            dest: Some(result),
+                            name: name.clone(),
+                            args: ir_args,
+                        });
+                        return Ok(Operand::Var(result));
                     }
                 }
 
@@ -831,7 +1000,8 @@ impl Lowerer {
                     Type::Short | Type::UnsignedShort |
                     Type::Int | Type::UnsignedInt |
                     Type::Long | Type::UnsignedLong |
-                    Type::LongLong | Type::UnsignedLongLong
+                    Type::LongLong | Type::UnsignedLongLong |
+                    Type::Enum(_)
                 );
                 if is_int_type(&src_type) && is_int_type(ty) && src_type != *ty {
                     let dest = self.new_var();
@@ -926,6 +1096,7 @@ impl Lowerer {
                                 addr: Operand::Var(alloca),
                                 src: val,
                                 value_type: ty.clone(),
+                                volatile: false,
                             });
                         }
                     }
@@ -944,6 +1115,7 @@ impl Lowerer {
                             dest: result,
                             addr: Operand::Var(alloca),
                             value_type: ty,
+                            volatile: false,
                         });
                         Ok(Operand::Var(result))
                     }
@@ -986,6 +1158,19 @@ impl Lowerer {
                 // not as a standalone expression.
                 Err("InitList expression cannot be lowered standalone; it must appear as a declaration initializer".to_string())
             }
+            AstExpr::VaArg { list, r#type } => {
+                // __builtin_va_arg(ap, type) → IR VaArg instruction
+                let list_addr = self.lower_to_addr(list)?;
+                let bid = self.current_block.ok_or("VaArg outside block")?;
+                let dest = self.new_var();
+                self.var_types.insert(dest, r#type.clone());
+                self.blocks[bid.0].instructions.push(Instruction::VaArg {
+                    dest,
+                    list: Operand::Var(list_addr),
+                    r#type: r#type.clone(),
+                });
+                Ok(Operand::Var(dest))
+            }
             AstExpr::BuiltinOffsetof { r#type, member } => {
                 // __builtin_offsetof(type, member) → constant offset
                 let struct_name = match r#type {
@@ -993,7 +1178,7 @@ impl Lowerer {
                     Type::Union(name) => name.clone(),
                     _ => return Err(format!("__builtin_offsetof requires struct/union type, got {:?}", r#type)),
                 };
-                let (offset, _field_type) = self.get_member_offset(&struct_name, member);
+                let (offset, _field_type, _) = self.get_member_offset(&struct_name, member);
                 Ok(Operand::Constant(offset))
             }
             AstExpr::Generic { controlling, associations } => {

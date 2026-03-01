@@ -47,6 +47,18 @@ impl Codegen {
         }
     }
 
+    pub fn with_target(target: TargetConfig) -> Self {
+        Self {
+            structs: HashMap::new(),
+            unions: HashMap::new(),
+            float_constants: HashMap::new(),
+            next_float_const: 0,
+            func_return_types: HashMap::new(),
+            enable_regalloc: true,
+            target,
+        }
+    }
+
     /// Test helper: insert a struct definition for unit tests.
     #[cfg(test)]
     pub(crate) fn add_struct(&mut self, s_def: model::StructDef) {
@@ -152,6 +164,9 @@ impl Codegen {
                 } else {
                     output.push_str(&format!(".globl {}\n", g.name));
                 }
+                if matches!(self.target.platform, model::Platform::Linux) {
+                    output.push_str(&format!(".type {}, @object\n", g.name));
+                }
                 
                 let mut alignment = 4;
                 for attr in &g.attributes {
@@ -164,6 +179,9 @@ impl Codegen {
                 let size = self.global_var_size(g);
                 output.push_str(&format!("{}:\n", g.name));
                 output.push_str(&format!("    .zero {}\n", size));
+                if matches!(self.target.platform, model::Platform::Linux) {
+                    output.push_str(&format!(".size {}, {}\n", g.name, size));
+                }
             }
         }
 
@@ -188,6 +206,9 @@ impl Codegen {
                 // Static linkage: internal visibility only
             } else {
                 output.push_str(&format!(".globl {}\n", func.name));
+            }
+            if matches!(self.target.platform, model::Platform::Linux) {
+                output.push_str(&format!(".type {}, @function\n", func.name));
             }
             
             // Check for weak attribute
@@ -220,6 +241,16 @@ impl Codegen {
             apply_peephole(&mut func_asm);
             
             output.push_str(&emit_asm(&func_asm));
+            
+            // Emit .cfi_endproc for DWARF unwinding
+            if matches!(self.target.platform, model::Platform::Linux) {
+                output.push_str(".cfi_endproc\n");
+            }
+            
+            // Emit .size directive for ELF
+            if matches!(self.target.platform, model::Platform::Linux) {
+                output.push_str(&format!(".size {}, .-{}\n", func.name, func.name));
+            }
             
             // Switch back to .text if we were in a custom section
             if func_in_custom_section {
@@ -275,6 +306,9 @@ impl Codegen {
         } else {
             output.push_str(&format!(".globl {}\n", g.name));
         }
+        if matches!(self.target.platform, model::Platform::Linux) {
+            output.push_str(&format!(".type {}, @object\n", g.name));
+        }
         
         let mut alignment = 4;
         for attr in &g.attributes {
@@ -308,7 +342,7 @@ impl Codegen {
                     };
                     match &g.r#type {
                         Type::Char | Type::UnsignedChar => output.push_str(&format!("{}: .byte {}\n", g.name, init_str)),
-                        Type::Int | Type::UnsignedInt => output.push_str(&format!("{}: .long {}\n", g.name, init_str)),
+                        Type::Int | Type::UnsignedInt | Type::Enum(_) => output.push_str(&format!("{}: .long {}\n", g.name, init_str)),
                         _ => output.push_str(&format!("{}: .quad {}\n", g.name, init_str)),
                     }
                 }
@@ -317,6 +351,11 @@ impl Codegen {
             // Uninitialized (should only happen in .bss path, but handle for safety)
             let size = self.type_size(&g.r#type);
             output.push_str(&format!("{}: .zero {}\n", g.name, size));
+        }
+        // Emit .size directive for ELF objects
+        if matches!(self.target.platform, model::Platform::Linux) {
+            let size = self.type_size(&g.r#type);
+            output.push_str(&format!(".size {}, {}\n", g.name, size));
         }
     }
     

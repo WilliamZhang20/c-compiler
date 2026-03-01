@@ -87,6 +87,50 @@ impl<'a> FunctionGenerator<'a> {
         match term {
             IrTerminator::Ret(op) => {
                 if let Some(o) = op {
+                    // Check for struct return type
+                    let struct_class = crate::call_ops::classify_struct_arg(self, &func.return_type);
+                    if let Some(class) = struct_class {
+                        // Struct return: load eightbytes into RAX[:RDX]
+                        let val = self.operand_to_op(o);
+                        match class {
+                            crate::call_ops::StructArgClass::OneReg => {
+                                // Load first eightbyte from struct buffer
+                                if let ir::Operand::Var(v) = o {
+                                    if let Some(&off) = self.alloca_buffers.get(v) {
+                                        self.asm.push(X86Instr::Mov(
+                                            X86Operand::Reg(X86Reg::Rax),
+                                            X86Operand::Mem(X86Reg::Rbp, off),
+                                        ));
+                                    } else {
+                                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                                    }
+                                } else {
+                                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                                }
+                            }
+                            crate::call_ops::StructArgClass::TwoReg => {
+                                if let ir::Operand::Var(v) = o {
+                                    if let Some(&off) = self.alloca_buffers.get(v) {
+                                        self.asm.push(X86Instr::Mov(
+                                            X86Operand::Reg(X86Reg::Rax),
+                                            X86Operand::Mem(X86Reg::Rbp, off),
+                                        ));
+                                        self.asm.push(X86Instr::Mov(
+                                            X86Operand::Reg(X86Reg::Rdx),
+                                            X86Operand::Mem(X86Reg::Rbp, off + 8),
+                                        ));
+                                    } else {
+                                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                                    }
+                                } else {
+                                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
+                                }
+                            }
+                            crate::call_ops::StructArgClass::Memory => {
+                                // Large struct already written via hidden pointer
+                            }
+                        }
+                    } else {
                     let is_float_return = matches!(func.return_type, Type::Float | Type::Double);
                     let is_double_return = matches!(func.return_type, Type::Double);
                     if is_float_return {
@@ -101,18 +145,16 @@ impl<'a> FunctionGenerator<'a> {
                         // Handle 32-bit vs 64-bit return values
                         match val {
                             X86Operand::DwordMem(..) => {
-                                // 32-bit memory operand - load into EAX, then zero-extend to RAX implicitly
                                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), val));
                             }
                             X86Operand::Imm(i) if i >= i32::MIN as i64 && i <= i32::MAX as i64 => {
-                                // Small immediate - can use EAX
                                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), val));
                             }
                             _ => {
-                                // 64-bit operand or large immediate
                                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val));
                             }
                         }
+                    }
                     }
                 }
                 

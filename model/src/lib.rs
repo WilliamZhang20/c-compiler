@@ -161,7 +161,10 @@ pub enum Type {
     Float,
     Double,
     Array(Box<Type>, usize),
-    Pointer(Box<Type>),
+    /// Pointer type with optional qualifiers on the pointer itself.
+    /// E.g. `const int *` → `Pointer(Int, {is_const: true, ..})`, 
+    /// `int *const` → outer declaration qualifier, not on the pointer type.
+    Pointer(Box<Type>, TypeQualifiers),
     Struct(String),
     Union(String),
     Typedef(String),
@@ -170,9 +173,23 @@ pub enum Type {
         param_types: Vec<Type>,
     },
     Bool,
+    /// Enum type: behaves like `int` but carries the tag for type-checking.
+    Enum(String),
     /// `typeof(expr)` — resolved to the concrete type of the expression
     /// during IR lowering.
     TypeofExpr(Box<Expr>),
+}
+
+impl Type {
+    /// Convenience constructor for an unqualified pointer type.
+    pub fn ptr(inner: Self) -> Self {
+        Type::Pointer(Box::new(inner), TypeQualifiers::default())
+    }
+
+    /// Convenience constructor for a qualified pointer type.
+    pub fn qualified_ptr(inner: Self, qualifiers: TypeQualifiers) -> Self {
+        Type::Pointer(Box::new(inner), qualifiers)
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -199,6 +216,17 @@ pub struct StructField {
     pub field_type: Type,
     pub name: String,
     pub bit_width: Option<usize>, // Some(n) for bit fields
+}
+
+/// Information about a bitfield member's location within its storage unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitfieldInfo {
+    /// Bit offset within the storage unit (0 = LSB)
+    pub bit_offset: usize,
+    /// Width in bits
+    pub bit_width: usize,
+    /// Size of the storage unit in bytes (e.g. 4 for unsigned int)
+    pub storage_size: usize,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -363,6 +391,11 @@ pub enum Expr {
     StmtExpr(Vec<Stmt>),
     /// Brace-enclosed initializer list: `{1, 2, 3}` or `{.x = 1, [0] = 2}`
     InitList(Vec<InitItem>),
+    /// __builtin_va_arg(ap, type) — extract next argument from va_list
+    VaArg {
+        list: Box<Expr>,
+        r#type: Type,
+    },
     /// __builtin_offsetof(type, member) — compile-time offset of field in struct
     BuiltinOffsetof {
         r#type: Type,

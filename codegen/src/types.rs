@@ -99,8 +99,8 @@ mod tests {
     #[test]
     fn size_pointer() {
         let calc = empty_calc();
-        assert_eq!(calc.get_type_size(&Type::Pointer(Box::new(Type::Int))), 8);
-        assert_eq!(calc.get_type_size(&Type::Pointer(Box::new(Type::Char))), 8);
+        assert_eq!(calc.get_type_size(&Type::ptr(Type::Int)), 8);
+        assert_eq!(calc.get_type_size(&Type::ptr(Type::Char)), 8);
     }
 
     #[test]
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(calc.get_alignment(&Type::Int), 4);
         assert_eq!(calc.get_alignment(&Type::Long), 8);
         assert_eq!(calc.get_alignment(&Type::Double), 8);
-        assert_eq!(calc.get_alignment(&Type::Pointer(Box::new(Type::Int))), 8);
+        assert_eq!(calc.get_alignment(&Type::ptr(Type::Int)), 8);
     }
 
     #[test]

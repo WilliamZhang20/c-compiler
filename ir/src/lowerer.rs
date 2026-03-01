@@ -134,7 +134,7 @@ impl Lowerer {
     pub(crate) fn resolve_type(&self, ty: &Type) -> Type {
         match ty {
             Type::TypeofExpr(expr) => self.get_expr_type(expr),
-            Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_type(inner))),
+            Type::Pointer(inner, ..) => Type::ptr(self.resolve_type(inner)),
             Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
             other => other.clone(),
         }
@@ -165,10 +165,10 @@ impl Lowerer {
             }
             AstExpr::Unary { op, expr } => {
                 match op {
-                    model::UnaryOp::AddrOf => Type::Pointer(Box::new(self.get_expr_type(expr))),
+                    model::UnaryOp::AddrOf => Type::ptr(self.get_expr_type(expr)),
                     model::UnaryOp::Deref => {
                         let ty = self.get_expr_type(expr);
-                        if let Type::Pointer(inner) = ty {
+                        if let Type::Pointer(inner, ..) = ty {
                             *inner
                         } else if let Type::Array(inner, _) = ty {
                             *inner
@@ -213,7 +213,7 @@ impl Lowerer {
             AstExpr::PtrMember { expr, member } => {
                 let ty = self.get_expr_type(expr);
                 match ty {
-                    Type::Pointer(inner) => {
+                    Type::Pointer(inner, ..) => {
                         match *inner {
                             Type::Struct(name) => {
                                 if let Some(s_def) = self.struct_defs.get(&name) {
@@ -245,13 +245,13 @@ impl Lowerer {
                 let ty = self.get_expr_type(array);
                 match ty {
                     Type::Array(inner, _) => *inner,
-                    Type::Pointer(inner) => *inner,
+                    Type::Pointer(inner, ..) => *inner,
                     _ => Type::Int,
                 }
             }
             AstExpr::Call { func: _, args:_ } => Type::Int, // Assume int return
             AstExpr::SizeOf(_) | AstExpr::SizeOfExpr(_) | AstExpr::AlignOf(_) => Type::Int,
-            AstExpr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
+            AstExpr::StringLiteral(_) => Type::ptr(Type::Char),
             AstExpr::Conditional { then_expr, .. } => {
                 // Ternary operator type is the type of the then/else branches
                 // (In C, both branches should have compatible types)
@@ -282,6 +282,7 @@ impl Lowerer {
                 // offsetof always returns an integer (size_t, effectively)
                 Type::Long
             }
+            AstExpr::VaArg { r#type, .. } => r#type.clone(),
             AstExpr::Generic { controlling, associations } => {
                 // Resolve to the matching association's expression type
                 let ctrl_type = self.get_expr_type(controlling);
@@ -394,13 +395,14 @@ impl Lowerer {
                 r#type: t.clone(),
             });
             self.variable_allocas.insert(name.clone(), stack_slot);
-            self.var_types.insert(stack_slot, Type::Pointer(Box::new(t.clone())));
+            self.var_types.insert(stack_slot, Type::ptr(t.clone()));
             
             // Store initial value
             self.blocks[entry_id.0].instructions.push(Instruction::Store {
                 addr: Operand::Var(stack_slot),
                 src: Operand::Var(var),
                 value_type: t.clone(),
+                volatile: false,
             });
 
             self.symbol_table.insert(name.clone(), t.clone());
@@ -467,7 +469,7 @@ impl Lowerer {
             crate::types::Operand::Global(name) => {
                 // Globals are pointer types
                 if let Some(ty) = self.symbol_table.get(name) {
-                    Ok(Type::Pointer(Box::new(ty.clone())))
+                    Ok(Type::ptr(ty.clone()))
                 } else {
                     Err(format!("Unknown global: {}", name))
                 }
@@ -475,4 +477,33 @@ impl Lowerer {
         }
     }
 
+    /// Check if an expression is a bitfield member access, and if so return the bitfield info.
+    pub(crate) fn get_bitfield_info(&mut self, expr: &AstExpr) -> Option<model::BitfieldInfo> {
+        match expr {
+            AstExpr::Member { expr, member } => {
+                let ty = self.get_expr_type(expr);
+                let type_name = match &ty {
+                    Type::Struct(name) => name.clone(),
+                    Type::Union(name) => name.clone(),
+                    _ => return None,
+                };
+                let (_, _, bf_info) = self.get_member_offset(&type_name, member);
+                bf_info
+            }
+            AstExpr::PtrMember { expr, member } => {
+                let ty = self.get_expr_type(expr);
+                let type_name = match &ty {
+                    Type::Pointer(inner, ..) => match &**inner {
+                        Type::Struct(name) => name.clone(),
+                        Type::Union(name) => name.clone(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let (_, _, bf_info) = self.get_member_offset(&type_name, member);
+                bf_info
+            }
+            _ => None,
+        }
+    }
 }

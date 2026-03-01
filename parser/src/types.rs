@@ -255,7 +255,7 @@ impl<'a> TypeParser for Parser<'a> {
                 // Qualifiers after * apply to the pointer itself
                 // For now, we just skip them (not tracked per-pointer-level)
             }
-            final_type = Type::Pointer(Box::new(final_type));
+            final_type = Type::ptr(final_type);
         }
 
         Ok((final_type, qualifiers))
@@ -560,11 +560,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_enum_type(&mut self) -> Result<(Type, TypeQualifiers), String> {
-        // For "enum Name", just treat as int (C standard behavior)
-        if let Some(Token::Identifier { .. }) = self.peek() {
+        // For "enum Name", return Type::Enum(name) (behaves like int but carries the tag)
+        if let Some(Token::Identifier { value, .. }) = self.peek() {
+            let name = value.clone();
             self.advance();
+            Ok((Type::Enum(name), TypeQualifiers::default()))
+        } else {
+            // Anonymous enum — treat as plain int
+            Ok((Type::Int, TypeQualifiers::default()))
         }
-        Ok((Type::Int, TypeQualifiers::default()))
     }
 
     pub(crate) fn skip_parentheses(&mut self) -> Result<(), String> {

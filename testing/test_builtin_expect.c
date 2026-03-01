@@ -15,9 +15,13 @@ int main() {
         return 2;
     }
 
-    // __builtin_constant_p should return 0 (not a constant in our simple compiler)
+    // __builtin_constant_p should return 1 for constant expressions
     int b = __builtin_constant_p(42);
-    if (b != 0) return 3;
+    if (b != 1) return 3;
+
+    // __builtin_constant_p should return 0 for non-constant expressions
+    int c = __builtin_constant_p(a);
+    if (c != 0) return 4;
 
     return a; // 42
 }

@@ -506,26 +506,26 @@ These must be implemented before any kernel source file can be processed:
 
 ### Tier 1 — Critical Infrastructure (Needed for Most Kernel Files)
 
-11. **Inline asm constraint parsing** — full `"r"`, `"m"`, `"=r"`, `"+r"`, `"i"`, register-class constraints
-12. **`asm goto`** — static branches, alternatives framework
-13. **`asm volatile` enforcement** — `volatile` flag must prevent movement/elimination
-14. **Clobber list enforcement** — save/restore registers; respect `"memory"` and `"cc"` clobbers
+11. ~~**Inline asm constraint parsing** — full `"r"`, `"m"`, `"=r"`, `"+r"`, `"i"`, register-class constraints~~ ✅
+12. ~~**`asm goto`** — static branches, alternatives framework~~ ✅ (basic asm with goto labels supported)
+13. ~~**`asm volatile` enforcement** — `volatile` flag must prevent movement/elimination~~ ✅
+14. ~~**Clobber list enforcement** — save/restore registers; respect `"memory"` and `"cc"` clobbers~~ ✅
 15. ~~**`.bss` section** — uninitialized data~~ ✅
 16. ~~**`.rodata` section** — read-only data~~ ✅
-17. **`.type` / `.size` directives** — ELF symbol metadata
-18. **Bitfield layout and codegen** — correct packing, shift/mask access
-19. **`va_arg` codegen** — needed for `printk` and variadic functions
-20. **Struct by-value ABI** — SysV AMD64 struct passing in registers
-21. **Volatile semantics in IR** — flag on Load/Store; optimizer must not touch
-22. **Atomic operations** — `__sync_*`, `__atomic_*`, `lock` prefix instructions, `mfence`
-23. **`__builtin_bswap16/32/64`** — byte swapping for endianness conversion
-24. **`__builtin_memcpy` / `__builtin_memset`** — kernel's memory primitives
-25. **`__builtin_constant_p` (proper)** — must detect compile-time constants
-26. **`-mno-red-zone`** — kernel stack must not use red zone
-27. **`-mno-sse` / FPU disable** — kernel code must not emit FPU/SSE instructions
-28. **Enum as a type** — `enum E var;` declarations
-29. **Qualified pointers** — `const int *` vs `int *const` must be distinct
-30. **`.cfi_*` directives** — call frame information for stack unwinding
+17. ~~**`.type` / `.size` directives** — ELF symbol metadata~~ ✅
+18. ~~**Bitfield layout and codegen** — correct packing, shift/mask access~~ ✅
+19. ~~**`va_arg` codegen** — needed for `printk` and variadic functions~~ ✅
+20. ~~**Struct by-value ABI** — SysV AMD64 struct passing in registers~~ ✅
+21. ~~**Volatile semantics in IR** — flag on Load/Store; optimizer must not touch~~ ✅
+22. ~~**Atomic operations** — `__sync_*`, `__atomic_*`, `lock` prefix instructions, `mfence`~~ ✅
+23. ~~**`__builtin_bswap16/32/64`** — byte swapping for endianness conversion~~ ✅
+24. ~~**`__builtin_memcpy` / `__builtin_memset`** — kernel's memory primitives~~ ✅
+25. ~~**`__builtin_constant_p` (proper)** — must detect compile-time constants~~ ✅
+26. ~~**`-mno-red-zone`** — kernel stack must not use red zone~~ ✅
+27. ~~**`-mno-sse` / FPU disable** — kernel code must not emit FPU/SSE instructions~~ ✅
+28. ~~**Enum as a type** — `enum E var;` declarations~~ ✅
+29. ~~**Qualified pointers** — `const int *` vs `int *const` must be distinct~~ ✅
+30. ~~**`.cfi_*` directives** — call frame information for stack unwinding~~ ✅
 
 ### Tier 2 — Important for Broad Coverage
 

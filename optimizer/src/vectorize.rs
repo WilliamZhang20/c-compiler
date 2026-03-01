@@ -141,7 +141,7 @@ fn analyze_loop_body(
                         // This GEP uses the IV for array indexing - potentially vectorizable
                     }
                 }
-                Instruction::Load { dest, addr, value_type } => {
+                Instruction::Load { dest, addr, value_type, .. } => {
                     // Check if this loads from an IV-indexed GEP
                     if let Operand::Var(addr_var) = addr {
                         if let Some(gep_info) = find_gep_for_var(func, *addr_var, &lp.body, iv.var) {
@@ -156,7 +156,7 @@ fn analyze_loop_body(
                         }
                     }
                 }
-                Instruction::Store { addr, src, value_type } => {
+                Instruction::Store { addr, src, value_type, .. } => {
                     if let Operand::Var(addr_var) = addr {
                         if let Some(gep_info) = find_gep_for_var(func, *addr_var, &lp.body, iv.var) {
                             stores.push(MemAccess {
@@ -1247,6 +1247,7 @@ mod tests {
                         dest: VarId(2),
                         addr: Operand::Var(VarId(1)),
                         value_type: Type::Int,
+                        volatile: false,
                     },
                     Instruction::GetElementPtr {
                         dest: VarId(3),
@@ -1258,6 +1259,7 @@ mod tests {
                         addr: Operand::Var(VarId(3)),
                         src: Operand::Var(VarId(2)),
                         value_type: Type::Int,
+                        volatile: false,
                     },
                     Instruction::Binary {
                         dest: VarId(5),

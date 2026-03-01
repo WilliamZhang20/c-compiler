@@ -357,7 +357,7 @@ impl<'a> Mem2RegPass<'a> {
             Type::Short | Type::UnsignedShort | Type::Long | Type::UnsignedLong |
             Type::LongLong | Type::UnsignedLongLong | 
             Type::Float | Type::Double |
-            Type::Pointer(_) | Type::FunctionPointer { .. })
+            Type::Pointer(_, ..) | Type::FunctionPointer { .. } | Type::Enum(_))
     }
     
     fn is_address_taken(func: &Function, alloca_id: VarId) -> bool {

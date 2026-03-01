@@ -5,7 +5,7 @@
 // Having a single implementation eliminates the previous triple duplication
 // across ir/type_utils.rs, codegen/types.rs, and codegen/globals.rs.
 
-use crate::{Type, StructDef, UnionDef, Attribute};
+use crate::{Type, StructDef, UnionDef, Attribute, BitfieldInfo};
 use std::collections::HashMap;
 
 /// Provides type size and alignment computation for a given set of struct/union definitions.
@@ -38,13 +38,13 @@ impl<'a> TypeLayout<'a> {
             Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
-            Type::Int | Type::UnsignedInt => 4,
+            Type::Int | Type::UnsignedInt | Type::Enum(_) => 4,
             Type::Long | Type::UnsignedLong => 8,
             Type::LongLong | Type::UnsignedLongLong => 8,
             Type::Float => 4,
             Type::Double => 8,
             Type::Void => 0,
-            Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
+            Type::Pointer(_, ..) | Type::FunctionPointer { .. } => 8,
             Type::Array(inner, count) => self.size_of(inner) * count,
             Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {
@@ -92,12 +92,12 @@ impl<'a> TypeLayout<'a> {
             Type::Bool => 1,
             Type::Char | Type::UnsignedChar => 1,
             Type::Short | Type::UnsignedShort => 2,
-            Type::Int | Type::UnsignedInt => 4,
+            Type::Int | Type::UnsignedInt | Type::Enum(_) => 4,
             Type::Long | Type::UnsignedLong => 8,
             Type::LongLong | Type::UnsignedLongLong => 8,
             Type::Float => 4,
             Type::Double => 8,
-            Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
+            Type::Pointer(_, ..) | Type::FunctionPointer { .. } => 8,
             Type::Array(inner, _) => self.align_of(inner),
             Type::Struct(name) => {
                 if let Some(s_def) = self.structs.get(name) {
@@ -144,16 +144,59 @@ impl<'a> TypeLayout<'a> {
         }
     }
 
-    /// Compute the total size of a struct including field alignment padding.
+    /// Compute the total size of a struct including field alignment padding and bitfield packing.
     pub fn struct_size(&self, s_def: &StructDef, is_packed: bool) -> usize {
         let mut size: usize = 0;
+        let mut bit_offset: usize = 0; // bits used within current storage unit
+        let mut in_bitfield = false;
+        let mut bf_storage_size: usize = 0;
+
         for field in &s_def.fields {
-            let field_size = self.size_of(&field.field_type);
-            if !is_packed {
-                let alignment = self.align_of(&field.field_type);
-                size = (size + alignment - 1) / alignment * alignment;
+            if let Some(bw) = field.bit_width {
+                let storage = self.size_of(&field.field_type);
+                let storage_bits = storage * 8;
+                if bw == 0 {
+                    // Zero-width bitfield = force alignment to next storage unit boundary
+                    if in_bitfield {
+                        size += bf_storage_size;
+                        bit_offset = 0;
+                        in_bitfield = false;
+                    }
+                    continue;
+                }
+                if in_bitfield && bf_storage_size == storage && bit_offset + bw <= storage_bits {
+                    // Fits in current storage unit
+                    bit_offset += bw;
+                } else {
+                    // Finish previous storage unit if any
+                    if in_bitfield {
+                        size += bf_storage_size;
+                    } else if !is_packed {
+                        let alignment = self.align_of(&field.field_type);
+                        size = (size + alignment - 1) / alignment * alignment;
+                    }
+                    bf_storage_size = storage;
+                    bit_offset = bw;
+                    in_bitfield = true;
+                }
+            } else {
+                // Regular field — finish any pending bitfield storage
+                if in_bitfield {
+                    size += bf_storage_size;
+                    bit_offset = 0;
+                    in_bitfield = false;
+                }
+                let field_size = self.size_of(&field.field_type);
+                if !is_packed {
+                    let alignment = self.align_of(&field.field_type);
+                    size = (size + alignment - 1) / alignment * alignment;
+                }
+                size += field_size;
             }
-            size += field_size;
+        }
+        // Finish any trailing bitfield
+        if in_bitfield {
+            size += bf_storage_size;
         }
         // Add trailing padding
         if !is_packed {
@@ -166,33 +209,85 @@ impl<'a> TypeLayout<'a> {
         size
     }
 
-    /// Get the byte offset and type of a struct/union member.
-    pub fn member_offset(&self, struct_or_union_name: &str, member_name: &str) -> (usize, Type) {
+    /// Get the byte offset and type of a struct/union member, plus optional bitfield info.
+    pub fn member_offset(&self, struct_or_union_name: &str, member_name: &str) -> (usize, Type, Option<BitfieldInfo>) {
         // Check structs
         if let Some(s_def) = self.structs.get(struct_or_union_name) {
             let is_packed = s_def.attributes.iter()
                 .any(|attr| matches!(attr, Attribute::Packed));
             let mut offset: usize = 0;
+            let mut bit_offset: usize = 0;
+            let mut in_bitfield = false;
+            let mut bf_storage_size: usize = 0;
+
             for field in &s_def.fields {
-                if !is_packed {
-                    let alignment = self.align_of(&field.field_type);
-                    offset = (offset + alignment - 1) / alignment * alignment;
+                if let Some(bw) = field.bit_width {
+                    let storage = self.size_of(&field.field_type);
+                    let storage_bits = storage * 8;
+                    if bw == 0 {
+                        if in_bitfield {
+                            offset += bf_storage_size;
+                            bit_offset = 0;
+                            in_bitfield = false;
+                        }
+                        continue;
+                    }
+                    if in_bitfield && bf_storage_size == storage && bit_offset + bw <= storage_bits {
+                        // Fits in current storage unit
+                        if field.name == member_name {
+                            return (offset, field.field_type.clone(), Some(BitfieldInfo {
+                                bit_offset,
+                                bit_width: bw,
+                                storage_size: storage,
+                            }));
+                        }
+                        bit_offset += bw;
+                    } else {
+                        // New storage unit
+                        if in_bitfield {
+                            offset += bf_storage_size;
+                        } else if !is_packed {
+                            let alignment = self.align_of(&field.field_type);
+                            offset = (offset + alignment - 1) / alignment * alignment;
+                        }
+                        bf_storage_size = storage;
+                        if field.name == member_name {
+                            return (offset, field.field_type.clone(), Some(BitfieldInfo {
+                                bit_offset: 0,
+                                bit_width: bw,
+                                storage_size: storage,
+                            }));
+                        }
+                        bit_offset = bw;
+                        in_bitfield = true;
+                    }
+                } else {
+                    // Regular field
+                    if in_bitfield {
+                        offset += bf_storage_size;
+                        bit_offset = 0;
+                        in_bitfield = false;
+                    }
+                    if !is_packed {
+                        let alignment = self.align_of(&field.field_type);
+                        offset = (offset + alignment - 1) / alignment * alignment;
+                    }
+                    if field.name == member_name {
+                        return (offset, field.field_type.clone(), None);
+                    }
+                    offset += self.size_of(&field.field_type);
                 }
-                if field.name == member_name {
-                    return (offset, field.field_type.clone());
-                }
-                offset += self.size_of(&field.field_type);
             }
         }
         // Check unions (all fields at offset 0)
         if let Some(u_def) = self.unions.get(struct_or_union_name) {
             for field in &u_def.fields {
                 if field.name == member_name {
-                    return (0, field.field_type.clone());
+                    return (0, field.field_type.clone(), None);
                 }
             }
         }
-        (0, Type::Int) // fallback
+        (0, Type::Int, None) // fallback
     }
 
     /// Check if a type is a floating-point type.
@@ -222,7 +317,7 @@ mod tests {
         assert_eq!(layout.size_of(&Type::Double), 8);
         assert_eq!(layout.size_of(&Type::Bool), 1);
         assert_eq!(layout.size_of(&Type::Short), 2);
-        assert_eq!(layout.size_of(&Type::Pointer(Box::new(Type::Int))), 8);
+        assert_eq!(layout.size_of(&Type::ptr(Type::Int)), 8);
     }
 
     #[test]
@@ -248,8 +343,8 @@ mod tests {
         assert_eq!(layout.size_of(&Type::Struct("Point".to_string())), 8);
         assert_eq!(layout.align_of(&Type::Struct("Point".to_string())), 4);
 
-        let (offset_x, _) = layout.member_offset("Point", "x");
-        let (offset_y, _) = layout.member_offset("Point", "y");
+        let (offset_x, _, _) = layout.member_offset("Point", "x");
+        let (offset_y, _, _) = layout.member_offset("Point", "y");
         assert_eq!(offset_x, 0);
         assert_eq!(offset_y, 4);
     }
@@ -269,7 +364,7 @@ mod tests {
         let layout = TypeLayout::new(&structs, &unions);
         // char(1) + 3 padding + int(4) = 8
         assert_eq!(layout.size_of(&Type::Struct("Padded".to_string())), 8);
-        let (offset_i, _) = layout.member_offset("Padded", "i");
+        let (offset_i, _, _) = layout.member_offset("Padded", "i");
         assert_eq!(offset_i, 4); // aligned to 4
     }
 

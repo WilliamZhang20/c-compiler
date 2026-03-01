@@ -22,12 +22,20 @@ pub fn load_forwarding(func: &mut Function) {
 
         for (i, inst) in block.instructions.iter().enumerate() {
             match inst {
-                Instruction::Store { addr, src, value_type } => {
-                    // Record that this address now holds this value
-                    known_stores.insert(addr.clone(), (src.clone(), value_type.clone()));
+                Instruction::Store { addr, src, value_type, volatile } => {
+                    if *volatile {
+                        // Volatile store — invalidate all known stores (acts as memory barrier)
+                        known_stores.clear();
+                    } else {
+                        // Record that this address now holds this value
+                        known_stores.insert(addr.clone(), (src.clone(), value_type.clone()));
+                    }
                 }
-                Instruction::Load { dest, addr, value_type } => {
-                    if let Some((stored_val, stored_type)) = known_stores.get(addr) {
+                Instruction::Load { dest, addr, value_type, volatile } => {
+                    if *volatile {
+                        // Volatile load — must not be forwarded, and invalidates stores
+                        known_stores.clear();
+                    } else if let Some((stored_val, stored_type)) = known_stores.get(addr) {
                         // Types must match for the forwarding to be correct
                         if stored_type == value_type {
                             // Replace load with copy from the stored value
@@ -85,8 +93,11 @@ fn dead_store_elimination(func: &mut Function) {
 
         for i in (0..block.instructions.len()).rev() {
             match &block.instructions[i] {
-                Instruction::Store { addr, .. } => {
-                    if overwritten.contains(addr) {
+                Instruction::Store { addr, volatile, .. } => {
+                    if *volatile {
+                        // Volatile store is never dead
+                        overwritten.clear();
+                    } else if overwritten.contains(addr) {
                         // This store is dead — a later store overwrites it
                         dead_indices.push(i);
                     } else {

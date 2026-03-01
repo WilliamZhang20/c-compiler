@@ -91,7 +91,7 @@ fn const_sizeof(ty: &Type) -> i64 {
         Type::Short | Type::UnsignedShort => 2,
         Type::Int | Type::UnsignedInt | Type::Float => 4,
         Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
-            | Type::Double | Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
+            | Type::Double | Type::Pointer(_, ..) | Type::FunctionPointer { .. } => 8,
         Type::Array(inner, n) => const_sizeof(inner) * (*n as i64),
         Type::Void => 1, // GCC extension
         _ => 4, // Default fallback
@@ -105,7 +105,7 @@ fn const_alignof(ty: &Type) -> i64 {
         Type::Short | Type::UnsignedShort => 2,
         Type::Int | Type::UnsignedInt | Type::Float => 4,
         Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
-            | Type::Double | Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
+            | Type::Double | Type::Pointer(_, ..) | Type::FunctionPointer { .. } => 8,
         _ => 4,
     }
 }
@@ -542,12 +542,24 @@ impl<'a> Parser<'a> {
                         Ok(expr)
                     }
                     "__builtin_constant_p" => {
-                        // __builtin_constant_p(expr) → 0 at runtime
-                        // (we're a simple compiler, nothing is provably constant)
+                        // __builtin_constant_p(expr) → 1 if expr is a compile-time constant, 0 otherwise
                         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
-                        let _ = self.parse_assignment()?;
+                        let expr = self.parse_assignment()?;
                         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-                        Ok(Expr::Constant(0))
+                        let is_const = Self::is_constant_expr(&expr);
+                        Ok(Expr::Constant(if is_const { 1 } else { 0 }))
+                    }
+                    "__builtin_va_arg" => {
+                        // __builtin_va_arg(ap, type) — extract next arg from va_list
+                        self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
+                        let list_expr = self.parse_assignment()?;
+                        self.expect(|t| matches!(t, Token::Comma), "','")?;
+                        let ty = self.parse_type()?;
+                        self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
+                        Ok(Expr::VaArg {
+                            list: Box::new(list_expr),
+                            r#type: ty,
+                        })
                     }
                     "__builtin_offsetof" => {
                         // __builtin_offsetof(type, member) → constant offset
@@ -647,6 +659,26 @@ impl<'a> Parser<'a> {
                 })
             }
             other => Err(format!("expected expression, found {:?}", other)),
+        }
+    }
+
+    /// Check if an expression is a compile-time constant (for __builtin_constant_p).
+    fn is_constant_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Constant(_) | Expr::FloatConstant(_) => true,
+            Expr::StringLiteral(_) => true,
+            Expr::Unary { expr, .. } => Self::is_constant_expr(expr),
+            Expr::Binary { left, right, .. } => {
+                Self::is_constant_expr(left) && Self::is_constant_expr(right)
+            }
+            Expr::Cast(_, inner) => Self::is_constant_expr(inner),
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                Self::is_constant_expr(condition)
+                    && Self::is_constant_expr(then_expr)
+                    && Self::is_constant_expr(else_expr)
+            }
+            Expr::SizeOf(_) | Expr::SizeOfExpr(_) | Expr::AlignOf(_) => true,
+            _ => false,
         }
     }
 }

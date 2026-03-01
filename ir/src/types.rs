@@ -80,11 +80,13 @@ pub enum Instruction {
         dest: VarId,
         addr: Operand,
         value_type: Type, // Type of the value being loaded
+        volatile: bool,
     },
     Store {
         addr: Operand,
         src: Operand,
         value_type: Type, // Type of the value being stored
+        volatile: bool,
     },
     GetElementPtr {
         dest: VarId,
@@ -123,6 +125,8 @@ pub enum Instruction {
         template: String,
         outputs: Vec<VarId>,     // Output variables
         inputs: Vec<Operand>,    // Input operands
+        output_constraints: Vec<String>, // "=r", "=m", "+r", etc.
+        input_constraints: Vec<String>,  // "r", "m", "i", etc.
         clobbers: Vec<String>,   // Clobbered registers
         is_volatile: bool,
     },
@@ -283,18 +287,21 @@ impl Instruction {
     /// Returns true if this instruction has side effects (stores, calls, etc.)
     /// and should not be removed even if its result is unused.
     pub fn has_side_effects(&self) -> bool {
-        matches!(self,
-            Instruction::Store { .. }
-            | Instruction::Call { .. }
-            | Instruction::IndirectCall { .. }
-            | Instruction::InlineAsm { .. }
-            | Instruction::Alloca { .. }
-            | Instruction::VaStart { .. }
-            | Instruction::VaEnd { .. }
-            | Instruction::VaCopy { .. }
-            | Instruction::VaArg { .. }
-            | Instruction::Simd { .. }
-        )
+        match self {
+            Instruction::Load { volatile: true, .. } => true,
+            _ => matches!(self,
+                Instruction::Store { .. }
+                | Instruction::Call { .. }
+                | Instruction::IndirectCall { .. }
+                | Instruction::InlineAsm { .. }
+                | Instruction::Alloca { .. }
+                | Instruction::VaStart { .. }
+                | Instruction::VaEnd { .. }
+                | Instruction::VaCopy { .. }
+                | Instruction::VaArg { .. }
+                | Instruction::Simd { .. }
+            )
+        }
     }
 }
 

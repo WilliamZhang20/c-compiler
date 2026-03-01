@@ -15,7 +15,7 @@ impl Lowerer {
     pub(crate) fn get_type_size(&mut self, ty: &Type) -> i64 {
         // Fast path – leaf types never need the cache
         match ty {
-            Type::Int | Type::UnsignedInt => return 4,
+            Type::Int | Type::UnsignedInt | Type::Enum(_) => return 4,
             Type::Bool => return 1,
             Type::Char | Type::UnsignedChar => return 1,
             Type::Short | Type::UnsignedShort => return 2,
@@ -24,7 +24,7 @@ impl Lowerer {
             Type::Float => return 4,
             Type::Double => return 8,
             Type::Void => return 0,
-            Type::Pointer(_) | Type::FunctionPointer { .. } => return 8,
+            Type::Pointer(_, ..) | Type::FunctionPointer { .. } => return 8,
             _ => {}
         }
 
@@ -75,16 +75,18 @@ impl Lowerer {
         TypeLayout::is_float_type(ty)
     }
 
-    /// Get the byte offset and type of a struct/union member.
-    pub(crate) fn get_member_offset(&mut self, struct_or_union_name: &str, member_name: &str) -> (i64, Type) {
-        let (offset, ty) = self.type_layout().member_offset(struct_or_union_name, member_name);
-        (offset as i64, ty)
+    /// Get the byte offset and type of a struct/union member, plus optional bitfield info.
+    pub(crate) fn get_member_offset(&mut self, struct_or_union_name: &str, member_name: &str) -> (i64, Type, Option<model::BitfieldInfo>) {
+        let (offset, ty, bf_info) = self.type_layout().member_offset(struct_or_union_name, member_name);
+        (offset as i64, ty, bf_info)
     }
 
     /// Check if two types are compatible for _Generic matching.
     pub(crate) fn types_compatible(&self, a: &Type, b: &Type) -> bool {
         match (a, b) {
             (Type::Int, Type::Int) => true,
+            (Type::Enum(_), Type::Int) | (Type::Int, Type::Enum(_)) => true,
+            (Type::Enum(a), Type::Enum(b)) if a == b => true,
             (Type::Char, Type::Char) => true,
             (Type::Short, Type::Short) => true,
             (Type::Long, Type::Long) => true,
@@ -96,7 +98,7 @@ impl Lowerer {
             (Type::UnsignedShort, Type::UnsignedShort) => true,
             (Type::UnsignedInt, Type::UnsignedInt) => true,
             (Type::UnsignedLong, Type::UnsignedLong) => true,
-            (Type::Pointer(a_inner), Type::Pointer(b_inner)) => self.types_compatible(a_inner, b_inner),
+            (Type::Pointer(a_inner, ..), Type::Pointer(b_inner, ..)) => self.types_compatible(a_inner, b_inner),
             (Type::Array(a_inner, _), Type::Array(b_inner, _)) => self.types_compatible(a_inner, b_inner),
             (Type::Struct(a_name), Type::Struct(b_name)) => a_name == b_name,
             (Type::Union(a_name), Type::Union(b_name)) => a_name == b_name,

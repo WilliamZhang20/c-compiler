@@ -25,7 +25,7 @@ impl Lowerer {
             AstExpr::Index { array, index } => {
                 let array_type = self.get_expr_type(array);
                 let base_addr = match &array_type {
-                    Type::Pointer(_) => {
+                    Type::Pointer(_, ..) => {
                         // For pointer indexing, we need the pointer's value, not its address.
                         // The base may be a Var or a Global (e.g. string literal "..."[i]).
                         let operand = self.lower_expr(array)?;
@@ -52,7 +52,7 @@ impl Lowerer {
                 let dest = self.new_var();
                 let element_type = match array_type {
                     Type::Array(inner, _) => *inner,
-                    Type::Pointer(inner) => *inner,
+                    Type::Pointer(inner, ..) => *inner,
                     _ => Type::Int, // fallback
                 };
                 let bid = self.current_block.ok_or("Index outside of block")?;
@@ -80,7 +80,7 @@ impl Lowerer {
                     Type::Union(name) => name.clone(),
                     _ => return Err(format!("Member access on non-struct/union type {:?}", expr_type)),
                 };
-                let (offset, _) = self.get_member_offset(&type_name, member); 
+                let (offset, _, _) = self.get_member_offset(&type_name, member); 
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,
@@ -99,7 +99,7 @@ impl Lowerer {
                 // Get the struct/union type from the pointer
                 let expr_type = self.get_expr_type(expr);
                 let type_name = match &expr_type {
-                    Type::Pointer(inner) => {
+                    Type::Pointer(inner, ..) => {
                         match &**inner {
                             Type::Struct(name) => name.clone(),
                             Type::Union(name) => name.clone(),
@@ -108,7 +108,7 @@ impl Lowerer {
                     }
                     _ => return Err(format!("-> operator on non-pointer type {:?}", expr_type)),
                 };
-                let (offset, _) = self.get_member_offset(&type_name, member);
+                let (offset, _, _) = self.get_member_offset(&type_name, member);
                 let dest = self.new_var();
                 self.blocks[bid.0].instructions.push(Instruction::GetElementPtr {
                     dest,

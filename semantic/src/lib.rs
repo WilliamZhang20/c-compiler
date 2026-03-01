@@ -61,7 +61,7 @@ impl SemanticAnalyzer {
             }
             
             // Validate restrict on pointers only
-            if global.qualifiers.is_restrict && !matches!(global.r#type, Type::Pointer(_)) {
+            if global.qualifiers.is_restrict && !matches!(global.r#type, Type::Pointer(_, ..)) {
                 return Err(format!("'restrict' can only be applied to pointer types"));
             }
             
@@ -134,7 +134,7 @@ impl SemanticAnalyzer {
         match stmt {
             Stmt::Declaration { r#type, qualifiers, name, init } => {
                 // Validate restrict on pointers only
-                if qualifiers.is_restrict && !matches!(r#type, Type::Pointer(_)) {
+                if qualifiers.is_restrict && !matches!(r#type, Type::Pointer(_, ..)) {
                     return Err(format!("'restrict' can only be applied to pointer types"));
                 }
                 
@@ -356,6 +356,9 @@ impl SemanticAnalyzer {
                 for (_ty, expr) in associations {
                     self.analyze_expr(expr)?;
                 }
+            }
+            Expr::VaArg { list, .. } => {
+                self.analyze_expr(list)?;
             }
         }
         Ok(())

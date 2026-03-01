@@ -114,6 +114,10 @@ pub struct TargetConfig {
     pub platform: Platform,
     pub calling_convention: CallingConvention,
     pub simd_level: SimdLevel,
+    /// When true, do not use the 128-byte red zone below RSP (kernel code).
+    pub no_red_zone: bool,
+    /// When true, do not emit SSE/FPU instructions (kernel code).
+    pub no_sse: bool,
 }
 
 impl TargetConfig {
@@ -124,6 +128,8 @@ impl TargetConfig {
             platform,
             calling_convention: CallingConvention::for_platform(platform),
             simd_level: SimdLevel::detect(),
+            no_red_zone: false,
+            no_sse: false,
         }
     }
 
@@ -133,6 +139,8 @@ impl TargetConfig {
             platform,
             calling_convention: CallingConvention::for_platform(platform),
             simd_level: SimdLevel::detect(),
+            no_red_zone: false,
+            no_sse: false,
         }
     }
 }

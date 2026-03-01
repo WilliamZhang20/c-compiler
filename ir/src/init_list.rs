@@ -63,6 +63,7 @@ impl Lowerer {
                         addr: Operand::Var(dest_var),
                         src: val,
                         value_type: elem_type.clone(),
+                        volatile: false,
                     });
                 }
             }
@@ -118,7 +119,8 @@ impl Lowerer {
             let (offset, field_type) = if is_union {
                 (0i64, field.field_type.clone())
             } else {
-                self.get_member_offset(&type_name, &field.name)
+                let (off, ty, _bf) = self.get_member_offset(&type_name, &field.name);
+                (off, ty)
             };
 
             let dest_var = if offset == 0 {
@@ -153,6 +155,7 @@ impl Lowerer {
                         addr: Operand::Var(dest_var),
                         src: val,
                         value_type: field_type.clone(),
+                        volatile: false,
                     });
                 }
             }

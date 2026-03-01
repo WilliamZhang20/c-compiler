@@ -13,7 +13,7 @@ fn type_load_info(value_type: &Type) -> (bool, bool, bool, bool, bool, bool) {
         Type::UnsignedChar => (false, false, true, false, false, true),
         Type::Short  => (false, false, false, true, false, false),
         Type::UnsignedShort => (false, false, false, true, false, true),
-        Type::Int | Type::UnsignedInt => (false, false, false, false, true, matches!(value_type, Type::UnsignedInt)),
+        Type::Int | Type::UnsignedInt | Type::Enum(_) => (false, false, false, false, true, matches!(value_type, Type::UnsignedInt)),
         Type::Typedef(name) => match name.as_str() {
             "int8_t"  | "int8"  => (false, false, true, false, false, false),
             "uint8_t" | "uint8" => (false, false, true, false, false, true),

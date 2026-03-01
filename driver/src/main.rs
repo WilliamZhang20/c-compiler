@@ -78,6 +78,30 @@ struct Args {
     /// Freestanding environment (no hosted assumptions)
     #[arg(long)]
     ffreestanding: bool,
+
+    /// Do not use the 128-byte red zone below RSP
+    #[arg(long = "mno-red-zone")]
+    mno_red_zone: bool,
+
+    /// Disable SSE/FPU instruction generation
+    #[arg(long = "mno-sse")]
+    mno_sse: bool,
+
+    /// Disable MMX instruction generation
+    #[arg(long = "mno-mmx")]
+    mno_mmx: bool,
+
+    /// Disable x87 FPU instruction generation
+    #[arg(long = "mno-80387")]
+    mno_80387: bool,
+
+    /// Disable stack protector
+    #[arg(long = "fno-stack-protector")]
+    fno_stack_protector: bool,
+
+    /// Do not omit frame pointer
+    #[arg(long = "fno-omit-frame-pointer")]
+    fno_omit_frame_pointer: bool,
 }
 
 fn main() {
@@ -199,7 +223,10 @@ fn main() {
         }
 
         log!("Step 7: Code Generation...");
-        let mut codegen = codegen::Codegen::new();
+        let mut target = model::TargetConfig::host();
+        target.no_red_zone = args.mno_red_zone;
+        target.no_sse = args.mno_sse || args.mno_80387;
+        let mut codegen = codegen::Codegen::with_target(target);
         let asm = codegen.gen_program(&ir_prog);
         log!("Step 7: Done");
 
@@ -225,6 +252,15 @@ fn main() {
         return;
     }
 
+    // Collect machine flags to forward to GCC assembler and linker
+    let mut machine_flags = Vec::new();
+    if args.mno_red_zone { machine_flags.push("-mno-red-zone".to_string()); }
+    if args.mno_sse { machine_flags.push("-mno-sse".to_string()); }
+    if args.mno_mmx { machine_flags.push("-mno-mmx".to_string()); }
+    if args.mno_80387 { machine_flags.push("-mno-80387".to_string()); }
+    if args.fno_stack_protector { machine_flags.push("-fno-stack-protector".to_string()); }
+    if args.fno_omit_frame_pointer { machine_flags.push("-fno-omit-frame-pointer".to_string()); }
+
     // -c: assemble each .s to .o, skip linking
     if compile_only {
         for asm_path in &asm_paths {
@@ -234,7 +270,7 @@ fn main() {
             } else {
                 asm_path.replace(".s", ".o")
             };
-            assemble(asm_path, &obj_path);
+            assemble(asm_path, &obj_path, &machine_flags);
         }
         for path in preprocessed_paths {
             cleanup(&path);
@@ -258,7 +294,7 @@ fn main() {
     };
 
     log!("Step 8: Linking...");
-    run_linker(&asm_paths, &output_name, nostdlib, ffreestanding);
+    run_linker(&asm_paths, &output_name, nostdlib, ffreestanding, &machine_flags);
     log!("Step 8: Done");
     println!("Compilation successful. Generated executable: {}", output_name);
 
@@ -298,9 +334,11 @@ fn preprocess(input_path: &str, input_file: &Path, extra_args: &[String]) -> Str
     preprocessed_path
 }
 
-fn assemble(asm_path: &str, obj_path: &str) {
-    let exit_code = Command::new("gcc")
-        .args(["-c", asm_path, "-o", obj_path])
+fn assemble(asm_path: &str, obj_path: &str, extra_flags: &[String]) {
+    let mut cmd = Command::new("gcc");
+    cmd.args(["-c", asm_path, "-o", obj_path]);
+    for flag in extra_flags { cmd.arg(flag); }
+    let exit_code = cmd
         .status()
         .expect("failed to run gcc assembler");
 
@@ -312,7 +350,7 @@ fn assemble(asm_path: &str, obj_path: &str) {
     }
 }
 
-fn run_linker(asm_paths: &[String], output_file: &str, nostdlib: bool, ffreestanding: bool) {
+fn run_linker(asm_paths: &[String], output_file: &str, nostdlib: bool, ffreestanding: bool, extra_flags: &[String]) {
     let platform = model::Platform::host();
 
     let mut args = Vec::new();
@@ -336,6 +374,11 @@ fn run_linker(asm_paths: &[String], output_file: &str, nostdlib: bool, ffreestan
     }
     if ffreestanding {
         args.push("-ffreestanding".to_string());
+    }
+
+    // Forward machine flags
+    for flag in extra_flags {
+        args.push(flag.clone());
     }
 
     let exit_code = Command::new("gcc")

@@ -34,6 +34,10 @@ pub struct FunctionGenerator<'a> {
     /// Maps IR VarIds to XMM/YMM register indices for vector operations
     pub(crate) simd_reg_map: HashMap<VarId, u8>,
     pub(crate) next_simd_reg: u8,
+    /// Offset from RBP to the start of the register save area (for variadic functions)
+    pub(crate) va_save_area_offset: Option<i32>,
+    /// Next synthetic VarId for codegen-generated temporaries
+    pub(crate) next_temp_var: usize,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -69,6 +73,8 @@ impl<'a> FunctionGenerator<'a> {
             current_block: BlockId(0),
             simd_reg_map: HashMap::new(),
             next_simd_reg: 0,
+            va_save_area_offset: None,
+            next_temp_var: 100_000, // Start high to avoid collisions with IR-generated VarIds
         }
     }
 
@@ -100,9 +106,21 @@ impl<'a> FunctionGenerator<'a> {
         
         self.asm.push(X86Instr::Label(func.name.clone()));
         
+        // CFI: start procedure
+        if matches!(self.target.platform, model::Platform::Linux) {
+            self.asm.push(X86Instr::Raw(".cfi_startproc".to_string()));
+        }
+        
         // Prologue
         self.asm.push(X86Instr::Push(X86Reg::Rbp));
+        if matches!(self.target.platform, model::Platform::Linux) {
+            self.asm.push(X86Instr::Raw(".cfi_def_cfa_offset 16".to_string()));
+            self.asm.push(X86Instr::Raw(".cfi_offset rbp, -16".to_string()));
+        }
         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rbp), X86Operand::Reg(X86Reg::Rsp)));
+        if matches!(self.target.platform, model::Platform::Linux) {
+            self.asm.push(X86Instr::Raw(".cfi_def_cfa_register rbp".to_string()));
+        }
         
         // Push callee-saved registers
         for reg in &self.current_saved_regs {
@@ -123,12 +141,20 @@ impl<'a> FunctionGenerator<'a> {
 
         let shadow_space = convention.shadow_space_size() as i32;
 
-        // Spill register parameters to shadow space if variadic
+        // Spill register parameters to a local save area if variadic.
+        // On SysV AMD64, we allocate 48 bytes (6 GP regs × 8) below the frame.
         if uses_va_start {
+            // Allocate save area slots
+            let save_base = self.next_slot;
             for (i, reg) in convention.param_regs().iter().enumerate() {
-                let offset = 16 + (i * 8) as i32;
-                self.asm.push(X86Instr::Mov(X86Operand::Mem(X86Reg::Rbp, offset), X86Operand::Reg(reg.clone())));
+                let slot_offset = save_base + (i * 8) as i32 + 8;
+                self.asm.push(X86Instr::Mov(
+                    X86Operand::Mem(X86Reg::Rbp, -(slot_offset as i32)),
+                    X86Operand::Reg(reg.clone())));
             }
+            // Record the save area base for va_start to reference
+            self.va_save_area_offset = Some(save_base + 8);
+            self.next_slot += (convention.param_regs().len() * 8) as i32;
         }
 
         // Handle parameters
@@ -138,12 +164,85 @@ impl<'a> FunctionGenerator<'a> {
         // Build a list of (source_reg, dest_op) pairs to handle conflicts
         let mut param_moves: Vec<(X86Operand, X86Operand, bool)> = Vec::new();
         
-        for (i, (param_type, var)) in func.params.iter().enumerate() {
+        // Track actual register index (struct params may consume >1 register)
+        let mut reg_idx = 0usize;
+        let mut float_reg_idx = 0usize;
+        
+        for (_i, (param_type, var)) in func.params.iter().enumerate() {
             // Record parameter type for later use
             self.var_types.insert(*var, param_type.clone());
             
-            // Parameters always go to their stack slots, not registers
-            // This ensures they're preserved across function calls that clobber parameter registers
+            // Check if this is a struct parameter passed by value
+            let struct_class = crate::call_ops::classify_struct_arg(&self, param_type);
+            
+            if let Some(class) = struct_class {
+                // Struct parameter — assemble register values into the alloca buffer
+                let buffer_offset = self.alloca_buffers.get(var).copied()
+                    .unwrap_or_else(|| {
+                        let slot = self.get_or_create_slot(*var);
+                        slot
+                    });
+                
+                match class {
+                    crate::call_ops::StructArgClass::OneReg => {
+                        if reg_idx < param_regs.len() {
+                            param_moves.push((
+                                X86Operand::Reg(param_regs[reg_idx].clone()),
+                                X86Operand::Mem(X86Reg::Rbp, buffer_offset),
+                                false,
+                            ));
+                            reg_idx += 1;
+                        } else {
+                            // From stack
+                            let offset = 16 + shadow_space + ((reg_idx - param_regs.len()) * 8) as i32;
+                            self.asm.push(X86Instr::Mov(
+                                X86Operand::Reg(X86Reg::Rax),
+                                X86Operand::Mem(X86Reg::Rbp, offset),
+                            ));
+                            self.asm.push(X86Instr::Mov(
+                                X86Operand::Mem(X86Reg::Rbp, buffer_offset),
+                                X86Operand::Reg(X86Reg::Rax),
+                            ));
+                            reg_idx += 1;
+                        }
+                    }
+                    crate::call_ops::StructArgClass::TwoReg => {
+                        // First eightbyte
+                        if reg_idx < param_regs.len() {
+                            param_moves.push((
+                                X86Operand::Reg(param_regs[reg_idx].clone()),
+                                X86Operand::Mem(X86Reg::Rbp, buffer_offset),
+                                false,
+                            ));
+                        }
+                        reg_idx += 1;
+                        // Second eightbyte
+                        if reg_idx < param_regs.len() {
+                            param_moves.push((
+                                X86Operand::Reg(param_regs[reg_idx].clone()),
+                                X86Operand::Mem(X86Reg::Rbp, buffer_offset + 8),
+                                false,
+                            ));
+                        }
+                        reg_idx += 1;
+                    }
+                    crate::call_ops::StructArgClass::Memory => {
+                        // Large struct → pointer was passed in register
+                        if reg_idx < param_regs.len() {
+                            param_moves.push((
+                                X86Operand::Reg(param_regs[reg_idx].clone()),
+                                X86Operand::Mem(X86Reg::Rbp, self.stack_slots.get(var).copied()
+                                    .unwrap_or_else(|| self.get_or_create_slot(*var))),
+                                false,
+                            ));
+                        }
+                        reg_idx += 1;
+                    }
+                }
+                continue;
+            }
+            
+            // Non-struct parameter handling (original logic)
             let dest = if let Some(&buffer_offset) = self.alloca_buffers.get(var) {
                 X86Operand::Mem(X86Reg::Rbp, buffer_offset)
             } else if let Some(var_type) = self.var_types.get(var) {
@@ -161,23 +260,24 @@ impl<'a> FunctionGenerator<'a> {
             
             let is_float = matches!(param_type, Type::Float | Type::Double);
             
-            if i < param_regs.len() {
-                if is_float && i < float_regs.len() {
-                    // Float parameters come in XMM registers
-                    let src = X86Operand::Reg(float_regs[i].clone());
+            if is_float {
+                if float_reg_idx < float_regs.len() {
+                    let src = X86Operand::Reg(float_regs[float_reg_idx].clone());
                     if src != dest {
                         param_moves.push((src, dest, true));
                     }
-                } else if !is_float {
-                    // Integer/pointer parameters come in general-purpose registers
-                    let src = X86Operand::Reg(param_regs[i].clone());
-                    if src != dest {
-                        param_moves.push((src, dest, false));
-                    }
+                    float_reg_idx += 1;
                 }
+                reg_idx += 1;
+            } else if reg_idx < param_regs.len() {
+                let src = X86Operand::Reg(param_regs[reg_idx].clone());
+                if src != dest {
+                    param_moves.push((src, dest, false));
+                }
+                reg_idx += 1;
             } else {
                 // Parameters beyond register count are on the stack
-                let offset = 16 + shadow_space + ((i - param_regs.len()) * 8) as i32;
+                let offset = 16 + shadow_space + ((reg_idx - param_regs.len()) * 8) as i32;
                 if is_float {
                     self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::FloatMem(X86Reg::Rbp, offset as i32)));
                     self.asm.push(X86Instr::Movss(dest, X86Operand::Reg(X86Reg::Xmm0)));
@@ -185,6 +285,7 @@ impl<'a> FunctionGenerator<'a> {
                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset as i32)));
                     self.asm.push(X86Instr::Mov(dest, X86Operand::Reg(X86Reg::Rax)));
                 }
+                reg_idx += 1;
             }
         }
         
@@ -452,12 +553,12 @@ impl<'a> FunctionGenerator<'a> {
             }
             IrInstruction::Phi { .. } => {}
             IrInstruction::Alloca { dest, r#type } => {
-                self.var_types.insert(*dest, Type::Pointer(Box::new(r#type.clone())));
+                self.var_types.insert(*dest, Type::ptr(r#type.clone()));
             }
-            IrInstruction::Load { dest, addr, value_type } => {
+            IrInstruction::Load { dest, addr, value_type, .. } => {
                 gen_load(self, *dest, addr, value_type);
             }
-            IrInstruction::Store { addr, src, value_type } => {
+            IrInstruction::Store { addr, src, value_type, .. } => {
                 gen_store(self, addr, src, value_type);
             }
             IrInstruction::GetElementPtr { dest, base, index, element_type } => {
@@ -469,21 +570,30 @@ impl<'a> FunctionGenerator<'a> {
             IrInstruction::IndirectCall { dest, func_ptr, args } => {
                 gen_indirect_call(self, dest, func_ptr, args);
             }
-            IrInstruction::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
-                self.gen_inline_asm(template, outputs, inputs, clobbers, *is_volatile);
+            IrInstruction::InlineAsm { template, outputs, inputs, output_constraints, input_constraints, clobbers, is_volatile } => {
+                self.gen_inline_asm(template, outputs, inputs, output_constraints, input_constraints, clobbers, *is_volatile);
             }
             IrInstruction::VaStart { list, arg_index } => {
-                // Windows x64: Arguments are contiguous in stack (Shadow Space + Stack Args)
-                // Next param is at index + 1
-                // Offset = 16 (return addr + saved RBP) + (arg_index + 1) * 8
-                let offset = 16 + (arg_index + 1) * 8;
-                
-                // LEA RAX, [RBP + offset]
-                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset as i32)));
-                
-                // Store RAX into *list. list is Operand::Var(alloca). var_to_op is [RBP - offset].
-                // So MOV [RBP - offset], RAX
-                // Since `list` is char*, and var_to_op returns the location of that variable (e.g. pointer on stack)
+                // va_list is a simple pointer to the next argument.
+                // The register save area is at known negative offsets from RBP.
+                // va_start(ap, last_fixed): ap = &save_area[arg_index + 1]
+                // where arg_index is the index of the last fixed parameter.
+                let next_index = *arg_index + 1;
+                if let Some(save_base) = self.va_save_area_offset {
+                    // Point to the next argument in the register save area
+                    let offset = save_base + (next_index * 8) as i32;
+                    self.asm.push(X86Instr::Lea(
+                        X86Operand::Reg(X86Reg::Rax),
+                        X86Operand::Mem(X86Reg::Rbp, -(offset as i32)),
+                    ));
+                } else {
+                    // Fallback for non-variadic (shouldn't happen)
+                    let offset = 16 + next_index * 8;
+                    self.asm.push(X86Instr::Lea(
+                        X86Operand::Reg(X86Reg::Rax),
+                        X86Operand::Mem(X86Reg::Rbp, offset as i32),
+                    ));
+                }
                 let list_dest = self.operand_to_op(list);
                 self.asm.push(X86Instr::Mov(list_dest, X86Operand::Reg(X86Reg::Rax)));
             }
@@ -496,8 +606,19 @@ impl<'a> FunctionGenerator<'a> {
                 let d_op = self.operand_to_op(dest);
                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
             }
-            IrInstruction::VaArg { .. } => {
-                // Needs implementation if __builtin_va_arg is used
+            IrInstruction::VaArg { dest, list, r#type } => {
+                // va_arg(ap, type): load value from *ap, then advance ap by 8
+                // 1. Load current ap value (pointer to next arg)
+                let list_op = self.operand_to_op(list);
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), list_op.clone()));
+                // 2. Load the value from [rax] — always 8 bytes (all passed as 64-bit on stack)
+                self.asm.push(X86Instr::Raw("mov rcx, [rax]".to_string()));
+                let dest_op = self.var_to_op(*dest);
+                let _ = r#type; // Type info not needed for simple pointer-based va_arg
+                self.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rcx)));
+                // 3. Advance ap by 8
+                self.asm.push(X86Instr::Raw("add rax, 8".to_string()));
+                self.asm.push(X86Instr::Mov(list_op, X86Operand::Reg(X86Reg::Rax)));
             }
             IrInstruction::Simd { op, dest, operands, elem_type, width } => {
                 self.gen_simd_instruction(op, dest, operands, elem_type, *width);
@@ -505,10 +626,15 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
 
+    /// Create a new temporary VarId for codegen use (e.g., struct decomposition).
+    pub(crate) fn new_temp_var(&mut self) -> VarId {
+        let id = self.next_temp_var;
+        self.next_temp_var += 1;
+        VarId(id)
+    }
 
 
-
-    fn get_or_create_slot(&mut self, var: VarId) -> i32 {
+    pub(crate) fn get_or_create_slot(&mut self, var: VarId) -> i32 {
         if let Some(slot) = self.stack_slots.get(&var) {
             return *slot;
         }

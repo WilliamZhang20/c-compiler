@@ -4,6 +4,143 @@ use crate::x86::{X86Instr, X86Operand, X86Reg};
 use model::Type;
 use ir::{VarId, Operand};
 
+// ─── SysV AMD64 struct classification ───────────────────────────
+
+/// How a struct argument should be passed per SysV AMD64 ABI.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StructArgClass {
+    /// Struct fits in 1 GP register (size ≤ 8 bytes)
+    OneReg,
+    /// Struct fits in 2 GP registers (8 < size ≤ 16 bytes)
+    TwoReg,
+    /// Struct must be passed in memory (size > 16 bytes)
+    Memory,
+}
+
+/// Classify a struct for SysV AMD64 argument passing.
+/// Returns None if the type is not a struct/union, Some(class) otherwise.
+pub(crate) fn classify_struct_arg(generator: &FunctionGenerator, ty: &Type) -> Option<StructArgClass> {
+    let size = match ty {
+        Type::Struct(name) => {
+            if let Some(s_def) = generator.structs.get(name) {
+                let is_packed = s_def.attributes.iter()
+                    .any(|attr| matches!(attr, model::Attribute::Packed));
+                model::TypeLayout::new(generator.structs, generator.unions).struct_size(s_def, is_packed)
+            } else {
+                return None;
+            }
+        }
+        Type::Union(name) => {
+            if let Some(u_def) = generator.unions.get(name) {
+                u_def.fields.iter()
+                    .map(|f| model::TypeLayout::new(generator.structs, generator.unions).size_of(&f.field_type))
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(if size <= 8 {
+        StructArgClass::OneReg
+    } else if size <= 16 {
+        StructArgClass::TwoReg
+    } else {
+        StructArgClass::Memory
+    })
+}
+
+/// Get the size of a struct/union type using the layout calculator.
+fn get_aggregate_size(generator: &FunctionGenerator, ty: &Type) -> usize {
+    model::TypeLayout::new(generator.structs, generator.unions).size_of(ty)
+}
+
+/// Pre-process call arguments for SysV AMD64 struct by-value passing.
+/// Small structs (≤16 bytes) are decomposed into 1-2 qword loads;
+/// large structs (>16 bytes) are passed by pointer (address).
+/// Returns a new flattened arg list and the emitted instructions to load struct eightbytes.
+fn flatten_struct_args(
+    generator: &mut FunctionGenerator,
+    args: &[Operand],
+) -> Vec<Operand> {
+    let mut flat_args = Vec::new();
+
+    for arg in args {
+        let arg_type = match arg {
+            Operand::Var(v) => generator.var_types.get(v).cloned(),
+            _ => None,
+        };
+
+        let class = arg_type.as_ref().and_then(|ty| classify_struct_arg(generator, ty));
+
+        match class {
+            Some(StructArgClass::OneReg) => {
+                // Load the struct's first (and only) eightbyte into a temp var
+                if let Operand::Var(var) = arg {
+                    if let Some(&off) = generator.alloca_buffers.get(var) {
+                        // Load from the alloca buffer
+                        let temp = generator.new_temp_var();
+                        let slot = generator.get_or_create_slot(temp);
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Reg(X86Reg::Rax),
+                            X86Operand::Mem(X86Reg::Rbp, off),
+                        ));
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Mem(X86Reg::Rbp, slot),
+                            X86Operand::Reg(X86Reg::Rax),
+                        ));
+                        flat_args.push(Operand::Var(temp));
+                        continue;
+                    }
+                }
+                // Fallback: pass as-is (pointer)
+                flat_args.push(arg.clone());
+            }
+            Some(StructArgClass::TwoReg) => {
+                // Load both eightbytes into temp vars
+                if let Operand::Var(var) = arg {
+                    if let Some(&off) = generator.alloca_buffers.get(var) {
+                        let temp1 = generator.new_temp_var();
+                        let slot1 = generator.get_or_create_slot(temp1);
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Reg(X86Reg::Rax),
+                            X86Operand::Mem(X86Reg::Rbp, off),
+                        ));
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Mem(X86Reg::Rbp, slot1),
+                            X86Operand::Reg(X86Reg::Rax),
+                        ));
+
+                        let temp2 = generator.new_temp_var();
+                        let slot2 = generator.get_or_create_slot(temp2);
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Reg(X86Reg::Rax),
+                            X86Operand::Mem(X86Reg::Rbp, off + 8),
+                        ));
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Mem(X86Reg::Rbp, slot2),
+                            X86Operand::Reg(X86Reg::Rax),
+                        ));
+
+                        flat_args.push(Operand::Var(temp1));
+                        flat_args.push(Operand::Var(temp2));
+                        continue;
+                    }
+                }
+                flat_args.push(arg.clone());
+            }
+            Some(StructArgClass::Memory) | None => {
+                // Large struct → pass by pointer (existing behavior: LEA the alloca)
+                // Non-struct → pass as-is
+                flat_args.push(arg.clone());
+            }
+        }
+    }
+
+    flat_args
+}
+
 /// A pending assignment to a param register.
 enum ParamMove {
     /// emit: lea param_reg, operand
@@ -149,6 +286,49 @@ fn emit_parallel_int_moves(generator: &mut FunctionGenerator,
 
 /// Store a call's return value into the destination variable.
 fn store_call_result(generator: &mut FunctionGenerator, dest: VarId, ret_type: Option<&Type>) {
+    // Check for struct return type
+    if let Some(ty) = ret_type {
+        if let Some(class) = classify_struct_arg(generator, ty) {
+            let size = get_aggregate_size(generator, ty);
+            generator.var_types.insert(dest, ty.clone());
+            // Struct return values are stored into the dest alloca buffer
+            if let Some(&off) = generator.alloca_buffers.get(&dest) {
+                match class {
+                    StructArgClass::OneReg => {
+                        // Return value in RAX → store to alloca
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Mem(X86Reg::Rbp, off),
+                            X86Operand::Reg(X86Reg::Rax),
+                        ));
+                    }
+                    StructArgClass::TwoReg => {
+                        // Return value in RAX:RDX → store both eightbytes
+                        generator.asm.push(X86Instr::Mov(
+                            X86Operand::Mem(X86Reg::Rbp, off),
+                            X86Operand::Reg(X86Reg::Rax),
+                        ));
+                        if size > 8 {
+                            generator.asm.push(X86Instr::Mov(
+                                X86Operand::Mem(X86Reg::Rbp, off + 8),
+                                X86Operand::Reg(X86Reg::Rdx),
+                            ));
+                        }
+                    }
+                    StructArgClass::Memory => {
+                        // For MEMORY-class returns, the hidden pointer mechanism
+                        // means the callee wrote directly to our alloca via RDI.
+                        // Nothing to do here.
+                    }
+                }
+                return;
+            }
+            // No alloca — just store RAX as fallback
+            let d_op = generator.var_to_op(dest);
+            generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            return;
+        }
+    }
+
     let is_float = ret_type.map_or(false, |t| matches!(t, Type::Float | Type::Double));
     let is_double = ret_type.map_or(false, |t| matches!(t, Type::Double));
 
@@ -171,12 +351,226 @@ fn store_call_result(generator: &mut FunctionGenerator, dest: VarId, ret_type: O
 // ─── Public call generators ─────────────────────────────────────
 
 pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &str, args: &[Operand]) {
+    // Intercept __builtin_bswap* — emit inline bswap instruction
+    if (name == "__builtin_bswap16" || name == "__builtin_bswap32" || name == "__builtin_bswap64")
+        && args.len() == 1
+    {
+        if let Some(d) = dest {
+            let src_op = generator.operand_to_op(&args[0]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), src_op));
+            match name {
+                "__builtin_bswap64" => {
+                    generator.asm.push(X86Instr::Raw("bswap rax".to_string()));
+                }
+                "__builtin_bswap32" => {
+                    generator.asm.push(X86Instr::Raw("bswap eax".to_string()));
+                }
+                "__builtin_bswap16" => {
+                    generator.asm.push(X86Instr::Raw("rol ax, 8".to_string()));
+                }
+                _ => unreachable!(),
+            }
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __sync_synchronize — emit mfence
+    if name == "__sync_synchronize" {
+        generator.asm.push(X86Instr::Raw("mfence".to_string()));
+        return;
+    }
+
+    // Intercept __sync_val_compare_and_swap(ptr, old, new) → lock cmpxchg
+    if name == "__sync_val_compare_and_swap" && args.len() == 3 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let old_op = generator.operand_to_op(&args[1]);
+            let new_op = generator.operand_to_op(&args[2]);
+            // old → rax, new → rcx, ptr → rdx
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), old_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), new_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Raw("lock cmpxchg [rdx], rcx".to_string()));
+            // Result (old value) is in rax
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __sync_lock_test_and_set(ptr, val) → xchg
+    if name == "__sync_lock_test_and_set" && args.len() == 2 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let val_op = generator.operand_to_op(&args[1]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Raw("xchg [rdx], rax".to_string()));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __sync_lock_release(ptr) → mov [ptr], 0 + mfence
+    if name == "__sync_lock_release" && args.len() == 1 {
+        let ptr_op = generator.operand_to_op(&args[0]);
+        generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+        generator.asm.push(X86Instr::Raw("mov qword [rdx], 0".to_string()));
+        generator.asm.push(X86Instr::Raw("mfence".to_string()));
+        return;
+    }
+
+    // Intercept __sync_fetch_and_add/sub(ptr, val) → lock xadd / lock sub+mov
+    if (name == "__sync_fetch_and_add" || name == "__sync_fetch_and_sub") && args.len() == 2 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let val_op = generator.operand_to_op(&args[1]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val_op));
+            if name == "__sync_fetch_and_sub" {
+                generator.asm.push(X86Instr::Raw("neg rax".to_string()));
+            }
+            generator.asm.push(X86Instr::Raw("lock xadd [rdx], rax".to_string()));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __sync_fetch_and_{and,or,xor}(ptr, val) → CAS loop
+    if (name == "__sync_fetch_and_and" || name == "__sync_fetch_and_or" || name == "__sync_fetch_and_xor") && args.len() == 2 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let val_op = generator.operand_to_op(&args[1]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), val_op));
+            // CAS loop: rax = [rdx], rcx = val
+            generator.asm.push(X86Instr::Raw("mov rax, [rdx]".to_string()));
+            let label = format!(".Lsync_cas_{}", d.0);
+            generator.asm.push(X86Instr::Raw(format!("{}:", label)));
+            generator.asm.push(X86Instr::Raw("mov rsi, rax".to_string()));
+            let op_str = match name {
+                "__sync_fetch_and_and" => "and",
+                "__sync_fetch_and_or" => "or",
+                "__sync_fetch_and_xor" => "xor",
+                _ => unreachable!(),
+            };
+            generator.asm.push(X86Instr::Raw(format!("{} rsi, rcx", op_str)));
+            generator.asm.push(X86Instr::Raw("lock cmpxchg [rdx], rsi".to_string()));
+            generator.asm.push(X86Instr::Raw(format!("jne {}", label)));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __atomic_load_n(ptr, memorder) → mov from [ptr]
+    if name == "__atomic_load_n" && args.len() == 2 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Raw("mov rax, [rdx]".to_string()));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __atomic_store_n(ptr, val, memorder) → mov to [ptr]
+    if name == "__atomic_store_n" && args.len() == 3 {
+        let ptr_op = generator.operand_to_op(&args[0]);
+        let val_op = generator.operand_to_op(&args[1]);
+        generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+        generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val_op));
+        generator.asm.push(X86Instr::Raw("mov [rdx], rax".to_string()));
+        if let Some(d) = dest {
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __atomic_compare_exchange_n(ptr, expected, desired, weak, succ_order, fail_order) → lock cmpxchg
+    if name == "__atomic_compare_exchange_n" && args.len() >= 4 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let expected_op = generator.operand_to_op(&args[1]);
+            let desired_op = generator.operand_to_op(&args[2]);
+            // expected is a pointer — load expected value from it 
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rsi), expected_op));
+            generator.asm.push(X86Instr::Raw("mov rax, [rsi]".to_string()));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), desired_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Raw("lock cmpxchg [rdx], rcx".to_string()));
+            // On failure, store actual value back to *expected
+            generator.asm.push(X86Instr::Raw("mov [rsi], rax".to_string()));
+            // Result: 1 if success (ZF set), 0 if failure
+            generator.asm.push(X86Instr::Raw("sete al".to_string()));
+            generator.asm.push(X86Instr::Raw("movzx rax, al".to_string()));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __atomic_exchange_n(ptr, val, memorder) → xchg
+    if name == "__atomic_exchange_n" && args.len() == 3 {
+        if let Some(d) = dest {
+            let ptr_op = generator.operand_to_op(&args[0]);
+            let val_op = generator.operand_to_op(&args[1]);
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), val_op));
+            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+            generator.asm.push(X86Instr::Raw("xchg [rdx], rax".to_string()));
+            let dest_op = generator.var_to_op(*d);
+            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+        }
+        return;
+    }
+
+    // Intercept __atomic_fetch_{add,sub,and,or,xor}(ptr, val, memorder) 
+    if name.starts_with("__atomic_fetch_") && args.len() == 3 {
+        let op_name = &name["__atomic_fetch_".len()..];
+        if matches!(op_name, "add" | "sub" | "and" | "or" | "xor") {
+            if let Some(d) = dest {
+                let ptr_op = generator.operand_to_op(&args[0]);
+                let val_op = generator.operand_to_op(&args[1]);
+                generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rdx), ptr_op));
+                generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), val_op));
+                if op_name == "add" || op_name == "sub" {
+                    generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), X86Operand::Reg(X86Reg::Rcx)));
+                    if op_name == "sub" {
+                        generator.asm.push(X86Instr::Raw("neg rax".to_string()));
+                    }
+                    generator.asm.push(X86Instr::Raw("lock xadd [rdx], rax".to_string()));
+                } else {
+                    // CAS loop for and/or/xor
+                    generator.asm.push(X86Instr::Raw("mov rax, [rdx]".to_string()));
+                    let label = format!(".Latomic_cas_{}", d.0);
+                    generator.asm.push(X86Instr::Raw(format!("{}:", label)));
+                    generator.asm.push(X86Instr::Raw("mov rsi, rax".to_string()));
+                    generator.asm.push(X86Instr::Raw(format!("{} rsi, rcx", op_name)));
+                    generator.asm.push(X86Instr::Raw("lock cmpxchg [rdx], rsi".to_string()));
+                    generator.asm.push(X86Instr::Raw(format!("jne {}", label)));
+                }
+                let dest_op = generator.var_to_op(*d);
+                generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+            return;
+        }
+    }
+
     let convention = generator.convention();
     let param_regs = convention.param_regs();
     let float_regs = convention.float_param_regs();
     let shadow_space = convention.shadow_space_size();
 
-    let int_moves = marshal_args(generator, args, &param_regs, &float_regs, shadow_space);
+    // Flatten struct args: decompose small structs into register-sized values
+    let flat_args = flatten_struct_args(generator, args);
+
+    let int_moves = marshal_args(generator, &flat_args, &param_regs, &float_regs, shadow_space);
     emit_parallel_int_moves(generator, &param_regs, int_moves);
 
     generator.asm.push(X86Instr::Call(name.to_string()));
@@ -201,7 +595,10 @@ pub fn gen_indirect_call(generator: &mut FunctionGenerator, dest: &Option<VarId>
         generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R10), fp_op));
     }
 
-    let int_moves = marshal_args(generator, args, &param_regs, &float_regs, shadow_space);
+    // Flatten struct args: decompose small structs into register-sized values
+    let flat_args = flatten_struct_args(generator, args);
+
+    let int_moves = marshal_args(generator, &flat_args, &param_regs, &float_regs, shadow_space);
     emit_parallel_int_moves(generator, &param_regs, int_moves);
 
     generator.asm.push(X86Instr::CallIndirect(X86Operand::Reg(X86Reg::R10)));
