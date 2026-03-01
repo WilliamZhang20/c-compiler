@@ -21,8 +21,11 @@ use crate::loop_analysis::{self, NaturalLoop};
 /// A distance of 16 elements × 4 bytes = 64 bytes = 1 cache line ahead.
 const PREFETCH_DISTANCE: i64 = 16;
 
-/// Minimum trip count to insert prefetches (not worth it for small loops)
-const MIN_TRIP_COUNT: usize = 64;
+/// Minimum trip count to insert prefetches (not worth it for small loops).
+/// Hardware prefetchers handle sequential access well for in-cache data,
+/// so only insert software prefetches for very large iterations where the
+/// working set likely exceeds L2 cache significantly.
+const MIN_TRIP_COUNT: usize = 100_000;
 
 /// Run software prefetch insertion on all loops in a function
 pub fn insert_prefetches(func: &mut Function) {
@@ -594,7 +597,7 @@ mod tests {
                 bound: 100,
                 cmp_op: model::BinaryOp::Less,
             }),
-            trip_count: Some(100),
+            trip_count: Some(200_000),
         };
 
         let original_inst_count = func.blocks[2].instructions.len();

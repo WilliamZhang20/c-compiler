@@ -5,5 +5,9 @@ int fib(int n) {
 }
 
 int main() {
-    return fib(20);  // Returns 6765
+    int total = 0;
+    int i;
+    // fib(35) = 9227465, about 9M recursive calls
+    total = fib(35);
+    return total % 256;
 }

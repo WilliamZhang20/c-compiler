@@ -12,11 +12,14 @@ int popcount(int x) {
 
 int main() {
     int i;
+    int rep;
     int total = 0;
-    
-    for (i = 0; i < 1000; i = i + 1) {
-        total = total + popcount(i);
+
+    for (rep = 0; rep < 2000; rep = rep + 1) {
+        for (i = 0; i < 10000; i = i + 1) {
+            total = total + popcount(i);
+        }
     }
-    
+
     return total % 256;
 }

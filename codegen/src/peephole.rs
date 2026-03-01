@@ -48,6 +48,10 @@ pub(crate) fn default_rules() -> Vec<PeepholeRule> {
         PeepholeRule { name: "dead-store-after-load",     apply: rule_dead_store_after_load },
         PeepholeRule { name: "dead-store",                apply: rule_dead_store },
         PeepholeRule { name: "lea-to-add",                apply: rule_lea_to_add },
+        PeepholeRule { name: "mov-sub-mov-to-lea",        apply: rule_mov_sub_mov_to_lea },
+        PeepholeRule { name: "mov-add-mov-to-lea",        apply: rule_mov_add_mov_to_lea },
+        PeepholeRule { name: "movsx-elim",                apply: rule_movsx_elim },
+        PeepholeRule { name: "lea-mov-fold",              apply: rule_lea_mov_fold },
     ]
 }
 
@@ -695,6 +699,236 @@ fn rule_lea_to_add(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
     false
 }
 
+/// Pattern: mov rA, rB; sub rA, imm; mov rC, rA → lea rC, [rB + (-imm)]
+/// This is common for `n - 1` style expressions that are then passed as args.
+fn rule_mov_sub_mov_to_lea(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
+    if i + 2 >= instructions.len() { return false; }
+    if let (
+        X86Instr::Mov(X86Operand::Reg(ra), X86Operand::Reg(rb)),
+        X86Instr::Sub(X86Operand::Reg(ra2), X86Operand::Imm(imm)),
+        X86Instr::Mov(X86Operand::Reg(rc), X86Operand::Reg(ra3)),
+    ) = (&instructions[i], &instructions[i + 1], &instructions[i + 2]) {
+        if ra.same_physical(ra2) && ra.same_physical(ra3)
+            && !ra.same_physical(rb) // ensure ra is just a temp
+            && *imm >= -2147483648 && *imm <= 2147483647
+        {
+            // Check ra isn't used after this sequence (it was just a temp)
+            let is_ra_dead_after = !is_reg_used_before_redefined(instructions, i + 3, ra);
+            if is_ra_dead_after || ra.same_physical(rc) {
+                let offset = -(*imm as i32);
+                instructions[i] = X86Instr::Lea(
+                    X86Operand::Reg(rc.clone()),
+                    X86Operand::Mem(rb.clone(), offset),
+                );
+                instructions.remove(i + 2);
+                instructions.remove(i + 1);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Pattern: mov rA, rB; add rA, rC; mov rD, rA → lea rD, [rB + rC]
+/// (Only when rA is not used afterward — it was just a temp.)
+fn rule_mov_add_mov_to_lea(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
+    if i + 2 >= instructions.len() { return false; }
+    if let (
+        X86Instr::Mov(X86Operand::Reg(ra), X86Operand::Reg(rb)),
+        X86Instr::Add(X86Operand::Reg(ra2), X86Operand::Reg(rc)),
+        X86Instr::Mov(X86Operand::Reg(rd), X86Operand::Reg(ra3)),
+    ) = (&instructions[i], &instructions[i + 1], &instructions[i + 2]) {
+        if ra.same_physical(ra2) && ra.same_physical(ra3)
+            && !ra.same_physical(rb)
+        {
+            let is_ra_dead_after = !is_reg_used_before_redefined(instructions, i + 3, ra) || ra.same_physical(rd);
+            if is_ra_dead_after {
+                // lea rd, [rb + rc]
+                // We can't express [rb+rc] with our X86Operand, so use Raw
+                instructions[i] = X86Instr::Raw(
+                    format!("lea {}, [{} + {}]", rd.to_str(), rb.to_str(), rc.to_str())
+                );
+                instructions.remove(i + 2);
+                instructions.remove(i + 1);
+                return true;
+            }
+        }
+    }
+    // Also: mov rA, rB; add rA, imm; mov rD, rA → lea rD, [rB + imm]
+    if let (
+        X86Instr::Mov(X86Operand::Reg(ra), X86Operand::Reg(rb)),
+        X86Instr::Add(X86Operand::Reg(ra2), X86Operand::Imm(imm)),
+        X86Instr::Mov(X86Operand::Reg(rd), X86Operand::Reg(ra3)),
+    ) = (&instructions[i], &instructions[i + 1], &instructions[i + 2]) {
+        if ra.same_physical(ra2) && ra.same_physical(ra3)
+            && !ra.same_physical(rb)
+            && *imm >= -2147483648 && *imm <= 2147483647
+        {
+            let is_ra_dead_after = !is_reg_used_before_redefined(instructions, i + 3, ra) || ra.same_physical(rd);
+            if is_ra_dead_after {
+                instructions[i] = X86Instr::Lea(
+                    X86Operand::Reg(rd.clone()),
+                    X86Operand::Mem(rb.clone(), *imm as i32),
+                );
+                instructions.remove(i + 2);
+                instructions.remove(i + 1);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Pattern: mov eax, DWORD PTR [addr]; movsx rax, eax → movsxd rax, DWORD PTR [addr]
+/// Eliminates the redundant register-to-register sign extension.
+fn rule_movsx_elim(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
+    if i + 1 >= instructions.len() { return false; }
+    if let (
+        X86Instr::Mov(X86Operand::Reg(eax1), src @ X86Operand::DwordMem(..)),
+        X86Instr::Movsx(X86Operand::Reg(rax1), X86Operand::Reg(eax2)),
+    ) = (&instructions[i], &instructions[i + 1]) {
+        // Check eax1 and eax2 are the same 32-bit register
+        if eax1.same_physical(eax2) && eax1.same_physical(rax1) {
+            // Replace with: movsxd rax, DWORD PTR [addr]
+            instructions[i] = X86Instr::Raw(
+                format!("movsxd {}, {}", rax1.to_str(), src)
+            );
+            instructions.remove(i + 1);
+            return true;
+        }
+    }
+    false
+}
+
+/// Pattern: lea rA, [expr]; mov rB, rA → lea rB, [expr]  (when rA is dead after)
+fn rule_lea_mov_fold(instructions: &mut Vec<X86Instr>, i: usize) -> bool {
+    if i + 1 >= instructions.len() { return false; }
+    // Handle standard Lea instruction
+    if let (
+        X86Instr::Lea(X86Operand::Reg(ra), src),
+        X86Instr::Mov(X86Operand::Reg(rb), X86Operand::Reg(ra2)),
+    ) = (&instructions[i], &instructions[i + 1]) {
+        if ra.same_physical(ra2) && !ra.same_physical(rb) {
+            let is_ra_dead = !is_reg_used_before_redefined(instructions, i + 2, ra);
+            if is_ra_dead || ra.same_physical(rb) {
+                instructions[i] = X86Instr::Lea(X86Operand::Reg(rb.clone()), src.clone());
+                instructions.remove(i + 1);
+                return true;
+            }
+        }
+    }
+    // Handle Raw lea instruction (e.g., "lea rsi, [rbx + rdi]")
+    if let (
+        X86Instr::Raw(raw),
+        X86Instr::Mov(X86Operand::Reg(rb), X86Operand::Reg(ra2)),
+    ) = (&instructions[i], &instructions[i + 1]) {
+        if raw.starts_with("lea ") {
+            // Parse: "lea <reg>, [...]"
+            let rest = &raw[4..];
+            if let Some(comma_pos) = rest.find(',') {
+                let src_reg_str = rest[..comma_pos].trim();
+                let mem_expr = rest[comma_pos + 1..].trim();
+                if src_reg_str == ra2.to_str() {
+                    let is_ra_dead = !is_reg_used_before_redefined(instructions, i + 2, ra2);
+                    if is_ra_dead {
+                        instructions[i] = X86Instr::Raw(format!("lea {}, {}", rb.to_str(), mem_expr));
+                        instructions.remove(i + 1);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a register is used (read) before being redefined in the
+/// instruction stream starting from index `start`.
+fn is_reg_used_before_redefined(instructions: &[X86Instr], start: usize, reg: &X86Reg) -> bool {
+    for j in start..instructions.len() {
+        match &instructions[j] {
+            X86Instr::Label(_) => return true, // conservative: block boundary — assume used
+            X86Instr::Jmp(_) | X86Instr::Jcc(..) => return true,
+            X86Instr::Ret => {
+                // ret only reads rax (return value) and rsp (stack pointer)
+                let pid = reg.physical_id();
+                return pid == 0 || pid == 4; // rax=0, rsp=4
+            }
+            instr => {
+                let reads = instr_reads_reg(instr, reg);
+                let writes = instr_writes_reg(instr, reg);
+                // For Call/CallIndirect: if the register is a caller-saved register
+                // that the call clobbers, treat it as redefined rather than read.
+                // Our codegen's parallel-move algorithm sets up actual argument registers
+                // with direct mov/lea instructions, not via temporaries. So if a register
+                // reaches a call without being explicitly set as an argument by a preceding
+                // mov, it's just a leftover temporary that the call will clobber.
+                if reads && writes {
+                    match instr {
+                        X86Instr::Call(_) | X86Instr::CallIndirect(_) => return false,
+                        _ => {}
+                    }
+                }
+                if reads { return true; }
+                if writes { return false; }
+            }
+        }
+    }
+    false
+}
+
+/// Check if an instruction reads from a register.
+fn instr_reads_reg(instr: &X86Instr, reg: &X86Reg) -> bool {
+    match instr {
+        X86Instr::Mov(_, src) | X86Instr::Movsx(_, src) |
+        X86Instr::Movzx(_, src) => src.references_reg(reg),
+        X86Instr::Add(dst, src) | X86Instr::Sub(dst, src) |
+        X86Instr::Imul(dst, src) | X86Instr::And(dst, src) |
+        X86Instr::Or(dst, src) | X86Instr::Xor(dst, src) |
+        X86Instr::Cmp(dst, src) | X86Instr::Test(dst, src) |
+        X86Instr::Shl(dst, src) | X86Instr::Shr(dst, src) |
+        X86Instr::Sar(dst, src) => {
+            dst.references_reg(reg) || src.references_reg(reg)
+        }
+        X86Instr::Push(r) => r.same_physical(reg),
+        X86Instr::Neg(op) | X86Instr::Not(op) => op.references_reg(reg),
+        X86Instr::Lea(_, src) => src.references_reg(reg),
+        X86Instr::Call(_) | X86Instr::CallIndirect(_) => {
+            // Calls potentially read argument registers (rdi, rsi, rdx, rcx, r8, r9).
+            // Conservatively say they read all registers.
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Check if an instruction writes (defines) a register.
+fn instr_writes_reg(instr: &X86Instr, reg: &X86Reg) -> bool {
+    match instr {
+        X86Instr::Mov(dst, _) | X86Instr::Movsx(dst, _) |
+        X86Instr::Movzx(dst, _) | X86Instr::Lea(dst, _) => {
+            if let X86Operand::Reg(r) = dst { r.same_physical(reg) } else { false }
+        }
+        X86Instr::Add(dst, _) | X86Instr::Sub(dst, _) |
+        X86Instr::Imul(dst, _) | X86Instr::And(dst, _) |
+        X86Instr::Or(dst, _) | X86Instr::Xor(dst, _) |
+        X86Instr::Shl(dst, _) | X86Instr::Shr(dst, _) |
+        X86Instr::Sar(dst, _) => {
+            if let X86Operand::Reg(r) = dst { r.same_physical(reg) } else { false }
+        }
+        X86Instr::Pop(r) => r.same_physical(reg),
+        X86Instr::Neg(op) | X86Instr::Not(op) => {
+            if let X86Operand::Reg(r) = op { r.same_physical(reg) } else { false }
+        }
+        X86Instr::Call(_) | X86Instr::CallIndirect(_) => {
+            // Calls clobber all caller-saved registers: rax, rcx, rdx, rsi, rdi, r8-r11
+            let pid = reg.physical_id();
+            matches!(pid, 0 | 1 | 2 | 4 | 5 | 6 | 7 | 8 | 9)
+        }
+        _ => false,
+    }
+}
+
 /// Try to fold a LEA's computed address into the next instruction's memory operand.
 /// lea_dest: register set by the LEA (e.g., Rax)
 /// lea_base: base register of the LEA (e.g., Rbp)
@@ -838,7 +1072,28 @@ fn is_reg_live_from(
                     return true;
                 }
             }
-            X86Instr::Call(_) | X86Instr::CallIndirect(_) => return true,
+            X86Instr::Call(_) | X86Instr::CallIndirect(_) => {
+                // Calls clobber all caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11).
+                // If reg is caller-saved, the call redefines it, so check liveness AFTER the call.
+                // If reg is callee-saved, conservatively assume it's used.
+                let pid = reg.physical_id();
+                let is_caller_saved = matches!(pid, 0 | 1 | 2 | 4 | 5 | 6 | 7 | 8 | 9);
+                if is_caller_saved {
+                    // Call clobbers this register; continue scanning after the call
+                    // to see if it's actually live after.
+                    // But first: argument registers (rdi, rsi, rdx, rcx, r8, r9) are READ by the call.
+                    // Physical IDs: rdi=5, rsi=4, rdx=2, rcx=1, r8=6, r9=7
+                    let is_arg_reg = matches!(pid, 1 | 2 | 4 | 5 | 6 | 7);
+                    if is_arg_reg {
+                        return true; // conservatively assume it's a needed argument
+                    }
+                    // Non-argument caller-saved (rax=0, r10=8, r11=9): call clobbers them
+                    // Continue scanning past the call
+                    continue;
+                } else {
+                    return true; // callee-saved: conservatively assume used
+                }
+            }
             instr => {
                 if instr.reads_phys_reg(reg) { return true; }
                 if instr.writes_phys_reg(reg) { return false; }

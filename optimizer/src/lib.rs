@@ -30,8 +30,11 @@ mod block_layout;
 mod loop_interchange;
 pub mod loop_analysis;
 pub mod vectorize;
+mod inline;
+mod sroa;
 
 use ir::IRProgram;
+use sroa::scalar_replacement_of_aggregates;
 use algebraic::algebraic_simplification;
 use strength::strength_reduce_function;
 use propagation::copy_propagation;
@@ -90,6 +93,12 @@ impl PassManager {
 // ═══════════════════════════════════════════════════════════════════
 //  Concrete pass wrappers
 // ═══════════════════════════════════════════════════════════════════
+
+struct SROA;
+impl FunctionPass for SROA {
+    fn name(&self) -> &str { "sroa" }
+    fn run(&self, func: &mut ir::Function) { scalar_replacement_of_aggregates(func); }
+}
 
 struct Mem2Reg;
 impl FunctionPass for Mem2Reg {
@@ -186,6 +195,9 @@ impl FunctionPass for BlockLayout {
 /// Build the default optimization pipeline for the given SIMD capability.
 pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
     let mut pm = PassManager::new();
+
+    // ── Round 1: initial optimization ───────────────────────────
+    pm.add_pass(Box::new(SROA));
     pm.add_pass(Box::new(Mem2Reg));
     pm.add_pass(Box::new(AlgebraicSimplification));
     pm.add_pass(Box::new(StrengthReduction));
@@ -203,6 +215,16 @@ pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
         };
         pm.add_pass(Box::new(Vectorize { level: vec_level }));
     }
+
+    // ── Round 2: clean up after LICM / vectorize / etc. ────────
+    pm.add_pass(Box::new(AlgebraicSimplification));
+    pm.add_pass(Box::new(StrengthReduction));
+    pm.add_pass(Box::new(CopyPropagation));
+    pm.add_pass(Box::new(LoadForwarding));
+    pm.add_pass(Box::new(CommonSubexprElim));
+    pm.add_pass(Box::new(FoldingAndDCE));
+
+    // ── Finalize ────────────────────────────────────────────────
     pm.add_pass(Box::new(RemovePhis));
     pm.add_pass(Box::new(CfgSimplify));
     pm.add_pass(Box::new(BlockLayout));
@@ -220,6 +242,9 @@ pub fn optimize(program: IRProgram) -> IRProgram {
 
 /// Optimize with explicit SIMD level control.
 pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRProgram {
+    // Interprocedural inlining (small, non-looping functions)
+    inline::inline_functions(&mut program);
+
     let pipeline = default_pipeline(simd_level);
     pipeline.run(&mut program);
     program

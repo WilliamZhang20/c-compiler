@@ -201,7 +201,33 @@ pub fn gen_gep(generator: &mut FunctionGenerator, dest: VarId, base: &Operand, i
     let i_op = generator.operand_to_op(index);
     let d_op = generator.var_to_op(dest);
     let elem_size = generator.get_type_size(element_type) as i64;
-    
+
+    // Optimization: when the base is a stack alloca and the element size is
+    // a valid x86 scale factor (1, 2, 4, or 8), use a single LEA with
+    // scaled-index addressing: lea rax, [rbp + rcx*scale + offset]
+    // This replaces the 5-instruction sequence with just 3 instructions.
+    let is_scale_factor = elem_size == 1 || elem_size == 2 || elem_size == 4 || elem_size == 8;
+    if is_scale_factor {
+        if let Operand::Var(base_var) = base {
+            if let Some(&alloca_offset) = generator.alloca_buffers.get(base_var) {
+                // base is a stack alloca at [rbp + alloca_offset]
+                generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
+                if elem_size == 1 {
+                    generator.asm.push(X86Instr::Raw(
+                        format!("lea rax, [rbp + rcx{:+}]", alloca_offset)
+                    ));
+                } else {
+                    generator.asm.push(X86Instr::Raw(
+                        format!("lea rax, [rbp + rcx*{}{:+}]", elem_size, alloca_offset)
+                    ));
+                }
+                generator.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                return;
+            }
+        }
+    }
+
+    // Fallback: general 5-instruction GEP sequence
     generator.load_address_into(base, X86Reg::Rax);
 
     generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));

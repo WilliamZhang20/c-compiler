@@ -5,6 +5,229 @@ use ir::VarId;
 /// Instruction generation for arithmetic and logical operations
 pub struct InstructionGenerator;
 
+/// Magic number for signed division by constant (Hacker's Delight algorithm).
+/// Returns (magic_number, shift) such that:
+///   x / d ≈ MULHI(x, magic) >> shift  (with correction for sign)
+fn signed_div_magic_64(d: i64) -> Option<(i64, u32)> {
+    if d <= 0 || d == 1 { return None; }
+    
+    let ad = d as u64;
+    let t = (1u64 << 63) + ((d >> 63) as u64);  // 2^63 + (sign bit)
+    let anc = t - 1 - (t % ad);  // abs(nc)
+    
+    let mut p = 63u32;
+    let mut q1 = (1u64 << 63) / anc;
+    let mut r1 = (1u64 << 63) - q1 * anc;
+    let mut q2 = (1u64 << 63) / ad;
+    let mut r2 = (1u64 << 63) - q2 * ad;
+    
+    loop {
+        p += 1;
+        if p > 128 { return None; }
+        
+        q1 = q1.wrapping_mul(2);
+        r1 = r1.wrapping_mul(2);
+        if r1 >= anc { q1 += 1; r1 -= anc; }
+        
+        q2 = q2.wrapping_mul(2);
+        r2 = r2.wrapping_mul(2);
+        if r2 >= ad { q2 += 1; r2 -= ad; }
+        
+        let delta = ad - r2;
+        if q1 < delta || (q1 == delta && r1 == 0) {
+            continue;
+        }
+        break;
+    }
+    
+    let magic = (q2 + 1) as i64;
+    let shift = p - 64;
+    Some((magic, shift))
+}
+
+/// Emit optimized signed division by constant for 64-bit values.
+/// Returns true if optimization was applied.
+fn emit_div_by_const_64(
+    asm: &mut Vec<X86Instr>,
+    l_op: X86Operand,
+    d: i64,
+    d_op: X86Operand,
+    want_remainder: bool,
+) -> bool {
+    if d <= 0 { return false; }
+    
+    // Power of 2: use shifts
+    if d > 0 && (d as u64).is_power_of_two() {
+        let shift = d.trailing_zeros();
+        if shift == 0 {
+            // Division by 1: just move
+            asm.push(X86Instr::Mov(d_op, l_op));
+            return true;
+        }
+        // Signed division by power of 2:
+        // q = (x + ((x >> 63) >>> (64 - shift))) >> shift
+        let rax = X86Operand::Reg(X86Reg::Rax);
+        let rdx = X86Operand::Reg(X86Reg::Rdx);
+        asm.push(X86Instr::Mov(rax.clone(), l_op.clone()));
+        asm.push(X86Instr::Mov(rdx.clone(), rax.clone()));
+        asm.push(X86Instr::Sar(rdx.clone(), X86Operand::Imm(63)));
+        asm.push(X86Instr::Shr(rdx.clone(), X86Operand::Imm(64 - shift as i64)));
+        asm.push(X86Instr::Add(rax.clone(), rdx.clone()));
+        if want_remainder {
+            // r = x - (q << shift) * 1  =>  r = x - (q >> shift) << shift ... 
+            // Easier: r = x & (d-1), adjusted for sign
+            // Actually: remainder = x - quotient * d
+            asm.push(X86Instr::Sar(rax.clone(), X86Operand::Imm(shift as i64)));
+            // rax = quotient; now compute remainder = l_op - quotient * d
+            asm.push(X86Instr::Imul(rax.clone(), X86Operand::Imm(d)));
+            // rdx = l_op
+            asm.push(X86Instr::Mov(rdx.clone(), l_op));
+            asm.push(X86Instr::Sub(rdx.clone(), rax.clone()));
+            asm.push(X86Instr::Mov(d_op, rdx));
+        } else {
+            asm.push(X86Instr::Sar(rax.clone(), X86Operand::Imm(shift as i64)));
+            asm.push(X86Instr::Mov(d_op, rax));
+        }
+        return true;
+    }
+    
+    // General case: magic number multiplication
+    if let Some((magic, shift)) = signed_div_magic_64(d) {
+        let rax = X86Operand::Reg(X86Reg::Rax);
+        let rdx = X86Operand::Reg(X86Reg::Rdx);
+        let rcx = X86Operand::Reg(X86Reg::Rcx);
+        
+        // Save dividend in rcx for remainder calculation
+        if want_remainder {
+            asm.push(X86Instr::Mov(rcx.clone(), l_op.clone()));
+        }
+        
+        // Load magic number into rax
+        asm.push(X86Instr::Raw(format!("mov rax, {}", magic)));
+        // imul rdx:rax, l_op  (signed multiply, high result in rdx)
+        asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R11), l_op.clone()));
+        asm.push(X86Instr::Raw("imul r11".to_string()));
+        // rdx now has the high 64 bits
+        
+        // If magic is negative, add the dividend
+        if magic < 0 {
+            if want_remainder {
+                asm.push(X86Instr::Add(rdx.clone(), rcx.clone()));
+            } else {
+                asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::R11), l_op.clone()));
+                asm.push(X86Instr::Add(rdx.clone(), X86Operand::Reg(X86Reg::R11)));
+            }
+        }
+        
+        // Arithmetic shift right by 'shift'
+        if shift > 0 {
+            asm.push(X86Instr::Sar(rdx.clone(), X86Operand::Imm(shift as i64)));
+        }
+        
+        // Add sign bit correction: q += (q >> 63) i.e. add 1 if negative
+        asm.push(X86Instr::Mov(rax.clone(), rdx.clone()));
+        asm.push(X86Instr::Shr(rax.clone(), X86Operand::Imm(63)));
+        asm.push(X86Instr::Add(rdx.clone(), rax.clone()));
+        // rdx = quotient
+        
+        if want_remainder {
+            // remainder = dividend - quotient * d
+            asm.push(X86Instr::Mov(rax.clone(), rdx.clone()));
+            asm.push(X86Instr::Imul(rax.clone(), X86Operand::Imm(d)));
+            asm.push(X86Instr::Sub(rcx.clone(), rax.clone()));
+            asm.push(X86Instr::Mov(d_op, rcx));
+        } else {
+            asm.push(X86Instr::Mov(d_op, rdx));
+        }
+        return true;
+    }
+    
+    false
+}
+
+/// Emit optimized multiply by constant using LEA/shift sequences.
+/// Returns true if optimization was applied.
+fn emit_mul_by_const(asm: &mut Vec<X86Instr>, src: &X86Reg, dest: &X86Reg, c: i64) -> bool {
+    let s = src.to_str();
+    let dt = dest.to_str();
+    
+    match c {
+        0 => {
+            asm.push(X86Instr::Xor(X86Operand::Reg(dest.clone()), X86Operand::Reg(dest.clone())));
+            true
+        }
+        1 => {
+            if !src.same_physical(dest) {
+                asm.push(X86Instr::Mov(X86Operand::Reg(dest.clone()), X86Operand::Reg(src.clone())));
+            }
+            true
+        }
+        -1 => {
+            if !src.same_physical(dest) {
+                asm.push(X86Instr::Mov(X86Operand::Reg(dest.clone()), X86Operand::Reg(src.clone())));
+            }
+            asm.push(X86Instr::Neg(X86Operand::Reg(dest.clone())));
+            true
+        }
+        c if c > 0 && (c as u64).is_power_of_two() => {
+            let shift = (c as u64).trailing_zeros();
+            if !src.same_physical(dest) {
+                asm.push(X86Instr::Mov(X86Operand::Reg(dest.clone()), X86Operand::Reg(src.clone())));
+            }
+            asm.push(X86Instr::Shl(X86Operand::Reg(dest.clone()), X86Operand::Imm(shift as i64)));
+            true
+        }
+        3 => {
+            // lea dest, [src + src*2]
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*2]", dt, s, s)));
+            true
+        }
+        5 => {
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*4]", dt, s, s)));
+            true
+        }
+        9 => {
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*8]", dt, s, s)));
+            true
+        }
+        6 => {
+            // x*6 = (x + x*2) * 2
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*2]", dt, s, s)));
+            let d2 = X86Operand::Reg(dest.clone());
+            asm.push(X86Instr::Add(d2.clone(), d2));
+            true
+        }
+        7 => {
+            // x*7 = x*8 - x
+            asm.push(X86Instr::Raw(format!("lea {}, [{}*8]", dt, s)));
+            asm.push(X86Instr::Sub(X86Operand::Reg(dest.clone()), X86Operand::Reg(src.clone())));
+            true
+        }
+        10 => {
+            // x*10 = (x + x*4) * 2
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*4]", dt, s, s)));
+            let d2 = X86Operand::Reg(dest.clone());
+            asm.push(X86Instr::Add(d2.clone(), d2));
+            true
+        }
+        11 => {
+            // x*11 = x + (x + x*4)*2
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*4]", dt, s, s)));
+            let d2 = X86Operand::Reg(dest.clone());
+            asm.push(X86Instr::Add(d2.clone(), d2));
+            asm.push(X86Instr::Add(X86Operand::Reg(dest.clone()), X86Operand::Reg(src.clone())));
+            true
+        }
+        12 => {
+            // x*12 = (x + x*2) * 4 = lea + shl 2
+            asm.push(X86Instr::Raw(format!("lea {}, [{} + {}*2]", dt, s, s)));
+            asm.push(X86Instr::Shl(X86Operand::Reg(dest.clone()), X86Operand::Imm(2)));
+            true
+        }
+        _ => false,
+    }
+}
+
 impl InstructionGenerator {
     pub fn gen_binary_op(
         asm: &mut Vec<X86Instr>,
@@ -44,6 +267,17 @@ impl InstructionGenerator {
                         asm.push(X86Instr::Add(d_op, r_op));
                     } else if d_op == r_op {
                          asm.push(X86Instr::Add(d_op, l_op));
+                    } else if let (X86Operand::Reg(d_reg), X86Operand::Reg(l_reg), X86Operand::Imm(imm)) = (&d_op, &l_op, &r_op) {
+                        // dest = left + imm -> lea dest, [left + imm]
+                        if *imm >= -2147483648 && *imm <= 2147483647 {
+                            asm.push(X86Instr::Lea(X86Operand::Reg(d_reg.clone()), X86Operand::Mem(l_reg.clone(), *imm as i32)));
+                        } else {
+                            asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                            asm.push(X86Instr::Add(d_op, r_op));
+                        }
+                    } else if let (X86Operand::Reg(d_reg), X86Operand::Reg(l_reg), X86Operand::Reg(r_reg)) = (&d_op, &l_op, &r_op) {
+                        // dest = left + right -> lea dest, [left + right]
+                        asm.push(X86Instr::Raw(format!("lea {}, [{} + {}]", d_reg.to_str(), l_reg.to_str(), r_reg.to_str())));
                     } else {
                         asm.push(X86Instr::Mov(d_op.clone(), l_op));
                         asm.push(X86Instr::Add(d_op, r_op));
@@ -62,6 +296,15 @@ impl InstructionGenerator {
                     } else if d_op == r_op {
                          asm.push(X86Instr::Neg(d_op.clone()));
                          asm.push(X86Instr::Add(d_op, l_op));
+                    } else if let (X86Operand::Reg(d_reg), X86Operand::Reg(l_reg), X86Operand::Imm(imm)) = (&d_op, &l_op, &r_op) {
+                        // dest = left - imm -> lea dest, [left - imm]
+                        let neg_imm = -(*imm);
+                        if neg_imm >= -2147483648 && neg_imm <= 2147483647 {
+                            asm.push(X86Instr::Lea(X86Operand::Reg(d_reg.clone()), X86Operand::Mem(l_reg.clone(), neg_imm as i32)));
+                        } else {
+                            asm.push(X86Instr::Mov(d_op.clone(), l_op));
+                            asm.push(X86Instr::Sub(d_op, r_op));
+                        }
                     } else {
                         asm.push(X86Instr::Mov(d_op.clone(), l_op));
                         asm.push(X86Instr::Sub(d_op, r_op));
@@ -73,9 +316,26 @@ impl InstructionGenerator {
                 }
             }
             BinaryOp::Mul => {
+                // Try strength reduction for multiply by small constants
+                if let X86Operand::Imm(c) = &r_op {
+                    if let X86Operand::Reg(d_reg) = &d_op {
+                        if let X86Operand::Reg(l_reg) = &l_op {
+                            let emitted = emit_mul_by_const(asm, l_reg, d_reg, *c);
+                            if emitted { return; }
+                        }
+                    }
+                }
+                // Symmetric: try swapping left/right for constant on left
+                if let X86Operand::Imm(c) = &l_op {
+                    if let X86Operand::Reg(d_reg) = &d_op {
+                        if let X86Operand::Reg(r_reg) = &r_op {
+                            let emitted = emit_mul_by_const(asm, r_reg, d_reg, *c);
+                            if emitted { return; }
+                        }
+                    }
+                }
                 if matches!(d_op, X86Operand::Reg(_)) {
                     if d_op == l_op {
-                        // Optimize: dest = dest * right -> just imul
                         asm.push(X86Instr::Imul(d_op, r_op));
                     } else if d_op == r_op {
                         asm.push(X86Instr::Imul(d_op, l_op));
@@ -90,6 +350,13 @@ impl InstructionGenerator {
                 }
             }
             BinaryOp::Div => {
+                // Try strength reduction for constant divisor
+                if let X86Operand::Imm(d) = &r_op {
+                    if !op_is_32bit && emit_div_by_const_64(asm, l_op.clone(), *d, d_op.clone(), false) {
+                        return;
+                    }
+                }
+                // Fallback to idiv
                 asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                 if op_is_32bit { asm.push(X86Instr::Cdq); } else { asm.push(X86Instr::Cqto); }
                 
@@ -103,6 +370,13 @@ impl InstructionGenerator {
                 asm.push(X86Instr::Mov(d_op, ax_op));
             }
             BinaryOp::Mod => {
+                // Try strength reduction for constant divisor
+                if let X86Operand::Imm(d) = &r_op {
+                    if !op_is_32bit && emit_div_by_const_64(asm, l_op.clone(), *d, d_op.clone(), true) {
+                        return;
+                    }
+                }
+                // Fallback to idiv
                 asm.push(X86Instr::Mov(ax_op.clone(), l_op));
                 if op_is_32bit { asm.push(X86Instr::Cdq); } else { asm.push(X86Instr::Cqto); }
                 

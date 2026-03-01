@@ -166,9 +166,10 @@ fn count_gep_stride_refs(
 /// - The init values in the phi nodes
 /// - The step values in the body
 ///
-/// Note: For loops with identical parameters (same init, bound, step), this is
-/// a no-op since swapping identical values has no effect. True interchange for
-/// same-parameter loops requires CFG restructuring, which is not yet implemented.
+/// For loops with identical parameters (same init, bound, step), we swap the
+/// IV variable USAGES in the inner loop body. Since both IVs iterate over the
+/// same range, swapping which variable is used for which array dimension
+/// effectively interchanges the loops without CFG restructuring.
 fn swap_loop_ivs(
     func: &mut Function,
     outer: &NaturalLoop,
@@ -183,8 +184,9 @@ fn swap_loop_ivs(
     let outer_step = outer_iv.step;
     let inner_step = inner_iv.step;
 
-    // Skip if all params are the same — no-op swap
+    // Same-parameter loops: swap IV variable usages in inner loop body
     if outer_bound == inner_bound && outer_init == inner_init && outer_step == inner_step {
+        interchange_same_param_loops(func, inner, outer_iv, inner_iv);
         return;
     }
 
@@ -201,6 +203,67 @@ fn swap_loop_ivs(
         swap_step_value(func, &outer.body, outer_iv.var, inner_step);
         swap_step_value(func, &inner.body, inner_iv.var, outer_step);
     }
+}
+
+/// For same-parameter perfectly-nested loops, interchange by swapping all
+/// uses of the outer IV variable with the inner IV variable (and vice versa)
+/// in the inner loop body blocks. This changes which array dimension is
+/// accessed by the fast-varying (inner) vs slow-varying (outer) IV.
+///
+/// The body computation stays identical, but which variable takes which role
+/// is swapped — effectively making b[k][j] into b[j][k] etc.
+fn interchange_same_param_loops(
+    func: &mut Function,
+    inner: &NaturalLoop,
+    outer_iv: &InductionVar,
+    inner_iv: &InductionVar,
+) {
+    let outer_var = outer_iv.var;
+    let inner_var = inner_iv.var;
+
+    for block in &mut func.blocks {
+        // Only modify body blocks of the inner loop (excludes outer header etc.)
+        if !inner.body.contains(&block.id) {
+            continue;
+        }
+        // Don't modify the inner header block (contains phi + comparison)
+        if block.id == inner.header {
+            continue;
+        }
+
+        for inst in &mut block.instructions {
+            // Don't swap in phi nodes (loop control)
+            if matches!(inst, Instruction::Phi { .. }) {
+                continue;
+            }
+            // Don't swap in the IV increment instructions
+            if is_iv_increment(inst, inner_var, inner_iv.step)
+                || is_iv_increment(inst, outer_var, outer_iv.step) {
+                continue;
+            }
+            // Swap all operand uses of outer_var ↔ inner_var
+            inst.for_each_operand_mut(|op| {
+                if let Operand::Var(v) = op {
+                    if *v == outer_var {
+                        *v = inner_var;
+                    } else if *v == inner_var {
+                        *v = outer_var;
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Check if an instruction is the IV increment (e.g., iv_next = iv + step)
+fn is_iv_increment(inst: &Instruction, iv_var: VarId, step: i64) -> bool {
+    matches!(inst,
+        Instruction::Binary { op: BinaryOp::Add, left: Operand::Var(v), right: Operand::Constant(c), .. }
+        if *v == iv_var && *c == step
+    ) || matches!(inst,
+        Instruction::Binary { op: BinaryOp::Add, left: Operand::Constant(c), right: Operand::Var(v), .. }
+        if *v == iv_var && *c == step
+    )
 }
 
 /// Rename all USES (not defs) of `old_var` to `new_var` in operands of

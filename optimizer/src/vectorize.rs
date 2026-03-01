@@ -475,11 +475,36 @@ fn apply_vectorization(
         }
     }
 
-    // Collect reduction accumulator variables — we can't vectorize these yet
-    // (would need vector accumulators + horizontal reduction)
+    // Collect reduction accumulator variables — vectorize these with vector accumulators
     let reduction_accums: HashSet<VarId> = plan.reductions.iter()
         .map(|r| r.accum_var)
         .collect();
+
+    // Create vector accumulator variables for each reduction.
+    // We use a single VarId for the accumulator (no phi needed) — the SIMD register
+    // is initialized before the loop and accumulated in-place in the loop body.
+    struct ReductionInfo {
+        accum_var: VarId,        // original scalar accumulator
+        vec_accum: VarId,        // vector accumulator (single var, used in-place)
+        scalar_result: VarId,    // scalar result after horizontal add
+        op: BinaryOp,
+        is_float: bool,
+        elem_type: Type,
+    }
+    let mut reduction_infos: Vec<ReductionInfo> = Vec::new();
+    for red in &plan.reductions {
+        let vec_accum = VarId(next_var); next_var += 1;
+        let scalar_result = VarId(next_var); next_var += 1;
+        let elem_type = if red.is_float { Type::Float } else { Type::Int };
+        reduction_infos.push(ReductionInfo {
+            accum_var: red.accum_var,
+            vec_accum,
+            scalar_result,
+            op: red.op.clone(),
+            is_float: red.is_float,
+            elem_type,
+        });
+    }
 
     // For each arithmetic op that works on vector data, generate Simd binary op
     let mut op_vec_vars: HashMap<VarId, VarId> = HashMap::new();
@@ -489,10 +514,45 @@ fn apply_vectorization(
             continue;
         }
 
-        // Skip ops involving reduction accumulators (not yet vectorizable)
+        // For reduction ops (one operand is the accumulator), generate a vector
+        // accumulation instead of skipping
         let left_is_accum = matches!(left, Operand::Var(v) if reduction_accums.contains(v));
         let right_is_accum = matches!(right, Operand::Var(v) if reduction_accums.contains(v));
         if left_is_accum || right_is_accum {
+            // Find the corresponding reduction info
+            let accum_var = if left_is_accum {
+                match left { Operand::Var(v) => *v, _ => continue }
+            } else {
+                match right { Operand::Var(v) => *v, _ => continue }
+            };
+            let other_operand = if left_is_accum { right } else { left };
+
+            if let Some(rinfo) = reduction_infos.iter().find(|r| r.accum_var == accum_var) {
+                // The other operand must be a vector value (from a load or prior op)
+                let vec_other = remap_vec_operand(other_operand, &load_vec_vars, &op_vec_vars);
+                let is_remapped = match (other_operand, &vec_other) {
+                    (Operand::Var(orig), Operand::Var(mapped)) => orig != mapped,
+                    _ => false,
+                };
+                if is_remapped {
+                    // Generate: vec_accum = vec_accum + vec_loaded_data (in-place)
+                    let simd_op = match op {
+                        BinaryOp::Add => SimdOp::Add,
+                        BinaryOp::Mul => SimdOp::Mul,
+                        _ => continue,
+                    };
+                    let elem_type = if is_float { Type::Float } else { Type::Int };
+                    vec_body_insts.push(Instruction::Simd {
+                        op: simd_op,
+                        dest: Some(rinfo.vec_accum),  // same var as input = in-place
+                        operands: vec![Operand::Var(rinfo.vec_accum), vec_other],
+                        elem_type,
+                        width: vf,
+                    });
+                    // Map the dest of this arithmetic op to the vector result
+                    op_vec_vars.insert(dest, rinfo.vec_accum);
+                }
+            }
             continue;
         }
 
@@ -585,9 +645,16 @@ fn apply_vectorization(
     }
 
     // Bail out if no useful SIMD work was generated.
-    // We need at least one SIMD store (map pattern) to justify vectorization.
-    // Pure loads without stores/reductions are useless.
-    if valid_simd_stores == 0 {
+    // We need at least one SIMD store OR one active reduction to justify vectorization.
+    let active_reductions: Vec<&ReductionInfo> = reduction_infos.iter()
+        .filter(|r| {
+            // A reduction is "active" if vec_accum was used as dest in a SIMD op
+            vec_body_insts.iter().any(|inst| {
+                matches!(inst, Instruction::Simd { dest: Some(d), .. } if *d == r.vec_accum)
+            })
+        })
+        .collect();
+    if valid_simd_stores == 0 && active_reductions.is_empty() {
         return;
     }
 
@@ -601,29 +668,66 @@ fn apply_vectorization(
 
     // --- Build the vectorized loop header ---
     // Uses a properly-formed Phi node for the IV
+    // Reduction accumulators use in-place SIMD register updates (no phi needed)
+    let vec_header_insts = vec![
+        // Phi: vec_iv comes from preheader (init) or vec_body (vec_iv_next)
+        Instruction::Phi {
+            dest: vec_iv,
+            preds: vec![
+                (preheader, vec_init_iv),
+                (vec_body_id, vec_iv_next),
+            ],
+        },
+        // Compare: vec_iv < vec_trip_count
+        Instruction::Binary {
+            dest: vec_cmp,
+            op: BinaryOp::Less,
+            left: Operand::Var(vec_iv),
+            right: Operand::Constant(vec_trip_count as i64),
+        },
+    ];
+
+    // If we have reductions and a remainder, we need a bridge block
+    // between vec_header exit and the original loop that does HorizontalAdd.
+    // If no remainder, we need a bridge block before exit_block.
+    let vec_exit_target = if !active_reductions.is_empty() {
+        // Create a bridge block for reduction finalization
+        let bridge_id = BlockId(func.blocks.iter().map(|b| b.id.0).max().unwrap_or(0) + 3);
+        let mut bridge_insts: Vec<Instruction> = Vec::new();
+
+        for rinfo in &active_reductions {
+            // HorizontalAdd: reduce vector accumulator to scalar
+            bridge_insts.push(Instruction::Simd {
+                op: SimdOp::HorizontalAdd,
+                dest: Some(rinfo.scalar_result),
+                operands: vec![Operand::Var(rinfo.vec_accum)],
+                elem_type: rinfo.elem_type.clone(),
+                width: vf,
+            });
+        }
+
+        let bridge_target = if has_remainder { lp.header } else { exit_block };
+        let bridge_block = BasicBlock {
+            id: bridge_id,
+            instructions: bridge_insts,
+            terminator: Terminator::Br(bridge_target),
+            is_label_target: false,
+        };
+        func.blocks.push(bridge_block);
+        bridge_id
+    } else if has_remainder {
+        lp.header
+    } else {
+        exit_block
+    };
+
     let vec_header = BasicBlock {
         id: vec_header_id,
-        instructions: vec![
-            // Phi: vec_iv comes from preheader (init) or vec_body (vec_iv_next)
-            Instruction::Phi {
-                dest: vec_iv,
-                preds: vec![
-                    (preheader, vec_init_iv),
-                    (vec_body_id, vec_iv_next),
-                ],
-            },
-            // Compare: vec_iv < vec_trip_count
-            Instruction::Binary {
-                dest: vec_cmp,
-                op: BinaryOp::Less,
-                left: Operand::Var(vec_iv),
-                right: Operand::Constant(vec_trip_count as i64),
-            },
-        ],
+        instructions: vec_header_insts,
         terminator: Terminator::CondBr {
             cond: Operand::Var(vec_cmp),
             then_block: vec_body_id,
-            else_block: if has_remainder { lp.header } else { exit_block },
+            else_block: vec_exit_target,
         },
         is_label_target: false,
     };
@@ -645,6 +749,18 @@ fn apply_vectorization(
             src: Operand::Constant(iv.init),
         });
 
+        // Add zero-vector init for each active reduction (directly to vec_accum)
+        for rinfo in &active_reductions {
+            // Initialize vector accumulator to zero (identity for addition)
+            pre_block.instructions.push(Instruction::Simd {
+                op: SimdOp::Splat,
+                dest: Some(rinfo.vec_accum),
+                operands: vec![Operand::Constant(0)],
+                elem_type: rinfo.elem_type.clone(),
+                width: vf,
+            });
+        }
+
         // Redirect preheader to vec_header
         match &mut pre_block.terminator {
             Terminator::Br(target) if *target == lp.header => {
@@ -658,42 +774,54 @@ fn apply_vectorization(
         }
     }
 
-    // --- Handle remainder: update original loop's IV init ---
+    // --- Handle remainder: update original loop's IV and reduction phi nodes ---
+    // Determine which block feeds into the original loop header from the vec loop exit
+    let vec_exit_feeding_block = if !active_reductions.is_empty() {
+        // The bridge block feeds into the original header
+        vec_exit_target
+    } else {
+        vec_header_id
+    };
+
     if has_remainder {
         // The original loop's IV phi gets its init from preheader.
-        // After vectorization, when we fall through from vec_header → original header,
-        // the coming-from block is vec_header_id (not preheader anymore).
-        // We need to update the original loop's Phi to accept vec_header_id → vec_trip_count.
+        // After vectorization, when we fall through from vec loop → original header,
+        // the coming-from block is vec_exit_feeding_block (not preheader anymore).
         if let Some(header_block) = func.blocks.iter_mut().find(|b| b.id == lp.header) {
             for inst in &mut header_block.instructions {
                 if let Instruction::Phi { dest, preds } = inst {
                     if *dest == iv.var {
-                        // Change the preheader source to come from vec_header instead
+                        // Change the preheader source to come from vec exit block instead
                         for (pred_block, _pred_var) in preds.iter_mut() {
                             if *pred_block == preheader {
-                                *pred_block = vec_header_id;
-                                // Create a new var holding vec_trip_count
-                                // We'll add a Copy in vec_header for this
+                                *pred_block = vec_exit_feeding_block;
                             }
                         }
                     }
                 }
             }
         }
-        // For the phi update: the vec_header already defines vec_iv which equals
-        // vec_trip_count when the loop exits. So we can use vec_iv as the init.
-        // But the phi currently references some VarId from preheader.
-        // We need to create a new var that holds vec_trip_count in vec_header.
-        // Actually, when vec_header exits to lp.header, vec_iv holds vec_trip_count
-        // (since the condition vec_iv < vec_trip_count was false).
-        // So we update the phi to use vec_iv from vec_header_id.
+        // Update the phi to use vec_iv from vec_header_id (the IV at vec loop exit)
         if let Some(header_block) = func.blocks.iter_mut().find(|b| b.id == lp.header) {
             for inst in &mut header_block.instructions {
                 if let Instruction::Phi { dest, preds } = inst {
                     if *dest == iv.var {
                         for (pred_block, pred_var) in preds.iter_mut() {
-                            if *pred_block == vec_header_id {
+                            if *pred_block == vec_exit_feeding_block {
                                 *pred_var = vec_iv;
+                            }
+                        }
+                    }
+                    // Update reduction accumulator phis in the original header
+                    for rinfo in &active_reductions {
+                        if *dest == rinfo.accum_var {
+                            // The accumulator's init now comes from the bridge block's
+                            // HorizontalAdd scalar result instead of the preheader
+                            for (pred_block, pred_var) in preds.iter_mut() {
+                                if *pred_block == preheader {
+                                    *pred_block = vec_exit_feeding_block;
+                                    *pred_var = rinfo.scalar_result;
+                                }
                             }
                         }
                     }
@@ -701,9 +829,28 @@ fn apply_vectorization(
             }
         }
     } else {
-        // No remainder: vec_header exits directly to exit_block
-        // The original loop still exists but is now unreachable
-        // (preheader → vec_header → exit_block, skipping original header)
+        // No remainder: vec loop exits directly to exit_block (via bridge if reductions)
+        // If we have reductions, we need to patch the exit_block to use scalar_result
+        // where the original accumulator was used.
+        if !active_reductions.is_empty() {
+            // The original loop is unreachable, but the exit block may reference
+            // the accumulator variable. We need to add copies so the scalar_result
+            // feeds into whatever uses the accumulator in the exit block.
+            // Actually, in the no-remainder case, the vec loop processes ALL iterations.
+            // The exit block's references to the accumulator will be handled by
+            // the phi resolution — the accumulator's final value comes from the
+            // original loop's latch. Since the original loop is now unreachable,
+            // we need to make the exit block use the scalar_result.
+            // Simplest approach: add Copy instructions at the start of the bridge block.
+            if let Some(bridge) = func.blocks.iter_mut().find(|b| b.id == vec_exit_target) {
+                for rinfo in &active_reductions {
+                    bridge.instructions.push(Instruction::Copy {
+                        dest: rinfo.accum_var,
+                        src: Operand::Var(rinfo.scalar_result),
+                    });
+                }
+            }
+        }
     }
 
     // Add the new blocks (insert before original loop blocks for better layout)

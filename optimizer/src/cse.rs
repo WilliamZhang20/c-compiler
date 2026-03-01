@@ -40,7 +40,13 @@ pub fn common_subexpression_elimination(func: &mut Function) {
             match op {
                 Operand::Constant(c) => (0, *c),
                 Operand::Var(v) => (1, v.0 as i64),
-                Operand::Global(_) => (2, 0), // Globals need more care
+                Operand::Global(s) => {
+                    // Use a stable hash so different globals get different keys
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    s.hash(&mut h);
+                    (2, h.finish() as i64)
+                }
                 Operand::FloatConstant(f) => (3, f.to_bits() as i64),
             }
         }
@@ -65,7 +71,8 @@ pub fn common_subexpression_elimination(func: &mut Function) {
                     if matches!(op, BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign 
                         | BinaryOp::MulAssign | BinaryOp::DivAssign | BinaryOp::ModAssign
                         | BinaryOp::BitwiseAndAssign | BinaryOp::BitwiseOrAssign 
-                        | BinaryOp::BitwiseXorAssign | BinaryOp::ShiftLeftAssign | BinaryOp::ShiftRightAssign) {
+                        | BinaryOp::BitwiseXorAssign | BinaryOp::ShiftLeftAssign | BinaryOp::ShiftRightAssign
+                        | BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
                         continue;
                     }
                     

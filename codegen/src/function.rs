@@ -239,12 +239,29 @@ impl<'a> FunctionGenerator<'a> {
                         reg_idx += 1;
                     }
                 }
+                // Struct params live in memory (alloca buffer) for field access,
+                // so remove any GP register allocation the register allocator
+                // may have assigned — var_to_op must return the memory slot.
+                self.reg_alloc.remove(var);
                 continue;
             }
             
-            // Non-struct parameter handling (original logic)
+            // Non-struct parameter handling
+            // For non-float params with a register allocation, store directly
+            // to the allocated register to avoid redundant stack spills.
+            // Float params always use stack slots since the GP register allocator
+            // doesn't handle XMM registers.
+            let is_float = matches!(param_type, Type::Float | Type::Double);
             let dest = if let Some(&buffer_offset) = self.alloca_buffers.get(var) {
                 X86Operand::Mem(X86Reg::Rbp, buffer_offset)
+            } else if !is_float {
+                if let Some(phys) = self.reg_alloc.get(var) {
+                    // Non-float parameter has a GP register — store directly to it
+                    X86Operand::Reg(phys.to_x86())
+                } else {
+                    let slot = self.stack_slots.get(var).copied().unwrap_or_else(|| self.get_or_create_slot(*var));
+                    X86Operand::Mem(X86Reg::Rbp, slot)
+                }
             } else if let Some(var_type) = self.var_types.get(var) {
                 if matches!(var_type, Type::Float | Type::Double) {
                     let slot = self.stack_slots.get(var).copied().unwrap_or_else(|| self.get_or_create_slot(*var));
@@ -258,7 +275,11 @@ impl<'a> FunctionGenerator<'a> {
                 X86Operand::Mem(X86Reg::Rbp, slot)
             };
             
-            let is_float = matches!(param_type, Type::Float | Type::Double);
+            // For float params that got GP register assignments, remove from
+            // reg_alloc so var_to_op returns the float stack slot instead
+            if is_float {
+                self.reg_alloc.remove(var);
+            }
             
             if is_float {
                 if float_reg_idx < float_regs.len() {
@@ -384,11 +405,11 @@ impl<'a> FunctionGenerator<'a> {
             }
         }
         
-        // Remove parameters from reg_alloc since they're now in stack slots
-        // This ensures var_to_op returns the stack slot, not the clobbered parameter register
-        for (_, var) in &func.params {
-            self.reg_alloc.remove(var);
-        }
+        // Remove parameters from reg_alloc only if they were NOT register-allocated.
+        // Register-allocated params were stored directly to their assigned register
+        // in the prologue (callee-saved, so safe across calls). Stack-spilled params
+        // need reg_alloc cleared so var_to_op returns the stack slot.
+        // (Nothing to do — params without a reg_alloc entry already get stack slots.)
 
         for block in &func.blocks {
             // Skip unreachable blocks (marked by CFG simplification)
@@ -511,11 +532,14 @@ impl<'a> FunctionGenerator<'a> {
             }
         }
         
-        // Parameters: always allocate stack slots
-        // Even if register-allocated, parameters need stack homes because
-        // their parameter-passing registers (rdi, rsi, etc.) get clobbered by function calls
+        // Parameters: allocate stack slots for parameters that were NOT
+        // assigned a register. Register-allocated parameters are stored
+        // directly to their callee-saved register in the prologue and
+        // do not need a stack home.
         for (_, var) in &func.params {
-            self.get_or_create_slot(*var);
+            if !self.reg_alloc.contains_key(var) {
+                self.get_or_create_slot(*var);
+            }
         }
     }
 
@@ -1171,10 +1195,11 @@ impl<'a> FunctionGenerator<'a> {
                     self.asm.push(X86Instr::Paddd(xmm_src.clone(), xmm_tmp.clone()));
                     self.asm.push(X86Instr::Pshufd(xmm_tmp.clone(), xmm_src.clone(), 0xB1));
                     self.asm.push(X86Instr::Paddd(xmm_src.clone(), xmm_tmp));
-                    // movd eax, xmm_src; mov dest, eax
+                    // movd eax, xmm_src; movsxd rax, eax; mov dest, rax
                     self.asm.push(X86Instr::Movd(X86Operand::Reg(X86Reg::Eax), xmm_src));
+                    self.asm.push(X86Instr::Raw("  cdqe".to_string()));
                     let d_op = self.var_to_op(dest_var);
-                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+                    self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
                 }
 
                 if use_avx {
