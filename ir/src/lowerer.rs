@@ -2,6 +2,39 @@ use model::{Type, Program as AstProgram, Function as AstFunction, Expr as AstExp
 use std::collections::{HashMap, HashSet};
 use crate::types::{VarId, BlockId, BasicBlock, Function, IRProgram, Instruction, Terminator, Operand};
 
+/// Control-flow bookkeeping for loops, switches, and gotos.
+/// Extracted from Lowerer so that each concern has its own struct.
+pub(crate) struct ControlFlowContext {
+    pub loop_context: Vec<(BlockId, BlockId)>,       // (continue_target, break_target)
+    pub break_targets: Vec<BlockId>,                  // for switch statements
+    pub current_switch_cases: Vec<(i64, BlockId)>,    // (value, block)
+    pub current_default: Option<BlockId>,
+    pub labels: HashMap<String, BlockId>,             // label name => block
+    pub pending_gotos: Vec<(String, BlockId)>,        // (label, goto_block) for forward gotos
+}
+
+impl ControlFlowContext {
+    pub fn new() -> Self {
+        Self {
+            loop_context: Vec::new(),
+            break_targets: Vec::new(),
+            current_switch_cases: Vec::new(),
+            current_default: None,
+            labels: HashMap::new(),
+            pending_gotos: Vec::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.loop_context.clear();
+        self.break_targets.clear();
+        self.current_switch_cases.clear();
+        self.current_default = None;
+        self.labels.clear();
+        self.pending_gotos.clear();
+    }
+}
+
 /// Main AST to IR lowering engine with SSA construction
 pub struct Lowerer {
     pub(crate) next_var: usize,
@@ -19,19 +52,13 @@ pub struct Lowerer {
     pub(crate) global_types: HashMap<String, Type>,
     pub(crate) function_names: HashSet<String>,
     pub(crate) function_types: HashMap<String, Type>,
-    // Stack of (continue_target, break_target) for nested loops
-    pub(crate) loop_context: Vec<(BlockId, BlockId)>,
+    // Control-flow context (loops, switches, gotos)
+    pub(crate) cf: ControlFlowContext,
     pub(crate) struct_defs: HashMap<String, model::StructDef>,
     pub(crate) union_defs: HashMap<String, model::UnionDef>,
     pub(crate) enum_constants: HashMap<String, i64>, // enum constant name => value
     pub(crate) typedefs: HashMap<String, Type>,
-    pub(crate) current_switch_cases: Vec<(i64, BlockId)>, // (value, block)
-    pub(crate) current_default: Option<BlockId>,
-    pub(crate) break_targets: Vec<BlockId>,
     pub(crate) current_return_type: Option<Type>,
-    // For goto/label support
-    pub(crate) labels: HashMap<String, BlockId>,  // label name => block
-    pub(crate) pending_gotos: Vec<(String, BlockId)>, // (label, goto_block) for forward gotos
     // Variable types for IR variables (used for float/int conversions)
     pub(crate) var_types: HashMap<VarId, Type>,
     pub(crate) param_indices: HashMap<String, usize>,
@@ -61,19 +88,14 @@ impl Lowerer {
             global_types: HashMap::new(),
             function_names: HashSet::new(),
             function_types: HashMap::new(),
-            loop_context: Vec::new(),
+            cf: ControlFlowContext::new(),
             struct_defs: HashMap::new(),
             union_defs: HashMap::new(),
             enum_constants: HashMap::new(),
             typedefs: HashMap::new(),
-            current_switch_cases: Vec::new(),
-            current_default: None,
-            break_targets: Vec::new(),
-            labels: HashMap::new(),
-            pending_gotos: Vec::new(),
+            current_return_type: None,
             var_types: HashMap::new(),
             param_indices: HashMap::new(),
-            current_return_type: None,
             pred_cache: HashMap::new(),
             pred_cache_valid: false,
             type_size_cache: HashMap::new(),
@@ -349,8 +371,7 @@ impl Lowerer {
         self.incomplete_phis.clear();
         self.sealed_blocks.clear();
         self.variable_allocas.clear();
-        self.labels.clear();
-        self.pending_gotos.clear();
+        self.cf.reset();
         self.current_return_type = Some(f.return_type.clone());
         self.param_indices.clear();
         self.pred_cache.clear();
@@ -389,8 +410,8 @@ impl Lowerer {
         self.lower_block(&f.body)?;
         
         // Check for unresolved gotos
-        if !self.pending_gotos.is_empty() {
-            let labels: Vec<String> = self.pending_gotos.iter().map(|(l, _)| l.clone()).collect();
+        if !self.cf.pending_gotos.is_empty() {
+            let labels: Vec<String> = self.cf.pending_gotos.iter().map(|(l, _)| l.clone()).collect();
             return Err(format!("Undefined labels: {:?}", labels));
         }
         

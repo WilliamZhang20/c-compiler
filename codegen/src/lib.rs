@@ -79,20 +79,43 @@ impl Codegen {
             self.func_return_types.insert(func.name.clone(), func.return_type.clone());
         }
         
+        // ── Pre-classify globals into sections ──────────────────
+        // One pass instead of repeated filter scans.
+        let mut rodata_globals: Vec<&model::GlobalVar> = Vec::new();
+        let mut data_globals: Vec<&model::GlobalVar> = Vec::new();
+        let mut bss_globals: Vec<&model::GlobalVar> = Vec::new();
+        let mut custom_globals: Vec<(&model::GlobalVar, String)> = Vec::new();
+
+        for g in &prog.globals {
+            // Skip extern declarations with no initializer
+            if g.is_extern && g.init.is_none() { continue; }
+
+            // Custom section overrides everything else
+            if let Some(section_name) = g.attributes.iter().find_map(|a| {
+                if let model::Attribute::Section(name) = a { Some(name.clone()) } else { None }
+            }) {
+                custom_globals.push((g, section_name));
+                continue;
+            }
+
+            // Const with initializer → rodata
+            if g.qualifiers.is_const && g.init.is_some() {
+                rodata_globals.push(g);
+                continue;
+            }
+
+            // Classify remaining by initializer
+            match &g.init {
+                Some(init) if !Self::is_zero_init(init) => data_globals.push(g),
+                _ => bss_globals.push(g), // None or zero-init
+            }
+        }
+
         let mut output = String::new();
         output.push_str(".intel_syntax noprefix\n");
         
         // ── .rodata section ─────────────────────────────────────
-        // Contains: string constants, const globals, float constant pool
-        let has_rodata_strings = !prog.global_strings.is_empty();
-        let has_rodata_globals = prog.globals.iter().any(|g| {
-            !(g.is_extern && g.init.is_none())
-                && g.qualifiers.is_const
-                && g.init.is_some()
-                && !g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_)))
-        });
-        
-        if has_rodata_strings || has_rodata_globals {
+        if !prog.global_strings.is_empty() || !rodata_globals.is_empty() {
             output.push_str(".section .rodata\n");
             
             // String constants
@@ -107,68 +130,23 @@ impl Codegen {
                 output.push_str(&format!("{}: .asciz \"{}\"\n", label, escaped));
             }
             
-            // Const globals with initializers
-            for g in &prog.globals {
-                if g.is_extern && g.init.is_none() { continue; }
-                if !g.qualifiers.is_const || g.init.is_none() { continue; }
-                if g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_))) { continue; }
-                
+            for g in &rodata_globals {
                 self.emit_global_var(&mut output, g);
             }
         }
 
         // ── .data section ───────────────────────────────────────
-        // Contains: mutable globals with non-zero initializers
-        let has_data_globals = prog.globals.iter().any(|g| {
-            if g.is_extern && g.init.is_none() { return false; }
-            if g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_))) { return false; }
-            if g.qualifiers.is_const && g.init.is_some() { return false; }
-            // Must have a non-zero initializer
-            match &g.init {
-                Some(init) => !Self::is_zero_init(init),
-                None => false,
-            }
-        });
-        
-        if has_data_globals {
+        if !data_globals.is_empty() {
             output.push_str(".data\n");
-            for g in &prog.globals {
-                if g.is_extern && g.init.is_none() { continue; }
-                if g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_))) { continue; }
-                if g.qualifiers.is_const && g.init.is_some() { continue; }
-                match &g.init {
-                    Some(init) if !Self::is_zero_init(init) => {
-                        self.emit_global_var(&mut output, g);
-                    }
-                    _ => {} // skip — goes to .bss
-                }
+            for g in &data_globals {
+                self.emit_global_var(&mut output, g);
             }
         }
         
         // ── .bss section ────────────────────────────────────────
-        // Contains: uninitialized globals and zero-initialized globals
-        let has_bss_globals = prog.globals.iter().any(|g| {
-            if g.is_extern && g.init.is_none() { return false; }
-            if g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_))) { return false; }
-            if g.qualifiers.is_const && g.init.is_some() { return false; }
-            match &g.init {
-                None => true,
-                Some(init) => Self::is_zero_init(init),
-            }
-        });
-        
-        if has_bss_globals {
+        if !bss_globals.is_empty() {
             output.push_str(".bss\n");
-            for g in &prog.globals {
-                if g.is_extern && g.init.is_none() { continue; }
-                if g.attributes.iter().any(|a| matches!(a, model::Attribute::Section(_))) { continue; }
-                if g.qualifiers.is_const && g.init.is_some() { continue; }
-                let is_bss = match &g.init {
-                    None => true,
-                    Some(init) => Self::is_zero_init(init),
-                };
-                if !is_bss { continue; }
-                
+            for g in &bss_globals {
                 if g.is_static {
                     // Static linkage
                 } else {
@@ -183,7 +161,6 @@ impl Codegen {
                 }
                 output.push_str(&format!(".align {}\n", alignment));
                 
-                // In .bss, just emit label + .zero <size>
                 let size = self.global_var_size(g);
                 output.push_str(&format!("{}:\n", g.name));
                 output.push_str(&format!("    .zero {}\n", size));
@@ -191,22 +168,16 @@ impl Codegen {
         }
 
         // ── Custom-section globals ──────────────────────────────
-        for g in &prog.globals {
-            if g.is_extern && g.init.is_none() { continue; }
-            let section_attr = g.attributes.iter().find_map(|a| {
-                if let model::Attribute::Section(name) = a { Some(name.clone()) } else { None }
-            });
-            if let Some(section_name) = section_attr {
-                match self.target.platform {
-                    model::Platform::Linux => {
-                        output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
-                    }
-                    model::Platform::Windows => {
-                        output.push_str(&format!(".section {}\n", section_name));
-                    }
+        for (g, section_name) in &custom_globals {
+            match self.target.platform {
+                model::Platform::Linux => {
+                    output.push_str(&format!(".section {}, \"aw\", @progbits\n", section_name));
                 }
-                self.emit_global_var(&mut output, g);
+                model::Platform::Windows => {
+                    output.push_str(&format!(".section {}\n", section_name));
+                }
             }
+            self.emit_global_var(&mut output, g);
         }
 
         output.push_str(".text\n");
@@ -344,25 +315,8 @@ impl Codegen {
             }
         } else {
             // Uninitialized (should only happen in .bss path, but handle for safety)
-            match &g.r#type {
-                Type::Array(inner, size) => {
-                    let elem_bytes: usize = match inner.as_ref() {
-                        Type::Char | Type::UnsignedChar => 1,
-                        Type::Short | Type::UnsignedShort => 2,
-                        Type::Int | Type::UnsignedInt | Type::Float => 4,
-                        Type::Typedef(n) => match n.as_str() {
-                            "int8_t" | "uint8_t" | "int8" => 1,
-                            "int16_t" | "uint16_t" => 2,
-                            "int32_t" | "uint32_t" => 4,
-                            "int64_t" | "uint64_t" | "size_t" => 8,
-                            _ => 4,
-                        },
-                        _ => 8,
-                    };
-                    output.push_str(&format!("{}: .zero {}\n", g.name, elem_bytes * size));
-                }
-                _ => output.push_str(&format!("{}: .long 0\n", g.name)),
-            }
+            let size = self.type_size(&g.r#type);
+            output.push_str(&format!("{}: .zero {}\n", g.name, size));
         }
     }
     

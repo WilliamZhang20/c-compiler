@@ -2,6 +2,10 @@
 pub mod target;
 pub use target::{Platform, CallingConvention, TargetConfig, SimdLevel};
 
+// Centralized type layout computation
+pub mod layout;
+pub use layout::TypeLayout;
+
 /// Suffix on an integer constant, controlling its type.
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum IntegerSuffix {

@@ -175,27 +175,8 @@ fn find_max_var_id(func: &Function) -> usize {
     let mut max = 0;
     for block in &func.blocks {
         for inst in &block.instructions {
-            match inst {
-                Instruction::Binary { dest, .. } | Instruction::FloatBinary { dest, .. } |
-                Instruction::Unary { dest, .. } | Instruction::FloatUnary { dest, .. } |
-                Instruction::Copy { dest, .. } | Instruction::Cast { dest, .. } |
-                Instruction::Load { dest, .. } | Instruction::GetElementPtr { dest, .. } |
-                Instruction::Alloca { dest, .. } | Instruction::Phi { dest, .. } => {
-                    max = max.max(dest.0);
-                }
-                Instruction::Call { dest: Some(d), .. } | Instruction::IndirectCall { dest: Some(d), .. } |
-                Instruction::VaArg { dest: d, .. } => {
-                    max = max.max(d.0);
-                }
-                Instruction::Simd { dest: Some(d), .. } => {
-                    max = max.max(d.0);
-                }
-                Instruction::InlineAsm { outputs, .. } => {
-                    for o in outputs {
-                        max = max.max(o.0);
-                    }
-                }
-                _ => {}
+            for d in inst.dests() {
+                max = max.max(d.0);
             }
         }
     }

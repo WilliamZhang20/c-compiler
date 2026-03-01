@@ -34,34 +34,14 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
         // Process instructions: use before def matters
         for inst in &block.instructions {
             // Record uses (variables used before being defined in this block)
-            visit_operands(inst, |var| {
+            inst.for_each_use(|var| {
                 if !alloca_vars.contains(&var) && !block_def[bi].contains(&var) {
                     block_use[bi].insert(var);
                 }
             });
             
-            // Record defs
-            let def_var = match inst {
-                IrInstruction::Binary { dest, .. } |
-                IrInstruction::FloatBinary { dest, .. } |
-                IrInstruction::Unary { dest, .. } |
-                IrInstruction::FloatUnary { dest, .. } |
-                IrInstruction::Phi { dest, .. } |
-                IrInstruction::Copy { dest, .. } |
-                IrInstruction::Cast { dest, .. } |
-                IrInstruction::Load { dest, .. } |
-                IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
-                IrInstruction::Call { dest, .. } => *dest,
-                IrInstruction::IndirectCall { dest, .. } => *dest,
-                IrInstruction::InlineAsm { outputs, .. } => {
-                    outputs.first().copied()
-                }
-                IrInstruction::VaArg { dest, .. } => Some(*dest),
-                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
-                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
-                IrInstruction::Simd { dest, .. } => *dest,
-            };
-            if let Some(var) = def_var {
+            // Record defs (using accessor)
+            if let Some(var) = inst.dest() {
                 if !alloca_vars.contains(&var) {
                     block_def[bi].insert(var);
                 }
@@ -154,28 +134,8 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
     position = 0;
     for block in &func.blocks {
         for inst in &block.instructions {
-            let def_var = match inst {
-                IrInstruction::Binary { dest, .. } |
-                IrInstruction::FloatBinary { dest, .. } |
-                IrInstruction::Unary { dest, .. } |
-                IrInstruction::FloatUnary { dest, .. } |
-                IrInstruction::Phi { dest, .. } |
-                IrInstruction::Copy { dest, .. } |
-                IrInstruction::Cast { dest, .. } |
-                IrInstruction::Load { dest, .. } |
-                IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
-                IrInstruction::Call { dest, .. } => *dest,
-                IrInstruction::IndirectCall { dest, .. } => *dest,
-                IrInstruction::InlineAsm { outputs, .. } => {
-                    outputs.first().copied()
-                }
-                IrInstruction::VaArg { dest, .. } => Some(*dest),
-                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
-                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
-                IrInstruction::Simd { dest, .. } => *dest,
-            };
-            
-            if let Some(var) = def_var {
+            // Record defs using accessor
+            if let Some(var) = inst.dest() {
                 if !alloca_vars.contains(&var) {
                     let entry = intervals.entry(var).or_insert((position, position));
                     if position < entry.0 { entry.0 = position; }
@@ -183,7 +143,8 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
                 }
             }
             
-            visit_operands(inst, |var| {
+            // Record uses using accessor
+            inst.for_each_use(|var| {
                 if !alloca_vars.contains(&var) {
                     let entry = intervals.entry(var).or_insert((position, position));
                     if position < entry.0 { entry.0 = position; }
@@ -248,79 +209,9 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
         .collect()
 }
 
+/// Visit all VarIds used by an instruction. Delegates to the centralized
+/// `Instruction::for_each_use` accessor on the IR type.
 pub fn visit_operands<F>(inst: &IrInstruction, mut f: F)
 where F: FnMut(VarId) {
-    match inst {
-        IrInstruction::Binary { left, right, .. } => {
-            if let Operand::Var(v) = left { f(*v); }
-            if let Operand::Var(v) = right { f(*v); }
-        }
-        IrInstruction::FloatBinary { left, right, .. } => {
-            if let Operand::Var(v) = left { f(*v); }
-            if let Operand::Var(v) = right { f(*v); }
-        }
-        IrInstruction::Unary { src, .. } => {
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::FloatUnary { src, .. } => {
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::Copy { src, .. } => {
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::Cast { src, .. } => {
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::Load { addr, .. } => {
-            if let Operand::Var(v) = addr { f(*v); }
-        }
-        IrInstruction::Store { addr, src, .. } => {
-            if let Operand::Var(v) = addr { f(*v); }
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::GetElementPtr { base, index, .. } => {
-            if let Operand::Var(v) = base { f(*v); }
-            if let Operand::Var(v) = index { f(*v); }
-        }
-        IrInstruction::Call { args, .. } => {
-            for arg in args {
-                if let Operand::Var(v) = arg { f(*v); }
-            }
-        }
-        IrInstruction::IndirectCall { func_ptr, args, .. } => {
-            if let Operand::Var(v) = func_ptr { f(*v); }
-            for arg in args {
-                if let Operand::Var(v) = arg { f(*v); }
-            }
-        }
-        IrInstruction::Phi { preds, .. } => {
-            for (_, v) in preds {
-                f(*v);
-            }
-        }
-        IrInstruction::InlineAsm { inputs, .. } => {
-            for input in inputs {
-                if let Operand::Var(v) = input { f(*v); }
-            }
-        }
-        IrInstruction::VaStart { list, .. } => {
-            if let Operand::Var(v) = list { f(*v); }
-        }
-        IrInstruction::VaEnd { list } => {
-            if let Operand::Var(v) = list { f(*v); }
-        }
-        IrInstruction::VaCopy { dest, src } => {
-            if let Operand::Var(v) = dest { f(*v); }
-            if let Operand::Var(v) = src { f(*v); }
-        }
-        IrInstruction::VaArg { list, .. } => {
-            if let Operand::Var(v) = list { f(*v); }
-        }
-        IrInstruction::Alloca { .. } => {}
-        IrInstruction::Simd { operands, .. } => {
-            for op in operands {
-                if let Operand::Var(v) = op { f(*v); }
-            }
-        }
-    }
+    inst.for_each_use(&mut f);
 }

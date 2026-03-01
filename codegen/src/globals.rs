@@ -148,67 +148,17 @@ impl Codegen {
 
     /// Get the size of a type in bytes.
     pub(crate) fn type_size(&self, ty: &Type) -> usize {
-        match ty {
-            Type::Bool => 1,
-            Type::Char | Type::UnsignedChar => 1,
-            Type::Short | Type::UnsignedShort => 2,
-            Type::Int | Type::UnsignedInt | Type::Float => 4,
-            Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong => 8,
-            Type::Double => 8,
-            Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
-            Type::Void => 0,
-            Type::Array(inner, size) => self.type_size(inner) * size,
-            Type::Struct(name) => {
-                if let Some(s_def) = self.structs.get(name) {
-                    let s_def = s_def.clone();
-                    let is_packed = s_def.attributes.iter().any(|a| matches!(a, model::Attribute::Packed));
-                    self.struct_size(&s_def, is_packed)
-                } else { 4 }
-            }
-            Type::Union(name) => {
-                if let Some(u_def) = self.unions.get(name) {
-                    u_def.fields.iter().map(|f| self.type_size(&f.field_type)).max().unwrap_or(0)
-                } else { 4 }
-            }
-            Type::Typedef(_) => 4,
-            Type::TypeofExpr(_) => 8, // Should be resolved before codegen
-        }
+        model::TypeLayout::new(&self.structs, &self.unions).size_of(ty)
     }
 
     /// Get the alignment of a type in bytes.
     pub(crate) fn type_alignment(&self, ty: &Type) -> usize {
-        match ty {
-            Type::Bool => 1,
-            Type::Char | Type::UnsignedChar => 1,
-            Type::Short | Type::UnsignedShort => 2,
-            Type::Int | Type::UnsignedInt | Type::Float => 4,
-            Type::Long | Type::UnsignedLong | Type::LongLong | Type::UnsignedLongLong
-            | Type::Double | Type::Pointer(_) | Type::FunctionPointer { .. } => 8,
-            Type::Array(inner, _) => self.type_alignment(inner),
-            Type::Struct(name) => {
-                if let Some(s_def) = self.structs.get(name) {
-                    s_def.fields.iter().map(|f| self.type_alignment(&f.field_type)).max().unwrap_or(4)
-                } else { 4 }
-            }
-            _ => 4,
-        }
+        model::TypeLayout::new(&self.structs, &self.unions).align_of(ty)
     }
 
     /// Compute the total size of a struct including padding.
     pub(crate) fn struct_size(&self, s_def: &model::StructDef, is_packed: bool) -> usize {
-        let mut size: usize = 0;
-        for field in &s_def.fields {
-            if !is_packed {
-                let align = self.type_alignment(&field.field_type);
-                size = (size + align - 1) / align * align;
-            }
-            size += self.type_size(&field.field_type);
-        }
-        if !is_packed {
-            let align = s_def.fields.iter().map(|f| self.type_alignment(&f.field_type)).max().unwrap_or(4);
-            size = (size + align - 1) / align * align;
-        }
-        size
+        model::TypeLayout::new(&self.structs, &self.unions).struct_size(s_def, is_packed)
     }
 }
 
@@ -544,8 +494,10 @@ mod tests {
     #[test]
     fn type_size_typedef() {
         let c = cg();
-        // Typedef fallback = 4
-        assert_eq!(c.type_size(&Type::Typedef("size_t".to_string())), 4);
+        // size_t is 8 bytes on x86_64, recognized by TypeLayout
+        assert_eq!(c.type_size(&Type::Typedef("size_t".to_string())), 8);
+        // Unknown typedef falls back to 4
+        assert_eq!(c.type_size(&Type::Typedef("my_custom_t".to_string())), 4);
     }
 
     // ─── type_alignment: structs ────────────────────────────────

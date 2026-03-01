@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::types::{VarId, BlockId, Instruction, Function, Operand, Terminator};
+#[allow(unused_imports)]
+use crate::types::BasicBlock;
 
 /// Verify that every VarId used as an operand in the function is defined
 /// exactly once (by an instruction dest, phi, or function parameter).
@@ -15,106 +17,51 @@ pub fn verify_ssa(func: &Function) -> Result<(), String> {
         defs.insert(*var);
     }
 
-    // Collect all VarIds defined by instructions
+    // Collect all VarIds defined by instructions (using accessor)
     for block in &func.blocks {
         for instr in &block.instructions {
-            match instr {
-                Instruction::Binary { dest, .. } | Instruction::FloatBinary { dest, .. } |
-                Instruction::Unary { dest, .. } | Instruction::FloatUnary { dest, .. } |
-                Instruction::Phi { dest, .. } | Instruction::Copy { dest, .. } |
-                Instruction::Cast { dest, .. } | Instruction::Alloca { dest, .. } |
-                Instruction::Load { dest, .. } | Instruction::GetElementPtr { dest, .. } |
-                Instruction::VaArg { dest, .. } => { defs.insert(*dest); }
-                Instruction::Call { dest, .. } | Instruction::IndirectCall { dest, .. } => {
-                    if let Some(d) = dest { defs.insert(*d); }
-                }
-                Instruction::InlineAsm { outputs, .. } => {
-                    for o in outputs { defs.insert(*o); }
-                }
-                Instruction::Store { .. } | Instruction::VaStart { .. } |
-                Instruction::VaEnd { .. } | Instruction::VaCopy { .. } => {}
-                Instruction::Simd { dest, .. } => {
-                    if let Some(d) = dest { defs.insert(*d); }
-                }
+            for d in instr.dests() {
+                defs.insert(d);
             }
         }
     }
 
-    // Now check that every used VarId is in the defs set
-    let check_operand = |op: &Operand, defs: &HashSet<VarId>, context: &str| -> Result<(), String> {
-        if let Operand::Var(v) = op {
-            if !defs.contains(v) {
-                return Err(format!("VarId({}) used but never defined ({})", v.0, context));
-            }
-        }
-        Ok(())
-    };
-
+    // Now check that every used VarId is in the defs set (using accessor)
     for block in &func.blocks {
+        let ctx = format!("block {:?}", block.id);
         for instr in &block.instructions {
-            let ctx = format!("block {:?}", block.id);
-            match instr {
-                Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
-                    check_operand(left, &defs, &ctx)?;
-                    check_operand(right, &defs, &ctx)?;
+            instr.for_each_use(|v| {
+                // We can't return Err from a closure, so collect violations
+                if !defs.contains(&v) {
+                    // Will be caught below
                 }
-                Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
-                    check_operand(src, &defs, &ctx)?;
+            });
+            // Re-check with error reporting
+            let mut violation = None;
+            instr.for_each_use(|v| {
+                if violation.is_none() && !defs.contains(&v) {
+                    violation = Some(format!("VarId({}) used but never defined ({})", v.0, ctx));
                 }
-                Instruction::Copy { src, .. } | Instruction::Cast { src, .. } => {
-                    check_operand(src, &defs, &ctx)?;
-                }
-                Instruction::Load { addr, .. } => {
-                    check_operand(addr, &defs, &ctx)?;
-                }
-                Instruction::Store { addr, src, .. } => {
-                    check_operand(addr, &defs, &ctx)?;
-                    check_operand(src, &defs, &ctx)?;
-                }
-                Instruction::GetElementPtr { base, index, .. } => {
-                    check_operand(base, &defs, &ctx)?;
-                    check_operand(index, &defs, &ctx)?;
-                }
-                Instruction::Call { args, .. } => {
-                    for arg in args { check_operand(arg, &defs, &ctx)?; }
-                }
-                Instruction::IndirectCall { func_ptr, args, .. } => {
-                    check_operand(func_ptr, &defs, &ctx)?;
-                    for arg in args { check_operand(arg, &defs, &ctx)?; }
-                }
-                Instruction::Phi { preds, .. } => {
-                    for (_, src) in preds {
-                        if !defs.contains(src) {
-                            return Err(format!("VarId({}) used in phi but never defined ({})", src.0, ctx));
-                        }
-                    }
-                }
-                Instruction::VaStart { list, .. } | Instruction::VaEnd { list } => {
-                    check_operand(list, &defs, &ctx)?;
-                }
-                Instruction::VaCopy { dest, src } => {
-                    check_operand(dest, &defs, &ctx)?;
-                    check_operand(src, &defs, &ctx)?;
-                }
-                Instruction::VaArg { list, .. } => {
-                    check_operand(list, &defs, &ctx)?;
-                }
-                Instruction::InlineAsm { inputs, .. } => {
-                    for input in inputs { check_operand(input, &defs, &ctx)?; }
-                }
-                Instruction::Alloca { .. } => {}
-                Instruction::Simd { operands, .. } => {
-                    for op in operands { check_operand(op, &defs, &ctx)?; }
-                }
+            });
+            if let Some(err) = violation {
+                return Err(err);
             }
         }
         // Check terminator operands
         match &block.terminator {
             Terminator::CondBr { cond, .. } => {
-                check_operand(cond, &defs, &format!("terminator of block {:?}", block.id))?;
+                if let Operand::Var(v) = cond {
+                    if !defs.contains(v) {
+                        return Err(format!("VarId({}) used but never defined (terminator of block {:?})", v.0, block.id));
+                    }
+                }
             }
             Terminator::Ret(Some(val)) => {
-                check_operand(val, &defs, &format!("terminator of block {:?}", block.id))?;
+                if let Operand::Var(v) = val {
+                    if !defs.contains(v) {
+                        return Err(format!("VarId({}) used but never defined (terminator of block {:?})", v.0, block.id));
+                    }
+                }
             }
             _ => {}
         }

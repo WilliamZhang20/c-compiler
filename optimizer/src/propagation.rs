@@ -78,49 +78,11 @@ pub fn copy_propagation(func: &mut Function) {
         
         for inst in &mut block.instructions {
             match inst {
-                Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
-                    replace_operand(left, &copies);
-                    replace_operand(right, &copies);
-                    collect_used_var(left, &mut used_vars);
-                    collect_used_var(right, &mut used_vars);
-                }
-                Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
-                    replace_operand(src, &copies);
-                    collect_used_var(src, &mut used_vars);
-                }
-                Instruction::Store { addr, src, .. } => {
-                    replace_operand(addr, &copies);
-                    replace_operand(src, &copies);
-                    collect_used_var(addr, &mut used_vars);
-                    collect_used_var(src, &mut used_vars);
-                }
-                Instruction::GetElementPtr { base, index, .. } => {
-                    replace_operand(base, &copies);
-                    replace_operand(index, &copies);
-                    collect_used_var(base, &mut used_vars);
-                    collect_used_var(index, &mut used_vars);
-                }
-                Instruction::Call { args, .. } => {
-                    for arg in args {
-                        replace_operand(arg, &copies);
-                        collect_used_var(arg, &mut used_vars);
+                Instruction::Phi { preds, .. } => {
+                    // Phi uses VarIds, not Operands — use replacement manually
+                    for (_, var_id) in preds {
+                        used_vars.insert(*var_id);
                     }
-                }
-                Instruction::IndirectCall { func_ptr, args, .. } => {
-                    replace_operand(func_ptr, &copies);
-                    collect_used_var(func_ptr, &mut used_vars);
-                    for arg in args {
-                        replace_operand(arg, &copies);
-                        collect_used_var(arg, &mut used_vars);
-                    }
-                }
-                Instruction::Cast { src, .. } => {
-                    replace_operand(src, &copies);
-                    collect_used_var(src, &mut used_vars);
-                }
-                Instruction::Load { addr, .. } => {
-                    replace_operand(addr, &copies);
-                    collect_used_var(addr, &mut used_vars);
                 }
                 Instruction::Copy { src, .. } => {
                     // Also propagate through the source of copy instructions and
@@ -129,7 +91,13 @@ pub fn copy_propagation(func: &mut Function) {
                     replace_operand(src, &copies);
                     collect_used_var(src, &mut used_vars);
                 }
-                _ => {}
+                _ => {
+                    // Use accessor for all other instructions
+                    inst.for_each_operand_mut(|op| {
+                        replace_operand(op, &copies);
+                        collect_used_var(op, &mut used_vars);
+                    });
+                }
             }
         }
 

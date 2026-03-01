@@ -79,23 +79,7 @@ impl<'a> Mem2RegPass<'a> {
     }
     
     fn compute_preds(&mut self) {
-        // Initialize all blocks in map
-        for block in &self.func.blocks {
-            self.preds.insert(block.id, Vec::new());
-        }
-        // Populate preds
-        for block in &self.func.blocks {
-            match &block.terminator {
-                Terminator::Br(target) => {
-                    self.preds.entry(*target).or_default().push(block.id);
-                }
-                Terminator::CondBr { then_block, else_block, .. } => {
-                    self.preds.entry(*then_block).or_default().push(block.id);
-                    self.preds.entry(*else_block).or_default().push(block.id);
-                }
-                _ => {}
-            }
-        }
+        self.preds = self.func.compute_predecessors();
     }
 
     fn identify_promotable_allocas(&mut self) {
@@ -324,68 +308,13 @@ impl<'a> Mem2RegPass<'a> {
         
         for block in &mut self.func.blocks {
             for instr in &mut block.instructions {
-                match instr {
-                    Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => {
-                        resolve_operand(left, &resolved_map);
-                        resolve_operand(right, &resolved_map);
-                    }
-                    Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => {
-                        resolve_operand(src, &resolved_map);
-                    }
-                    Instruction::Copy { src, .. } | Instruction::Cast { src, .. } => {
-                        resolve_operand(src, &resolved_map);
-                    }
-                    Instruction::Load { addr, .. } => {
-                        resolve_operand(addr, &resolved_map);
-                    }
-                    Instruction::Store { addr, src, .. } => {
-                        resolve_operand(addr, &resolved_map);
-                        resolve_operand(src, &resolved_map);
-                    }
-                    Instruction::GetElementPtr { base, index, .. } => {
-                        resolve_operand(base, &resolved_map);
-                        resolve_operand(index, &resolved_map);
-                    }
-                    Instruction::Call { args, .. } => {
-                        for arg in args.iter_mut() {
-                            resolve_operand(arg, &resolved_map);
-                        }
-                    }
-                    Instruction::IndirectCall { func_ptr, args, .. } => {
-                        resolve_operand(func_ptr, &resolved_map);
-                        for arg in args.iter_mut() {
-                            resolve_operand(arg, &resolved_map);
-                        }
-                    }
-                    Instruction::Phi { preds, .. } => {
-                        for (_, src) in preds.iter_mut() {
-                            if let Some(&resolved) = resolved_map.get(src) {
-                                *src = resolved;
-                            }
-                        }
-                    }
-                    Instruction::VaStart { list, .. } => {
-                        resolve_operand(list, &resolved_map);
-                    }
-                    Instruction::VaEnd { list } => {
-                        resolve_operand(list, &resolved_map);
-                    }
-                    Instruction::VaCopy { dest, src } => {
-                        resolve_operand(dest, &resolved_map);
-                        resolve_operand(src, &resolved_map);
-                    }
-                    Instruction::VaArg { list, .. } => {
-                        resolve_operand(list, &resolved_map);
-                    }
-                    Instruction::InlineAsm { inputs, .. } => {
-                        for input in inputs.iter_mut() {
-                            resolve_operand(input, &resolved_map);
-                        }
-                    }
-                    Instruction::Alloca { .. } => {}
-                    Instruction::Simd { operands, .. } => {
-                        for op in operands.iter_mut() {
-                            resolve_operand(op, &resolved_map);
+                // Use accessor for regular operands
+                instr.for_each_operand_mut(|op| resolve_operand(op, &resolved_map));
+                // Phi sources are VarIds, not Operands — handle separately
+                if let Instruction::Phi { preds, .. } = instr {
+                    for (_, src) in preds.iter_mut() {
+                        if let Some(&resolved) = resolved_map.get(src) {
+                            *src = resolved;
                         }
                     }
                 }
@@ -409,18 +338,9 @@ impl<'a> Mem2RegPass<'a> {
         for param in &func.params { check(param.1); }
         for block in &func.blocks {
             for instr in &block.instructions {
-                 match instr {
-                    Instruction::Binary { dest, .. } | Instruction::FloatBinary { dest, .. } |
-                    Instruction::Unary { dest, .. } | Instruction::FloatUnary { dest, .. } |
-                    Instruction::Phi { dest, .. } | Instruction::Copy { dest, .. } | Instruction::Cast { dest, .. } |
-                    Instruction::Alloca { dest, .. } | Instruction::Load { dest, .. } |
-                    Instruction::GetElementPtr { dest, .. } => check(*dest),
-                    Instruction::Call { dest, .. } | Instruction::IndirectCall { dest, .. } => {
-                        if let Some(d) = dest { check(*d) }
-                    }
-                    Instruction::InlineAsm { outputs, .. } => { for o in outputs { check(*o) } }
-                    _ => {}
-                 }
+                for d in instr.dests() {
+                    check(d);
+                }
             }
         }
         max
@@ -454,40 +374,19 @@ impl<'a> Mem2RegPass<'a> {
     }
     
     fn instruction_uses_var(instr: &Instruction, var_id: VarId) -> bool {
-        match instr {
-            Instruction::Binary { left, right, .. } | Instruction::FloatBinary { left, right, .. } => 
-                Self::operand_uses_var(left, var_id) || Self::operand_uses_var(right, var_id),
-            Instruction::Unary { src, .. } | Instruction::FloatUnary { src, .. } => 
-                Self::operand_uses_var(src, var_id),
-            Instruction::Copy { src, .. } | Instruction::Cast { src, .. } => Self::operand_uses_var(src, var_id),
-            Instruction::Load { addr, .. } => Self::operand_uses_var(addr, var_id),
-            Instruction::Store { addr, src, .. } => 
-                Self::operand_uses_var(addr, var_id) || Self::operand_uses_var(src, var_id),
-            Instruction::GetElementPtr { base, index, .. } => 
-                Self::operand_uses_var(base, var_id) || Self::operand_uses_var(index, var_id),
-            Instruction::Call { args, .. } =>
-                args.iter().any(|arg| Self::operand_uses_var(arg, var_id)),
-            Instruction::IndirectCall { func_ptr, args, .. } => 
-                Self::operand_uses_var(func_ptr, var_id)
-                || args.iter().any(|arg| Self::operand_uses_var(arg, var_id)),
-            Instruction::VaStart { list, .. } => 
-                Self::operand_uses_var(list, var_id),
-            Instruction::VaEnd { list } => Self::operand_uses_var(list, var_id),
-            Instruction::VaCopy { dest, src } => 
-                Self::operand_uses_var(dest, var_id) || Self::operand_uses_var(src, var_id),
-            Instruction::VaArg { list, .. } => Self::operand_uses_var(list, var_id),
-            Instruction::InlineAsm { inputs, outputs, .. } => 
-                inputs.iter().any(|input| Self::operand_uses_var(input, var_id))
-                || outputs.contains(&var_id),
-            Instruction::Phi { .. } | Instruction::Alloca { .. } => false,
-            Instruction::Simd { operands, dest, .. } => {
-                operands.iter().any(|op| Self::operand_uses_var(op, var_id))
-                || dest.map_or(false, |d| d == var_id)
+        let mut found = false;
+        instr.for_each_use(|v| {
+            if v == var_id { found = true; }
+        });
+        // Also check if var_id appears as an output dest (for InlineAsm/Simd)
+        if !found {
+            if let Instruction::InlineAsm { outputs, .. } = instr {
+                found = outputs.contains(&var_id);
+            }
+            if let Instruction::Simd { dest: Some(d), .. } = instr {
+                if *d == var_id { found = true; }
             }
         }
-    }
-
-    fn operand_uses_var(operand: &Operand, var_id: VarId) -> bool {
-        matches!(operand, Operand::Var(id) if *id == var_id)
+        found
     }
 }

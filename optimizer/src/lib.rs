@@ -1,5 +1,10 @@
 // Optimizer module: IR optimization passes for improving code quality and performance
 //
+// Architecture: Each optimization is a `FunctionPass` registered with a
+// `PassManager`.  The pipeline is built in `default_pipeline()`.  Adding a
+// new pass only requires implementing the trait and appending one entry –
+// no existing code needs editing.
+//
 // Module organization:
 // - algebraic.rs: Algebraic simplification (x*0=0, x+0=x, etc.)
 // - strength.rs: Strength reduction (multiply by power of 2 → shift)
@@ -40,64 +45,183 @@ use block_layout::optimize_block_layout;
 use loop_interchange::try_loop_interchange;
 use model::target::SimdLevel;
 
-/// Main optimization entry point
+// ═══════════════════════════════════════════════════════════════════
+//  Pass trait + PassManager
+// ═══════════════════════════════════════════════════════════════════
+
+/// A single optimization pass that operates on one IR function at a time.
 ///
-/// Runs a series of optimization passes on each function in the program:
-/// 1. Mem2reg - promote memory allocations to SSA registers
-/// 2. CFG simplification - merge blocks and eliminate empty jumps
-/// 3. Algebraic simplification - apply mathematical identities
-/// 4. Strength reduction - replace expensive ops with cheaper ones
-/// 5. Copy propagation - forward copy values
-/// 6. Load forwarding - eliminate redundant memory loads
-/// 7. Common subexpression elimination - remove redundant calculations
-/// 8. Constant folding - evaluate constant expressions at compile time
-/// 9. Dead code elimination - remove unused computations (integrated in folding)
-/// 10. CFG simplification (again) - clean up after optimizations
-///
-/// # Arguments
-/// * `program` - The IR program to optimize
-///
-/// # Returns
-/// * Optimized IR program with improved code quality and performance
+/// Implement this trait to add a new optimization.  Then register it in
+/// `default_pipeline()` via `PassManager::add_pass()`.
+pub trait FunctionPass {
+    /// Human-readable name for diagnostics / debugging.
+    fn name(&self) -> &str;
+
+    /// Apply the pass to a single function, mutating it in place.
+    fn run(&self, func: &mut ir::Function);
+}
+
+/// Ordered collection of `FunctionPass` objects that runs each pass on every
+/// function in the program.
+pub struct PassManager {
+    passes: Vec<Box<dyn FunctionPass>>,
+}
+
+impl PassManager {
+    pub fn new() -> Self {
+        PassManager { passes: Vec::new() }
+    }
+
+    /// Append a pass to the pipeline.
+    pub fn add_pass(&mut self, pass: Box<dyn FunctionPass>) {
+        self.passes.push(pass);
+    }
+
+    /// Run every registered pass, in order, on every function in the program.
+    pub fn run(&self, program: &mut IRProgram) {
+        for func in &mut program.functions {
+            for pass in &self.passes {
+                pass.run(func);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Concrete pass wrappers
+// ═══════════════════════════════════════════════════════════════════
+
+struct Mem2Reg;
+impl FunctionPass for Mem2Reg {
+    fn name(&self) -> &str { "mem2reg" }
+    fn run(&self, func: &mut ir::Function) { ir::mem2reg(func); }
+}
+
+struct AlgebraicSimplification;
+impl FunctionPass for AlgebraicSimplification {
+    fn name(&self) -> &str { "algebraic-simplification" }
+    fn run(&self, func: &mut ir::Function) { algebraic_simplification(func); }
+}
+
+struct StrengthReduction;
+impl FunctionPass for StrengthReduction {
+    fn name(&self) -> &str { "strength-reduction" }
+    fn run(&self, func: &mut ir::Function) { strength_reduce_function(func); }
+}
+
+struct CopyPropagation;
+impl FunctionPass for CopyPropagation {
+    fn name(&self) -> &str { "copy-propagation" }
+    fn run(&self, func: &mut ir::Function) { copy_propagation(func); }
+}
+
+struct LoadForwarding;
+impl FunctionPass for LoadForwarding {
+    fn name(&self) -> &str { "load-forwarding" }
+    fn run(&self, func: &mut ir::Function) { load_forwarding(func); }
+}
+
+struct CommonSubexprElim;
+impl FunctionPass for CommonSubexprElim {
+    fn name(&self) -> &str { "cse" }
+    fn run(&self, func: &mut ir::Function) { common_subexpression_elimination(func); }
+}
+
+struct FoldingAndDCE;
+impl FunctionPass for FoldingAndDCE {
+    fn name(&self) -> &str { "folding-dce" }
+    fn run(&self, func: &mut ir::Function) { optimize_function(func); }
+}
+
+struct LoopInterchange;
+impl FunctionPass for LoopInterchange {
+    fn name(&self) -> &str { "loop-interchange" }
+    fn run(&self, func: &mut ir::Function) { try_loop_interchange(func); }
+}
+
+struct LICM;
+impl FunctionPass for LICM {
+    fn name(&self) -> &str { "licm" }
+    fn run(&self, func: &mut ir::Function) { loop_invariant_code_motion(func); }
+}
+
+struct Prefetch;
+impl FunctionPass for Prefetch {
+    fn name(&self) -> &str { "prefetch" }
+    fn run(&self, func: &mut ir::Function) { insert_prefetches(func); }
+}
+
+struct Vectorize {
+    level: vectorize::SimdLevel,
+}
+impl FunctionPass for Vectorize {
+    fn name(&self) -> &str { "vectorize" }
+    fn run(&self, func: &mut ir::Function) {
+        vectorize::vectorize_function(func, self.level);
+    }
+}
+
+struct RemovePhis;
+impl FunctionPass for RemovePhis {
+    fn name(&self) -> &str { "remove-phis" }
+    fn run(&self, func: &mut ir::Function) { ir::remove_phis(func); }
+}
+
+struct CfgSimplify;
+impl FunctionPass for CfgSimplify {
+    fn name(&self) -> &str { "cfg-simplify" }
+    fn run(&self, func: &mut ir::Function) { simplify_cfg(func); }
+}
+
+struct BlockLayout;
+impl FunctionPass for BlockLayout {
+    fn name(&self) -> &str { "block-layout" }
+    fn run(&self, func: &mut ir::Function) { optimize_block_layout(func); }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Pipeline construction
+// ═══════════════════════════════════════════════════════════════════
+
+/// Build the default optimization pipeline for the given SIMD capability.
+pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
+    let mut pm = PassManager::new();
+    pm.add_pass(Box::new(Mem2Reg));
+    pm.add_pass(Box::new(AlgebraicSimplification));
+    pm.add_pass(Box::new(StrengthReduction));
+    pm.add_pass(Box::new(CopyPropagation));
+    pm.add_pass(Box::new(LoadForwarding));
+    pm.add_pass(Box::new(CommonSubexprElim));
+    pm.add_pass(Box::new(FoldingAndDCE));
+    pm.add_pass(Box::new(LoopInterchange));
+    pm.add_pass(Box::new(LICM));
+    pm.add_pass(Box::new(Prefetch));
+    if simd_level >= SimdLevel::SSE2 {
+        let vec_level = match simd_level {
+            SimdLevel::AVX2 | SimdLevel::AVX => vectorize::SimdLevel::AVX2,
+            _ => vectorize::SimdLevel::SSE2,
+        };
+        pm.add_pass(Box::new(Vectorize { level: vec_level }));
+    }
+    pm.add_pass(Box::new(RemovePhis));
+    pm.add_pass(Box::new(CfgSimplify));
+    pm.add_pass(Box::new(BlockLayout));
+    pm
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Public entry points
+// ═══════════════════════════════════════════════════════════════════
+
+/// Main optimization entry point (auto-detects SIMD level).
 pub fn optimize(program: IRProgram) -> IRProgram {
     optimize_with_simd(program, SimdLevel::detect())
 }
 
-/// Optimize with explicit SIMD level control
+/// Optimize with explicit SIMD level control.
 pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRProgram {
-    for func in &mut program.functions {
-        ir::mem2reg(func);
-        algebraic_simplification(func);
-        strength_reduce_function(func);
-        copy_propagation(func);
-        load_forwarding(func);
-        common_subexpression_elimination(func);
-        optimize_function(func); // Includes constant folding and DCE
-
-        // Loop interchange: swap nested loop order for better cache stride patterns
-        try_loop_interchange(func);
-
-        // Loop-invariant code motion: hoist invariant computations out of loops
-        loop_invariant_code_motion(func);
-
-        // Software prefetch insertion: add prefetch hints for large-stride array loops
-        insert_prefetches(func);
-
-        // Auto-vectorization: analyze loops and emit vectorized IR
-        if simd_level >= SimdLevel::SSE2 {
-            let vec_level = match simd_level {
-                SimdLevel::AVX2 | SimdLevel::AVX => vectorize::SimdLevel::AVX2,
-                _ => vectorize::SimdLevel::SSE2,
-            };
-            vectorize::vectorize_function(func, vec_level);
-        }
-
-        ir::remove_phis(func);
-        simplify_cfg(func);  // Run AFTER phi removal (only uses remove_empty_blocks now)
-
-        // Block layout: reorder blocks for I-cache locality (hot loops placed tight)
-        optimize_block_layout(func);
-    }
+    let pipeline = default_pipeline(simd_level);
+    pipeline.run(&mut program);
     program
 }
 

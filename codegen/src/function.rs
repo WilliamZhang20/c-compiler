@@ -37,6 +37,11 @@ pub struct FunctionGenerator<'a> {
 }
 
 impl<'a> FunctionGenerator<'a> {
+    /// Get the calling convention for this target.
+    pub(crate) fn convention(&self) -> Box<dyn crate::calling_convention::CallingConvention> {
+        get_convention(self.target.calling_convention)
+    }
+
     pub fn new(
         structs: &'a HashMap<String, model::StructDef>,
         unions: &'a HashMap<String, model::UnionDef>,
@@ -77,7 +82,7 @@ impl<'a> FunctionGenerator<'a> {
         let uses_va_start = func.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, IrInstruction::VaStart {..})));
 
         // Get calling convention for this target
-        let convention = get_convention(self.target.calling_convention);
+        let convention = self.convention();
         
         // Perform register allocation
         if self.enable_regalloc {
@@ -416,254 +421,14 @@ impl<'a> FunctionGenerator<'a> {
     fn gen_instr(&mut self, inst: &IrInstruction) {
         match inst {
             IrInstruction::Cast { dest, src, r#type } => {
-                self.var_types.insert(*dest, r#type.clone());
-                let d_op = self.var_to_op(*dest);
-                
-                // Handle Alloca src (pointer cast)
-                if let Operand::Var(var) = src {
-                    if let Some(off) = self.alloca_buffers.get(var) {
-                        let mem_op = X86Operand::Mem(X86Reg::Rbp, *off);
-                         match &d_op {
-                            X86Operand::Reg(_) => {
-                                self.asm.push(X86Instr::Lea(d_op.clone(), mem_op));
-                            }
-                            _ => {
-                                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), mem_op));
-                                self.asm.push(X86Instr::Mov(d_op.clone(), X86Operand::Reg(X86Reg::Rax)));
-                            }
-                        }
-                        return;
-                    }
-                }
-
-                let dest_is_float = matches!(r#type, Type::Float | Type::Double);
-                let src_is_float = match src {
-                    Operand::FloatConstant(_) => true,
-                    Operand::Var(v) => {
-                         self.var_types.get(v).map(|t| matches!(t, Type::Float | Type::Double)).unwrap_or(false)
-                    }
-                    _ => false
-                };
-                
-                let s_op = self.operand_to_op(src);
-
-                if dest_is_float && !src_is_float {
-                    // Int -> Float/Double
-                    let src_reg = if let X86Operand::Imm(_) = s_op {
-                        self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op.clone()));
-                        X86Operand::Reg(X86Reg::Eax)
-                    } else if matches!(s_op, X86Operand::DwordMem(..) | X86Operand::Mem(..)) {
-                         s_op.clone()
-                    } else {
-                        s_op.clone()
-                    };
-                    
-                    let dest_is_double = matches!(r#type, Type::Double);
-                    if dest_is_double {
-                        self.asm.push(X86Instr::Cvtsi2sd(X86Operand::Reg(X86Reg::Xmm0), src_reg));
-                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    } else {
-                        self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), src_reg));
-                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    }
-                    
-                } else if !dest_is_float && src_is_float {
-                    // Float/Double -> Int
-                    let use_rax = !matches!(d_op, X86Operand::DwordMem(..));
-                    let dst_reg = if use_rax { X86Reg::Rax } else { X86Reg::Eax };
-                    let src_is_double = match src {
-                        Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
-                        _ => false,
-                    };
-                    
-                    if src_is_double {
-                        if matches!(s_op, X86Operand::DoubleMem(..) | X86Operand::Mem(..)) {
-                            self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                            self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
-                        } else {
-                            self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), s_op));
-                        }
-                    } else {
-                        if matches!(s_op, X86Operand::FloatMem(..) | X86Operand::DwordMem(..)) {
-                            self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                            self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
-                        } else {
-                            self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), s_op));
-                        }
-                    }
-                    self.asm.push(X86Instr::Mov(d_op.clone(), X86Operand::Reg(dst_reg)));
-                } else if dest_is_float && src_is_float {
-                    // Float<->Double conversion or same-type copy
-                    let dest_is_double = matches!(r#type, Type::Double);
-                    let src_is_double = match src {
-                        Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
-                        _ => false,
-                    };
-                    if !src_is_double && dest_is_double {
-                        // float -> double
-                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                        self.asm.push(X86Instr::Cvtss2sd(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
-                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    } else if src_is_double && !dest_is_double {
-                        // double -> float
-                        self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                        self.asm.push(X86Instr::Cvtsd2ss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
-                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    } else if dest_is_double {
-                        self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                        self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    } else {
-                        self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                        self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                    }
-                } else {
-                         // Check operand sizes to avoid invalid mov instructions
-                         let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
-                         let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
-                         
-                         if src_is_dword && dst_is_dword {
-                             // Both 32-bit
-                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
-                         } else if src_is_dword {
-                             // 32-bit source to 64-bit dest - zero extend via EAX
-                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                         } else if dst_is_dword {
-                             // 64-bit source to 32-bit dest - truncate via RAX->EAX
-                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
-                         } else {
-                             // Both 64-bit
-                             self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                             self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                         }
-                     }
+                self.gen_cast(*dest, src, r#type);
             }
             IrInstruction::Copy { dest, src} => {
-                 if !self.var_types.contains_key(dest) {
-                    let inferred_src_type = if let Operand::Var(v) = src {
-                        self.var_types.get(v).cloned()
-                    } else if let Operand::FloatConstant(_) = src {
-                        Some(Type::Float)
-                    } else if let Operand::Constant(_) = src {
-                        Some(Type::Int)
-                    } else {
-                        None
-                    };
-                    if let Some(t) = inferred_src_type {
-                        self.var_types.insert(*dest, t);
-                    }
-                }
-                
-                let s_op = self.operand_to_op(src);
-                let d_op = self.var_to_op(*dest);
-                
-                // Handle Global variables (load address)
-                if let X86Operand::Label(name) = &s_op {
-                    let rip_rel = X86Operand::RipRelLabel(name.clone());
-                    match &d_op {
-                        X86Operand::Reg(_) => {
-                            self.asm.push(X86Instr::Lea(d_op.clone(), rip_rel));
-                        }
-                        _ => {
-                            self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), rip_rel));
-                            self.asm.push(X86Instr::Mov(d_op.clone(), X86Operand::Reg(X86Reg::Rax)));
-                        }
-                    }
-                    return;
-                }
-                
-                // Handle Alloca addresses (arrays/structs on stack) -> LEA
-                if let Operand::Var(var) = src {
-                    if let Some(off) = self.alloca_buffers.get(var) {
-                        let mem_op = X86Operand::Mem(X86Reg::Rbp, *off);
-                        match &d_op {
-                             X86Operand::Reg(_) => {
-                                 self.asm.push(X86Instr::Lea(d_op.clone(), mem_op));
-                             }
-                             _ => {
-                                 self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), mem_op));
-                                 self.asm.push(X86Instr::Mov(d_op.clone(), X86Operand::Reg(X86Reg::Rax)));
-                             }
-                        }
-                        return;
-                    }
-                }
-
-                // If s_op is a Mem operand that matches an alloca buffer offset
-                if let X86Operand::Mem(X86Reg::Rbp, offset) = s_op {
-                    let is_alloca_buffer = self.alloca_buffers.values().any(|&buf_offset| buf_offset == offset);
-                    if is_alloca_buffer {
-                        self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset)));
-                        self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                        return;
-                    }
-                }
-                
-                // Check if float/double
-                if matches!(s_op, X86Operand::DoubleMem(..)) || matches!(d_op, X86Operand::DoubleMem(..)) {
-                     self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                     self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                } else if matches!(s_op, X86Operand::FloatMem(..)) || matches!(d_op, X86Operand::FloatMem(..)) {
-                     self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
-                     self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
-                } else if matches!(s_op, X86Operand::DwordMem(..)) && matches!(d_op, X86Operand::DwordMem(..)) {
-                     // Both 32-bit memory
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
-                } else if matches!(s_op, X86Operand::Mem(..)) && matches!(d_op, X86Operand::Mem(..)) {
-                     // Both 64-bit memory
-                     self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                     self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                } else {
-                     // Handle all other cases including register<->memory moves
-                     let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
-                     let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
-                     let dst_is_reg64 = matches!(d_op, X86Operand::Reg(X86Reg::Rax | X86Reg::Rbx | X86Reg::Rcx | X86Reg::Rdx | X86Reg::Rsi | X86Reg::Rdi | X86Reg::Rsp | X86Reg::Rbp | X86Reg::R8 | X86Reg::R9 | X86Reg::R10 | X86Reg::R11 | X86Reg::R12 | X86Reg::R13 | X86Reg::R14 | X86Reg::R15));
-                     let dst_is_reg32 = matches!(d_op, X86Operand::Reg(X86Reg::Eax | X86Reg::Ebx | X86Reg::Ecx | X86Reg::Edx | X86Reg::Esi | X86Reg::Edi | X86Reg::Esp | X86Reg::Ebp | X86Reg::R8d | X86Reg::R9d | X86Reg::R10d | X86Reg::R11d | X86Reg::R12d | X86Reg::R13d | X86Reg::R14d | X86Reg::R15d));
-                     
-                     if src_is_dword && dst_is_reg64 {
-                         // 32-bit memory to 64-bit register - need to go through EAX first
-                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                     } else if src_is_dword && !dst_is_dword && !dst_is_reg32 {
-                         //32-bit source to non-32-bit dest (64-bit mem or reg)
-                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
-                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
-                     } else if !src_is_dword && dst_is_dword {
-                         // 64-bit source to 32-bit dest
-                         self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
-                         self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
-                     } else {
-                         self.asm.push(X86Instr::Mov(d_op, s_op));
-                     }
-                }
+                self.gen_copy(*dest, src);
             }
             IrInstruction::Binary { dest, op, left, right } => {
-                let l_op = if let Operand::Var(var) = left {
-                    if let Some(off) = self.alloca_buffers.get(var) {
-                         self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::R10), X86Operand::Mem(X86Reg::Rbp, *off)));
-                         X86Operand::Reg(X86Reg::R10)
-                    } else { self.operand_to_op(left) }
-                } else if let Operand::Global(name) = left {
-                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::R10), X86Operand::RipRelLabel(name.clone())));
-                    X86Operand::Reg(X86Reg::R10)
-                } else {
-                    self.operand_to_op(left)
-                };
-
-                let r_op = if let Operand::Var(var) = right {
-                    if let Some(off) = self.alloca_buffers.get(var) {
-                         self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::R11), X86Operand::Mem(X86Reg::Rbp, *off)));
-                         X86Operand::Reg(X86Reg::R11)
-                    } else { self.operand_to_op(right) }
-                } else if let Operand::Global(name) = right {
-                    self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::R11), X86Operand::RipRelLabel(name.clone())));
-                    X86Operand::Reg(X86Reg::R11)
-                } else {
-                    self.operand_to_op(right)
-                };
+                let l_op = self.materialize_operand(left, X86Reg::R10);
+                let r_op = self.materialize_operand(right, X86Reg::R11);
 
                 let d_op = self.var_to_op(*dest);
                 // Determine signedness for shift direction: unsigned types use shr, signed use sar
@@ -832,6 +597,247 @@ impl<'a> FunctionGenerator<'a> {
             4 => X86Reg::Ymm4, 5 => X86Reg::Ymm5, 6 => X86Reg::Ymm6, 7 => X86Reg::Ymm7,
             8 => X86Reg::Ymm8, 9 => X86Reg::Ymm9, 10 => X86Reg::Ymm10, 11 => X86Reg::Ymm11,
             12 => X86Reg::Ymm12, 13 => X86Reg::Ymm13, 14 => X86Reg::Ymm14, _ => X86Reg::Ymm15,
+        }
+    }
+
+    /// Emit LEA into `dest`, routing through Rax if `dest` is a memory operand.
+    fn emit_lea_to(&mut self, dest: &X86Operand, src: X86Operand) {
+        match dest {
+            X86Operand::Reg(_) => {
+                self.asm.push(X86Instr::Lea(dest.clone(), src));
+            }
+            _ => {
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), src));
+                self.asm.push(X86Instr::Mov(dest.clone(), X86Operand::Reg(X86Reg::Rax)));
+            }
+        }
+    }
+
+    /// If `operand` is an alloca buffer or global, materialize its address into `scratch_reg`
+    /// and return the register operand. Otherwise return `operand_to_op(operand)`.
+    pub(crate) fn materialize_operand(&mut self, operand: &Operand, scratch_reg: X86Reg) -> X86Operand {
+        if let Operand::Var(var) = operand {
+            if let Some(off) = self.alloca_buffers.get(var) {
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(scratch_reg.clone()), X86Operand::Mem(X86Reg::Rbp, *off)));
+                return X86Operand::Reg(scratch_reg);
+            }
+        }
+        if let Operand::Global(name) = operand {
+            self.asm.push(X86Instr::Lea(X86Operand::Reg(scratch_reg.clone()), X86Operand::RipRelLabel(name.clone())));
+            return X86Operand::Reg(scratch_reg);
+        }
+        self.operand_to_op(operand)
+    }
+
+    /// Load the effective address of `operand` into `dest_reg`.
+    /// Alloca buffer → LEA [rbp+off], Global → LEA name[rip], otherwise MOV from operand slot.
+    pub(crate) fn load_address_into(&mut self, operand: &Operand, dest_reg: X86Reg) {
+        let op = self.materialize_operand(operand, dest_reg.clone());
+        if !matches!(&op, X86Operand::Reg(r) if *r == dest_reg) {
+            // materialize_operand didn't load into dest_reg (normal operand), so emit MOV
+            self.asm.push(X86Instr::Mov(X86Operand::Reg(dest_reg), op));
+        }
+    }
+
+    /// Generate x86 instructions for an IR Cast instruction.
+    fn gen_cast(&mut self, dest: VarId, src: &Operand, r#type: &Type) {
+        self.var_types.insert(dest, r#type.clone());
+        let d_op = self.var_to_op(dest);
+
+        // Handle Alloca src (pointer cast)
+        if let Operand::Var(var) = src {
+            if let Some(off) = self.alloca_buffers.get(var) {
+                let mem_op = X86Operand::Mem(X86Reg::Rbp, *off);
+                self.emit_lea_to(&d_op, mem_op);
+                return;
+            }
+        }
+
+        let dest_is_float = matches!(r#type, Type::Float | Type::Double);
+        let src_is_float = match src {
+            Operand::FloatConstant(_) => true,
+            Operand::Var(v) => {
+                self.var_types.get(v).map(|t| matches!(t, Type::Float | Type::Double)).unwrap_or(false)
+            }
+            _ => false,
+        };
+
+        let s_op = self.operand_to_op(src);
+
+        if dest_is_float && !src_is_float {
+            // Int -> Float/Double
+            let src_reg = if let X86Operand::Imm(_) = s_op {
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op.clone()));
+                X86Operand::Reg(X86Reg::Eax)
+            } else {
+                s_op.clone()
+            };
+
+            let dest_is_double = matches!(r#type, Type::Double);
+            if dest_is_double {
+                self.asm.push(X86Instr::Cvtsi2sd(X86Operand::Reg(X86Reg::Xmm0), src_reg));
+                self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else {
+                self.asm.push(X86Instr::Cvtsi2ss(X86Operand::Reg(X86Reg::Xmm0), src_reg));
+                self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            }
+        } else if !dest_is_float && src_is_float {
+            // Float/Double -> Int
+            let use_rax = !matches!(d_op, X86Operand::DwordMem(..));
+            let dst_reg = if use_rax { X86Reg::Rax } else { X86Reg::Eax };
+            let src_is_double = match src {
+                Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
+                _ => false,
+            };
+
+            if src_is_double {
+                if matches!(s_op, X86Operand::DoubleMem(..) | X86Operand::Mem(..)) {
+                    self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                    self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
+                } else {
+                    self.asm.push(X86Instr::Cvttsd2si(X86Operand::Reg(dst_reg.clone()), s_op));
+                }
+            } else {
+                if matches!(s_op, X86Operand::FloatMem(..) | X86Operand::DwordMem(..)) {
+                    self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                    self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), X86Operand::Reg(X86Reg::Xmm0)));
+                } else {
+                    self.asm.push(X86Instr::Cvttss2si(X86Operand::Reg(dst_reg.clone()), s_op));
+                }
+            }
+            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(dst_reg)));
+        } else if dest_is_float && src_is_float {
+            // Float<->Double conversion or same-type copy
+            let dest_is_double = matches!(r#type, Type::Double);
+            let src_is_double = match src {
+                Operand::Var(v) => self.var_types.get(v).map(|t| matches!(t, Type::Double)).unwrap_or(false),
+                _ => false,
+            };
+            if !src_is_double && dest_is_double {
+                // float -> double
+                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                self.asm.push(X86Instr::Cvtss2sd(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
+                self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else if src_is_double && !dest_is_double {
+                // double -> float
+                self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                self.asm.push(X86Instr::Cvtsd2ss(X86Operand::Reg(X86Reg::Xmm0), X86Operand::Reg(X86Reg::Xmm0)));
+                self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else if dest_is_double {
+                self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            } else {
+                self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+                self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+            }
+        } else {
+            // Int-to-int: check operand sizes to avoid invalid mov instructions
+            let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+            let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+
+            if src_is_dword && dst_is_dword {
+                // Both 32-bit
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+            } else if src_is_dword {
+                // 32-bit source to 64-bit dest - zero extend via EAX
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            } else if dst_is_dword {
+                // 64-bit source to 32-bit dest - truncate via RAX->EAX
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+            } else {
+                // Both 64-bit
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            }
+        }
+    }
+
+    /// Generate x86 instructions for an IR Copy instruction.
+    fn gen_copy(&mut self, dest: VarId, src: &Operand) {
+        if !self.var_types.contains_key(&dest) {
+            let inferred_src_type = if let Operand::Var(v) = src {
+                self.var_types.get(v).cloned()
+            } else if let Operand::FloatConstant(_) = src {
+                Some(Type::Float)
+            } else if let Operand::Constant(_) = src {
+                Some(Type::Int)
+            } else {
+                None
+            };
+            if let Some(t) = inferred_src_type {
+                self.var_types.insert(dest, t);
+            }
+        }
+
+        let s_op = self.operand_to_op(src);
+        let d_op = self.var_to_op(dest);
+
+        // Handle Global variables (load address)
+        if let X86Operand::Label(name) = &s_op {
+            let rip_rel = X86Operand::RipRelLabel(name.clone());
+            self.emit_lea_to(&d_op, rip_rel);
+            return;
+        }
+
+        // Handle Alloca addresses (arrays/structs on stack) -> LEA
+        if let Operand::Var(var) = src {
+            if let Some(off) = self.alloca_buffers.get(var) {
+                let mem_op = X86Operand::Mem(X86Reg::Rbp, *off);
+                self.emit_lea_to(&d_op, mem_op);
+                return;
+            }
+        }
+
+        // If s_op is a Mem operand that matches an alloca buffer offset
+        if let X86Operand::Mem(X86Reg::Rbp, offset) = s_op {
+            let is_alloca_buffer = self.alloca_buffers.values().any(|&buf_offset| buf_offset == offset);
+            if is_alloca_buffer {
+                self.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, offset)));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+                return;
+            }
+        }
+
+        // Check if float/double
+        if matches!(s_op, X86Operand::DoubleMem(..)) || matches!(d_op, X86Operand::DoubleMem(..)) {
+            self.asm.push(X86Instr::Movsd(X86Operand::Reg(X86Reg::Xmm0), s_op));
+            self.asm.push(X86Instr::Movsd(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+        } else if matches!(s_op, X86Operand::FloatMem(..)) || matches!(d_op, X86Operand::FloatMem(..)) {
+            self.asm.push(X86Instr::Movss(X86Operand::Reg(X86Reg::Xmm0), s_op));
+            self.asm.push(X86Instr::Movss(d_op, X86Operand::Reg(X86Reg::Xmm0)));
+        } else if matches!(s_op, X86Operand::DwordMem(..)) && matches!(d_op, X86Operand::DwordMem(..)) {
+            // Both 32-bit memory
+            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+        } else if matches!(s_op, X86Operand::Mem(..)) && matches!(d_op, X86Operand::Mem(..)) {
+            // Both 64-bit memory
+            self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+            self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+        } else {
+            // Handle all other cases including register<->memory moves
+            let src_is_dword = matches!(s_op, X86Operand::DwordMem(..));
+            let dst_is_dword = matches!(d_op, X86Operand::DwordMem(..));
+            let dst_is_reg64 = matches!(d_op, X86Operand::Reg(X86Reg::Rax | X86Reg::Rbx | X86Reg::Rcx | X86Reg::Rdx | X86Reg::Rsi | X86Reg::Rdi | X86Reg::Rsp | X86Reg::Rbp | X86Reg::R8 | X86Reg::R9 | X86Reg::R10 | X86Reg::R11 | X86Reg::R12 | X86Reg::R13 | X86Reg::R14 | X86Reg::R15));
+            let dst_is_reg32 = matches!(d_op, X86Operand::Reg(X86Reg::Eax | X86Reg::Ebx | X86Reg::Ecx | X86Reg::Edx | X86Reg::Esi | X86Reg::Edi | X86Reg::Esp | X86Reg::Ebp | X86Reg::R8d | X86Reg::R9d | X86Reg::R10d | X86Reg::R11d | X86Reg::R12d | X86Reg::R13d | X86Reg::R14d | X86Reg::R15d));
+
+            if src_is_dword && dst_is_reg64 {
+                // 32-bit memory to 64-bit register - need to go through EAX first
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            } else if src_is_dword && !dst_is_dword && !dst_is_reg32 {
+                // 32-bit source to non-32-bit dest (64-bit mem or reg)
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Rax)));
+            } else if !src_is_dword && dst_is_dword {
+                // 64-bit source to 32-bit dest
+                self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
+                self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
+            } else {
+                self.asm.push(X86Instr::Mov(d_op, s_op));
+            }
         }
     }
 

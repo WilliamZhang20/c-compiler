@@ -49,23 +49,7 @@ fn is_defined_in_loop(var: VarId, func: &Function, loop_body: &HashSet<BlockId>)
 
 /// Get the variable defined by an instruction (if any)
 fn get_def(inst: &Instruction) -> Option<VarId> {
-    match inst {
-        Instruction::Binary { dest, .. }
-        | Instruction::FloatBinary { dest, .. }
-        | Instruction::Unary { dest, .. }
-        | Instruction::FloatUnary { dest, .. }
-        | Instruction::Copy { dest, .. }
-        | Instruction::Cast { dest, .. }
-        | Instruction::Alloca { dest, .. }
-        | Instruction::Load { dest, .. }
-        | Instruction::GetElementPtr { dest, .. }
-        | Instruction::Phi { dest, .. } => Some(*dest),
-        Instruction::Call { dest: Some(d), .. }
-        | Instruction::IndirectCall { dest: Some(d), .. }
-        | Instruction::VaArg { dest: d, .. } => Some(*d),
-        Instruction::Simd { dest: Some(d), .. } => Some(*d),
-        _ => None,
-    }
+    inst.dest()
 }
 
 /// Check if an operand is loop-invariant (constant or defined outside the loop)

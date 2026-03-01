@@ -61,6 +61,50 @@ impl X86Reg {
             other => other.clone(),
         }
     }
+
+    /// Return a stable numeric ID for the physical register,
+    /// collapsing aliases (rax/eax/ax/al → 0, xmm0/ymm0 → 16, etc.).
+    pub fn physical_id(&self) -> u8 {
+        match self {
+            Self::Rax | Self::Eax | Self::Ax | Self::Al => 0,
+            Self::Rcx | Self::Ecx | Self::Cx | Self::Cl => 1,
+            Self::Rdx | Self::Edx => 2,
+            Self::Rbx | Self::Ebx => 3,
+            Self::Rsp | Self::Esp => 4,
+            Self::Rbp | Self::Ebp => 5,
+            Self::Rsi | Self::Esi => 6,
+            Self::Rdi | Self::Edi => 7,
+            Self::R8 | Self::R8d => 8,
+            Self::R9 | Self::R9d => 9,
+            Self::R10 | Self::R10d => 10,
+            Self::R11 | Self::R11d => 11,
+            Self::R12 | Self::R12d => 12,
+            Self::R13 | Self::R13d => 13,
+            Self::R14 | Self::R14d => 14,
+            Self::R15 | Self::R15d => 15,
+            Self::Xmm0 | Self::Ymm0 => 16,
+            Self::Xmm1 | Self::Ymm1 => 17,
+            Self::Xmm2 | Self::Ymm2 => 18,
+            Self::Xmm3 | Self::Ymm3 => 19,
+            Self::Xmm4 | Self::Ymm4 => 20,
+            Self::Xmm5 | Self::Ymm5 => 21,
+            Self::Xmm6 | Self::Ymm6 => 22,
+            Self::Xmm7 | Self::Ymm7 => 23,
+            Self::Xmm8 | Self::Ymm8 => 24,
+            Self::Xmm9 | Self::Ymm9 => 25,
+            Self::Xmm10 | Self::Ymm10 => 26,
+            Self::Xmm11 | Self::Ymm11 => 27,
+            Self::Xmm12 | Self::Ymm12 => 28,
+            Self::Xmm13 | Self::Ymm13 => 29,
+            Self::Xmm14 | Self::Ymm14 => 30,
+            Self::Xmm15 | Self::Ymm15 => 31,
+        }
+    }
+
+    /// Returns true if two registers share the same physical register.
+    pub fn same_physical(&self, other: &Self) -> bool {
+        self.physical_id() == other.physical_id()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +152,35 @@ fn fmt_mem(f: &mut fmt::Formatter<'_>, size: &str, reg: &X86Reg, offset: i32) ->
         write!(f, "{} [{}]", size, reg.to_str())
     } else {
         write!(f, "{} [{}{:+}]", size, reg.to_str(), offset)
+    }
+}
+
+impl X86Operand {
+    /// Returns true if this operand references the given register,
+    /// either as a direct register or as a memory base.
+    pub fn references_reg(&self, reg: &X86Reg) -> bool {
+        match self {
+            Self::Reg(r) => r.same_physical(reg),
+            Self::Mem(r, _) | Self::DwordMem(r, _) | Self::WordMem(r, _) |
+            Self::ByteMem(r, _) | Self::FloatMem(r, _) | Self::DoubleMem(r, _) |
+            Self::XmmwordMem(r, _) | Self::YmmwordMem(r, _) => r.same_physical(reg),
+            _ => false,
+        }
+    }
+
+    /// Returns true if this operand is a direct register matching the given physical register.
+    pub fn is_direct_reg(&self, reg: &X86Reg) -> bool {
+        matches!(self, Self::Reg(r) if r.same_physical(reg))
+    }
+
+    /// Returns true if this operand uses the register as a memory base address.
+    pub fn has_base_reg(&self, reg: &X86Reg) -> bool {
+        match self {
+            Self::Mem(r, _) | Self::DwordMem(r, _) | Self::WordMem(r, _) |
+            Self::ByteMem(r, _) | Self::FloatMem(r, _) | Self::DoubleMem(r, _) |
+            Self::XmmwordMem(r, _) | Self::YmmwordMem(r, _) => r.same_physical(reg),
+            _ => false,
+        }
     }
 }
 
@@ -202,6 +275,143 @@ pub enum X86Instr {
     Vpxor(X86Operand, X86Operand, X86Operand),      // AVX packed XOR
     Vpbroadcastd(X86Operand, X86Operand),            // AVX2 broadcast dword to all lanes
     Raw(String), // Raw assembly string (for inline asm)
+}
+
+impl X86Instr {
+    /// Returns true if this instruction reads the given physical register.
+    /// Conservatively matches the existing peephole liveness semantics.
+    pub fn reads_phys_reg(&self, reg: &X86Reg) -> bool {
+        match self {
+            // Mov-like: reads src; reads mem-dest base (store needs base address)
+            X86Instr::Mov(dest, src) | X86Instr::Movss(dest, src) |
+            X86Instr::Movsd(dest, src) => {
+                src.references_reg(reg) || dest.has_base_reg(reg)
+            }
+            // Write-only dest, read src
+            X86Instr::Lea(_, src) | X86Instr::Movsx(_, src) |
+            X86Instr::Movzx(_, src) => src.references_reg(reg),
+            // Shuffle/extract: write-only dest, read src
+            X86Instr::Pshufd(_, src, _) | X86Instr::Vextracti128(_, src, _) |
+            X86Instr::Vpbroadcastd(_, src) => src.references_reg(reg),
+            // ALU read-modify-write, compares, conversions, packed SSE/AVX 2-operand:
+            // conservatively treat both operands as read
+            X86Instr::Add(d, s) | X86Instr::Sub(d, s) | X86Instr::And(d, s) |
+            X86Instr::Or(d, s) | X86Instr::Xor(d, s) | X86Instr::Imul(d, s) |
+            X86Instr::Cmp(d, s) | X86Instr::Test(d, s) |
+            X86Instr::Shl(d, s) | X86Instr::Shr(d, s) | X86Instr::Sar(d, s) |
+            X86Instr::Addss(d, s) | X86Instr::Subss(d, s) | X86Instr::Mulss(d, s) |
+            X86Instr::Divss(d, s) | X86Instr::Ucomiss(d, s) | X86Instr::Cvtsi2ss(d, s) |
+            X86Instr::Cvttss2si(d, s) | X86Instr::Xorps(d, s) |
+            X86Instr::Addsd(d, s) | X86Instr::Subsd(d, s) | X86Instr::Mulsd(d, s) |
+            X86Instr::Divsd(d, s) | X86Instr::Ucomisd(d, s) | X86Instr::Cvtsi2sd(d, s) |
+            X86Instr::Cvttsd2si(d, s) | X86Instr::Xorpd(d, s) |
+            X86Instr::Cvtss2sd(d, s) | X86Instr::Cvtsd2ss(d, s) |
+            X86Instr::Movaps(d, s) | X86Instr::Movups(d, s) |
+            X86Instr::Addps(d, s) | X86Instr::Subps(d, s) | X86Instr::Mulps(d, s) |
+            X86Instr::Divps(d, s) | X86Instr::Movdqa(d, s) | X86Instr::Movdqu(d, s) |
+            X86Instr::Paddd(d, s) | X86Instr::Psubd(d, s) | X86Instr::Pmulld(d, s) |
+            X86Instr::Pxor(d, s) | X86Instr::Movd(d, s) |
+            X86Instr::Vmovaps(d, s) | X86Instr::Vmovups(d, s) |
+            X86Instr::Vmovdqa(d, s) | X86Instr::Vmovdqu(d, s) => {
+                d.references_reg(reg) || s.references_reg(reg)
+            }
+            // AVX 3-operand: conservatively treat all three as read
+            X86Instr::Vaddps(d, s1, s2) | X86Instr::Vsubps(d, s1, s2) |
+            X86Instr::Vmulps(d, s1, s2) | X86Instr::Vdivps(d, s1, s2) |
+            X86Instr::Vpaddd(d, s1, s2) | X86Instr::Vpsubd(d, s1, s2) |
+            X86Instr::Vpmulld(d, s1, s2) | X86Instr::Vxorps(d, s1, s2) |
+            X86Instr::Vpxor(d, s1, s2) => {
+                d.references_reg(reg) || s1.references_reg(reg) || s2.references_reg(reg)
+            }
+            // Single-operand read-modify-write
+            X86Instr::Neg(op) | X86Instr::Not(op) => op.references_reg(reg),
+            // Idiv: reads operand + implicit rax, rdx
+            X86Instr::Idiv(op) => {
+                op.references_reg(reg) || reg.physical_id() == 0 || reg.physical_id() == 2
+            }
+            // Set: partial byte write, no read
+            X86Instr::Set(_, _) => false,
+            // Push reads the register
+            X86Instr::Push(r) => r.same_physical(reg),
+            // Pop overwrites only
+            X86Instr::Pop(_) => false,
+            // CallIndirect reads the operand
+            X86Instr::CallIndirect(op) => op.references_reg(reg),
+            // Cqto/Cdq: reads rax
+            X86Instr::Cqto | X86Instr::Cdq => reg.physical_id() == 0,
+            // Leave (mov rsp,rbp; pop rbp): reads rbp
+            X86Instr::Leave => reg.physical_id() == 5,
+            // Control flow and zero-operand
+            X86Instr::Label(_) | X86Instr::Jmp(_) | X86Instr::Jcc(_, _) |
+            X86Instr::Call(_) | X86Instr::Ret | X86Instr::Vzeroupper => false,
+            // Raw: conservative
+            X86Instr::Raw(_) => true,
+        }
+    }
+
+    /// Returns true if this instruction definitively overwrites (kills) the register.
+    pub fn writes_phys_reg(&self, reg: &X86Reg) -> bool {
+        match self {
+            // Mov-like: kills dest when it's a direct register
+            X86Instr::Mov(dest, _) | X86Instr::Lea(dest, _) |
+            X86Instr::Movsx(dest, _) | X86Instr::Movzx(dest, _) |
+            X86Instr::Movss(dest, _) | X86Instr::Movsd(dest, _) => {
+                dest.is_direct_reg(reg)
+            }
+            // Shuffle/extract/broadcast: kills dest register
+            X86Instr::Pshufd(dest, _, _) | X86Instr::Vextracti128(dest, _, _) |
+            X86Instr::Vpbroadcastd(dest, _) => dest.is_direct_reg(reg),
+            // AVX 3-operand: kills dest register
+            X86Instr::Vaddps(dest, _, _) | X86Instr::Vsubps(dest, _, _) |
+            X86Instr::Vmulps(dest, _, _) | X86Instr::Vdivps(dest, _, _) |
+            X86Instr::Vpaddd(dest, _, _) | X86Instr::Vpsubd(dest, _, _) |
+            X86Instr::Vpmulld(dest, _, _) | X86Instr::Vxorps(dest, _, _) |
+            X86Instr::Vpxor(dest, _, _) => dest.is_direct_reg(reg),
+            // Idiv: kills rax (quotient) and rdx (remainder)
+            X86Instr::Idiv(_) => reg.physical_id() == 0 || reg.physical_id() == 2,
+            // Set: partial write — handled by partially_writes_phys_reg.
+            X86Instr::Set(_, _) => false,
+            // Pop overwrites register
+            X86Instr::Pop(r) => r.same_physical(reg),
+            // Cqto/Cdq: kills rdx
+            X86Instr::Cqto | X86Instr::Cdq => reg.physical_id() == 2,
+            // Leave: kills rsp (and rbp, but read comes first)
+            X86Instr::Leave => reg.physical_id() == 4,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this instruction partially writes the register without
+    /// killing the full value.  For example, `setl al` modifies the low byte of
+    /// rax but leaves the upper 56 bits unchanged.
+    ///
+    /// Partial writes are *not* full kills — liveness must keep treating the
+    /// previous full-width value as live — but they do "touch" the register,
+    /// meaning intervening-instruction analyses (e.g., copy forwarding) must
+    /// stop scanning past them.
+    pub fn partially_writes_phys_reg(&self, reg: &X86Reg) -> bool {
+        match self {
+            X86Instr::Set(_, dest) => dest.is_direct_reg(reg),
+            _ => false,
+        }
+    }
+
+    /// Returns true if this instruction reads, writes, or partially writes the
+    /// physical register.  This is the broadest "does it touch?" query — useful
+    /// for peephole copy-forwarding guards that must stop at *any* interaction.
+    pub fn touches_phys_reg(&self, reg: &X86Reg) -> bool {
+        self.reads_phys_reg(reg)
+            || self.writes_phys_reg(reg)
+            || self.partially_writes_phys_reg(reg)
+    }
+
+    /// Returns true if this instruction is a basic-block boundary.
+    pub fn is_block_boundary(&self) -> bool {
+        matches!(self,
+            X86Instr::Jmp(_) | X86Instr::Jcc(_, _) | X86Instr::Label(_) |
+            X86Instr::Ret | X86Instr::Call(_) | X86Instr::CallIndirect(_)
+        )
+    }
 }
 
 /// emit_asm converts X86 instructions to Intel syntax assembly

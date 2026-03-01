@@ -175,31 +175,13 @@ fn compute_use_counts(func: &IrFunction) -> HashMap<VarId, usize> {
     
     for block in &func.blocks {
         for inst in &block.instructions {
-            // Count uses
+            // Count uses (via accessor)
             visit_operands(inst, |var| {
                 *counts.entry(var).or_insert(0) += 1;
             });
             
-            // Count defs
-            let def_var = match inst {
-                IrInstruction::Binary { dest, .. } |
-                IrInstruction::FloatBinary { dest, .. } |
-                IrInstruction::Unary { dest, .. } |
-                IrInstruction::FloatUnary { dest, .. } |
-                IrInstruction::Phi { dest, .. } |
-                IrInstruction::Copy { dest, .. } |
-                IrInstruction::Cast { dest, .. } |
-                IrInstruction::Load { dest, .. } |
-                IrInstruction::GetElementPtr { dest, .. } => Some(*dest),
-                IrInstruction::Call { dest, .. } => *dest,
-                IrInstruction::IndirectCall { dest, .. } => *dest,
-                IrInstruction::InlineAsm { outputs, .. } => outputs.first().copied(),
-                IrInstruction::VaArg { dest, .. } => Some(*dest),
-                IrInstruction::Alloca { .. } | IrInstruction::Store { .. }
-                | IrInstruction::VaStart { .. } | IrInstruction::VaEnd { .. } | IrInstruction::VaCopy { .. } => None,
-                IrInstruction::Simd { dest, .. } => *dest,
-            };
-            if let Some(var) = def_var {
+            // Count defs (via accessor)
+            if let Some(var) = inst.dest() {
                 *counts.entry(var).or_insert(0) += 1;
             }
         }

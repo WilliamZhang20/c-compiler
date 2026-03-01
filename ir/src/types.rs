@@ -136,6 +136,168 @@ pub enum Instruction {
     },
 }
 
+impl Instruction {
+    /// Get the destination VarId defined by this instruction, if any.
+    pub fn dest(&self) -> Option<VarId> {
+        match self {
+            Instruction::Binary { dest, .. }
+            | Instruction::FloatBinary { dest, .. }
+            | Instruction::Unary { dest, .. }
+            | Instruction::FloatUnary { dest, .. }
+            | Instruction::Phi { dest, .. }
+            | Instruction::Copy { dest, .. }
+            | Instruction::Cast { dest, .. }
+            | Instruction::Alloca { dest, .. }
+            | Instruction::Load { dest, .. }
+            | Instruction::GetElementPtr { dest, .. }
+            | Instruction::VaArg { dest, .. } => Some(*dest),
+            Instruction::Call { dest, .. }
+            | Instruction::IndirectCall { dest, .. } => *dest,
+            Instruction::Simd { dest, .. } => *dest,
+            Instruction::InlineAsm { outputs, .. } => outputs.first().copied(),
+            Instruction::Store { .. }
+            | Instruction::VaStart { .. }
+            | Instruction::VaEnd { .. }
+            | Instruction::VaCopy { .. } => None,
+        }
+    }
+
+    /// Get all destination VarIds defined by this instruction.
+    /// For most instructions this is 0 or 1; InlineAsm may have multiple outputs.
+    pub fn dests(&self) -> Vec<VarId> {
+        match self {
+            Instruction::InlineAsm { outputs, .. } => outputs.clone(),
+            _ => self.dest().into_iter().collect(),
+        }
+    }
+
+    /// Visit all VarIds used (read) by this instruction.
+    pub fn for_each_use<F: FnMut(VarId)>(&self, mut f: F) {
+        let visit_op = |op: &Operand, f: &mut F| {
+            if let Operand::Var(v) = op { f(*v); }
+        };
+        match self {
+            Instruction::Binary { left, right, .. }
+            | Instruction::FloatBinary { left, right, .. } => {
+                visit_op(left, &mut f);
+                visit_op(right, &mut f);
+            }
+            Instruction::Unary { src, .. }
+            | Instruction::FloatUnary { src, .. }
+            | Instruction::Copy { src, .. }
+            | Instruction::Cast { src, .. } => {
+                visit_op(src, &mut f);
+            }
+            Instruction::Load { addr, .. } => {
+                visit_op(addr, &mut f);
+            }
+            Instruction::Store { addr, src, .. } => {
+                visit_op(addr, &mut f);
+                visit_op(src, &mut f);
+            }
+            Instruction::GetElementPtr { base, index, .. } => {
+                visit_op(base, &mut f);
+                visit_op(index, &mut f);
+            }
+            Instruction::Call { args, .. } => {
+                for arg in args { visit_op(arg, &mut f); }
+            }
+            Instruction::IndirectCall { func_ptr, args, .. } => {
+                visit_op(func_ptr, &mut f);
+                for arg in args { visit_op(arg, &mut f); }
+            }
+            Instruction::Phi { preds, .. } => {
+                for (_, v) in preds { f(*v); }
+            }
+            Instruction::VaStart { list, .. } => { visit_op(list, &mut f); }
+            Instruction::VaEnd { list } => { visit_op(list, &mut f); }
+            Instruction::VaCopy { dest, src } => {
+                visit_op(dest, &mut f);
+                visit_op(src, &mut f);
+            }
+            Instruction::VaArg { list, .. } => { visit_op(list, &mut f); }
+            Instruction::InlineAsm { inputs, .. } => {
+                for input in inputs { visit_op(input, &mut f); }
+            }
+            Instruction::Alloca { .. } => {}
+            Instruction::Simd { operands, .. } => {
+                for op in operands { visit_op(op, &mut f); }
+            }
+        }
+    }
+
+    /// Visit all operand references mutably, allowing in-place replacement.
+    pub fn for_each_operand_mut<F: FnMut(&mut Operand)>(&mut self, mut f: F) {
+        match self {
+            Instruction::Binary { left, right, .. }
+            | Instruction::FloatBinary { left, right, .. } => {
+                f(left);
+                f(right);
+            }
+            Instruction::Unary { src, .. }
+            | Instruction::FloatUnary { src, .. }
+            | Instruction::Copy { src, .. }
+            | Instruction::Cast { src, .. } => {
+                f(src);
+            }
+            Instruction::Load { addr, .. } => {
+                f(addr);
+            }
+            Instruction::Store { addr, src, .. } => {
+                f(addr);
+                f(src);
+            }
+            Instruction::GetElementPtr { base, index, .. } => {
+                f(base);
+                f(index);
+            }
+            Instruction::Call { args, .. } => {
+                for arg in args { f(arg); }
+            }
+            Instruction::IndirectCall { func_ptr, args, .. } => {
+                f(func_ptr);
+                for arg in args { f(arg); }
+            }
+            Instruction::Phi { preds, .. } => {
+                // Phi operands are VarIds, not Operands — skip here.
+                // Use for_each_phi_var_mut for phi sources.
+                let _ = preds;
+            }
+            Instruction::VaStart { list, .. } => { f(list); }
+            Instruction::VaEnd { list } => { f(list); }
+            Instruction::VaCopy { dest, src } => {
+                f(dest);
+                f(src);
+            }
+            Instruction::VaArg { list, .. } => { f(list); }
+            Instruction::InlineAsm { inputs, .. } => {
+                for input in inputs { f(input); }
+            }
+            Instruction::Alloca { .. } => {}
+            Instruction::Simd { operands, .. } => {
+                for op in operands { f(op); }
+            }
+        }
+    }
+
+    /// Returns true if this instruction has side effects (stores, calls, etc.)
+    /// and should not be removed even if its result is unused.
+    pub fn has_side_effects(&self) -> bool {
+        matches!(self,
+            Instruction::Store { .. }
+            | Instruction::Call { .. }
+            | Instruction::IndirectCall { .. }
+            | Instruction::InlineAsm { .. }
+            | Instruction::Alloca { .. }
+            | Instruction::VaStart { .. }
+            | Instruction::VaEnd { .. }
+            | Instruction::VaCopy { .. }
+            | Instruction::VaArg { .. }
+            | Instruction::Simd { .. }
+        )
+    }
+}
+
 /// SIMD operation kind
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimdOp {
@@ -192,6 +354,50 @@ pub struct Function {
     pub attributes: Vec<model::Attribute>,
     /// Whether this function has internal (static) linkage
     pub is_static: bool,
+}
+
+impl Function {
+    /// Compute a predecessor map for all blocks in this function.
+    ///
+    /// Returns a mapping from each `BlockId` to the list of `BlockId`s whose
+    /// terminators branch to it.  This is O(n) in the number of blocks.
+    pub fn compute_predecessors(&self) -> HashMap<BlockId, Vec<BlockId>> {
+        let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for block in &self.blocks {
+            preds.entry(block.id).or_default();
+        }
+        for block in &self.blocks {
+            match &block.terminator {
+                Terminator::Br(target) => {
+                    preds.entry(*target).or_default().push(block.id);
+                }
+                Terminator::CondBr { then_block, else_block, .. } => {
+                    preds.entry(*then_block).or_default().push(block.id);
+                    preds.entry(*else_block).or_default().push(block.id);
+                }
+                _ => {}
+            }
+        }
+        preds
+    }
+
+    /// Compute a successor map for all blocks in this function.
+    pub fn compute_successors(&self) -> HashMap<BlockId, Vec<BlockId>> {
+        let mut succs: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for block in &self.blocks {
+            let mut s = Vec::new();
+            match &block.terminator {
+                Terminator::Br(target) => s.push(*target),
+                Terminator::CondBr { then_block, else_block, .. } => {
+                    s.push(*then_block);
+                    s.push(*else_block);
+                }
+                _ => {}
+            }
+            succs.insert(block.id, s);
+        }
+        succs
+    }
 }
 
 /// Complete IR program

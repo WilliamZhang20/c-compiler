@@ -266,22 +266,7 @@ fn remove_empty_blocks(func: &mut Function) -> bool {
     changed
 }
 
-/// Build a map of block -> set of predecessor blocks
+/// Build a map of block -> set of predecessor blocks (delegates to Function::compute_predecessors)
 fn build_predecessor_map(func: &Function) -> HashMap<BlockId, Vec<BlockId>> {
-    let mut pred_map: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-    
-    for block in &func.blocks {
-        match block.terminator {
-            Terminator::Br(target) => {
-                pred_map.entry(target).or_insert_with(Vec::new).push(block.id);
-            }
-            Terminator::CondBr { then_block, else_block, .. } => {
-                pred_map.entry(then_block).or_insert_with(Vec::new).push(block.id);
-                pred_map.entry(else_block).or_insert_with(Vec::new).push(block.id);
-            }
-            _ => {}
-        }
-    }
-    
-    pred_map
+    func.compute_predecessors()
 }

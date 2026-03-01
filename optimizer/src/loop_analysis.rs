@@ -38,39 +38,14 @@ pub struct InductionVar {
     pub cmp_op: BinaryOp,
 }
 
-/// Build a successor map from the CFG
+/// Build a successor map from the CFG (delegates to `Function::compute_successors`)
 fn build_successors(func: &Function) -> HashMap<BlockId, Vec<BlockId>> {
-    let mut succs: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-    for block in &func.blocks {
-        let s = match &block.terminator {
-            Terminator::Br(target) => vec![*target],
-            Terminator::CondBr { then_block, else_block, .. } => vec![*then_block, *else_block],
-            Terminator::Ret(_) | Terminator::Unreachable => vec![],
-        };
-        succs.insert(block.id, s);
-    }
-    succs
+    func.compute_successors()
 }
 
-/// Build a predecessor map from the CFG
+/// Build a predecessor map from the CFG (delegates to `Function::compute_predecessors`)
 fn build_predecessors(func: &Function) -> HashMap<BlockId, Vec<BlockId>> {
-    let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-    for block in &func.blocks {
-        preds.entry(block.id).or_default();
-    }
-    for block in &func.blocks {
-        match &block.terminator {
-            Terminator::Br(target) => {
-                preds.entry(*target).or_default().push(block.id);
-            }
-            Terminator::CondBr { then_block, else_block, .. } => {
-                preds.entry(*then_block).or_default().push(block.id);
-                preds.entry(*else_block).or_default().push(block.id);
-            }
-            _ => {}
-        }
-    }
-    preds
+    func.compute_predecessors()
 }
 
 /// Compute dominators using iterative dataflow

@@ -319,9 +319,9 @@ impl Lowerer {
 
                 self.sealed_blocks.insert(body_id);
                 self.current_block = Some(body_id);
-                self.loop_context.push((header_id, exit_id));
+                self.cf.loop_context.push((header_id, exit_id));
                 self.lower_stmt(body)?;
-                self.loop_context.pop();
+                self.cf.loop_context.pop();
                 if let Some(curr) = self.current_block {
                     self.blocks[curr.0].terminator = Terminator::Br(header_id);
                 }
@@ -340,9 +340,9 @@ impl Lowerer {
                 self.blocks[bid.0].terminator = Terminator::Br(body_id);
 
                 self.current_block = Some(body_id);
-                self.loop_context.push((latch_id, exit_id));
+                self.cf.loop_context.push((latch_id, exit_id));
                 self.lower_stmt(body)?;
-                self.loop_context.pop();
+                self.cf.loop_context.pop();
                 if let Some(curr) = self.current_block {
                     self.blocks[curr.0].terminator = Terminator::Br(latch_id);
                 }
@@ -396,9 +396,9 @@ impl Lowerer {
 
                 self.sealed_blocks.insert(body_id);
                 self.current_block = Some(body_id);
-                self.loop_context.push((post_id, exit_id));
+                self.cf.loop_context.push((post_id, exit_id));
                 self.lower_stmt(body)?;
-                self.loop_context.pop();
+                self.cf.loop_context.pop();
                 if let Some(curr) = self.current_block {
                     self.blocks[curr.0].terminator = Terminator::Br(post_id);
                 }
@@ -417,7 +417,7 @@ impl Lowerer {
             }
 
             AstStmt::Continue => {
-                if let Some((continue_target, _)) = self.loop_context.last() {
+                if let Some((continue_target, _)) = self.cf.loop_context.last() {
                     let bid = self.current_block.ok_or("Continue outside of block")?;
                     self.blocks[bid.0].terminator = Terminator::Br(*continue_target);
                     self.current_block = None;
@@ -426,11 +426,11 @@ impl Lowerer {
                 }
             }
             AstStmt::Break => {
-                if let Some((_, break_target)) = self.loop_context.last() {
+                if let Some((_, break_target)) = self.cf.loop_context.last() {
                      let bid = self.current_block.ok_or("Break outside of block")?;
                      self.blocks[bid.0].terminator = Terminator::Br(*break_target);
                      self.current_block = None;
-                } else if let Some(break_target) = self.break_targets.last() {
+                } else if let Some(break_target) = self.cf.break_targets.last() {
                      let bid = self.current_block.ok_or("Break outside of block")?;
                      self.blocks[bid.0].terminator = Terminator::Br(*break_target);
                      self.current_block = None;
@@ -447,9 +447,9 @@ impl Lowerer {
                 self.blocks[bid.0].terminator = Terminator::Br(head);
                 self.seal_block(head);
                 
-                self.break_targets.push(end);
-                let old_cases = std::mem::take(&mut self.current_switch_cases);
-                let old_default = self.current_default.take();
+                self.cf.break_targets.push(end);
+                let old_cases = std::mem::take(&mut self.cf.current_switch_cases);
+                let old_default = self.cf.current_default.take();
                 
                 // Lower body - this will register cases in self.current_switch_cases
                 self.current_block = Some(self.new_block()); // Start of body
@@ -457,9 +457,9 @@ impl Lowerer {
                 self.seal_block(body_start);
                 self.lower_stmt(body)?;
                 
-                let cases = std::mem::take(&mut self.current_switch_cases);
-                let default = self.current_default.take();
-                self.break_targets.pop();
+                let cases = std::mem::take(&mut self.cf.current_switch_cases);
+                let default = self.cf.current_default.take();
+                self.cf.break_targets.pop();
 
                 // Finish the body if it's still open
                 if let Some(bid) = self.current_block {
@@ -495,8 +495,8 @@ impl Lowerer {
                 self.seal_block(end);
                 
                 // Restore old context
-                self.current_switch_cases = old_cases;
-                self.current_default = old_default;
+                self.cf.current_switch_cases = old_cases;
+                self.cf.current_default = old_default;
             }
             AstStmt::Case(expr) => {
                 // Resolve the case value: must be a compile-time constant
@@ -523,7 +523,7 @@ impl Lowerer {
                 if let Some(bid) = self.current_block {
                     self.blocks[bid.0].terminator = Terminator::Br(case_block);
                 }
-                self.current_switch_cases.push((val, case_block));
+                self.cf.current_switch_cases.push((val, case_block));
                 self.seal_block(case_block);
                 self.current_block = Some(case_block);
             }
@@ -532,7 +532,7 @@ impl Lowerer {
                 if let Some(bid) = self.current_block {
                     self.blocks[bid.0].terminator = Terminator::Br(default_block);
                 }
-                self.current_default = Some(default_block);
+                self.cf.current_default = Some(default_block);
                 self.seal_block(default_block);
                 self.current_block = Some(default_block);
             }
@@ -552,17 +552,17 @@ impl Lowerer {
                 }
                 
                 // Register the label
-                self.labels.insert(name.clone(), label_block);
+                self.cf.labels.insert(name.clone(), label_block);
                 self.seal_block(label_block);
                 self.current_block = Some(label_block);
                 
                 // Resolve any pending gotos to this label
                 let mut i = 0;
-                while i < self.pending_gotos.len() {
-                    if self.pending_gotos[i].0 == *name {
-                        let goto_block = self.pending_gotos[i].1;
+                while i < self.cf.pending_gotos.len() {
+                    if self.cf.pending_gotos[i].0 == *name {
+                        let goto_block = self.cf.pending_gotos[i].1;
                         self.blocks[goto_block.0].terminator = Terminator::Br(label_block);
-                        self.pending_gotos.remove(i);
+                        self.cf.pending_gotos.remove(i);
                     } else {
                         i += 1;
                     }
@@ -572,11 +572,11 @@ impl Lowerer {
                 let bid = self.current_block.ok_or("Goto outside of block")?;
                 
                 // Check if label already exists (backward goto)
-                if let Some(&label_block) = self.labels.get(label) {
+                if let Some(&label_block) = self.cf.labels.get(label) {
                     self.blocks[bid.0].terminator = Terminator::Br(label_block);
                 } else {
                     // Forward goto - store for later resolution
-                    self.pending_gotos.push((label.clone(), bid));
+                    self.cf.pending_gotos.push((label.clone(), bid));
                     // Temporary terminator, will be fixed when label is found
                     self.blocks[bid.0].terminator = Terminator::Unreachable;
                 }

@@ -37,79 +37,7 @@ fn collect_used_vars(func: &Function) -> HashSet<VarId> {
 }
 
 fn collect_uses_from_instruction(inst: &Instruction, used_vars: &mut HashSet<VarId>) {
-    match inst {
-        Instruction::Binary { left, right, .. } => {
-            add_operand_var(left, used_vars);
-            add_operand_var(right, used_vars);
-        }
-        Instruction::FloatBinary { left, right, .. } => {
-            add_operand_var(left, used_vars);
-            add_operand_var(right, used_vars);
-        }
-        Instruction::Unary { src, .. } => {
-            add_operand_var(src, used_vars);
-        }
-        Instruction::FloatUnary { src, .. } => {
-            add_operand_var(src, used_vars);
-        }
-        Instruction::Copy { src, .. } => {
-            add_operand_var(src, used_vars);
-        }
-        Instruction::Cast { src, .. } => {
-            add_operand_var(src, used_vars);
-        }
-        Instruction::Call { args, .. } => {
-            for arg in args {
-                add_operand_var(arg, used_vars);
-            }
-        }
-        Instruction::IndirectCall { func_ptr, args, .. } => {
-            add_operand_var(func_ptr, used_vars);
-            for arg in args {
-                add_operand_var(arg, used_vars);
-            }
-        }
-        Instruction::Load { addr, .. } => {
-            add_operand_var(addr, used_vars);
-        }
-        Instruction::Store { addr, src, .. } => {
-            add_operand_var(addr, used_vars);
-            add_operand_var(src, used_vars);
-        }
-        Instruction::GetElementPtr { base, index, .. } => {
-            add_operand_var(base, used_vars);
-            add_operand_var(index, used_vars);
-        }
-        Instruction::Phi { preds, .. } => {
-            for (_, v) in preds {
-                used_vars.insert(*v);
-            }
-        }
-        Instruction::InlineAsm { inputs, .. } => {
-            for input in inputs {
-                add_operand_var(input, used_vars);
-            }
-        }
-        Instruction::Alloca { .. } => {}
-        Instruction::VaStart { list, .. } => {
-             add_operand_var(list, used_vars);
-        }
-        Instruction::VaEnd { list } => {
-            add_operand_var(list, used_vars);
-        }
-        Instruction::VaCopy { dest, src } => {
-            add_operand_var(dest, used_vars);
-            add_operand_var(src, used_vars);
-        }
-        Instruction::VaArg { list, .. } => {
-            add_operand_var(list, used_vars);
-        }
-        Instruction::Simd { operands, .. } => {
-            for op in operands {
-                add_operand_var(op, used_vars);
-            }
-        }
-    }
+    inst.for_each_use(|v| { used_vars.insert(v); });
 }
 
 fn collect_uses_from_terminator(terminator: &ir::Terminator, used_vars: &mut HashSet<VarId>) {
@@ -131,28 +59,12 @@ fn add_operand_var(op: &Operand, used_vars: &mut HashSet<VarId>) {
 }
 
 fn should_retain(inst: &Instruction, used_vars: &HashSet<VarId>) -> bool {
-    match inst {
-        // Pure computations - only keep if result is used
-        Instruction::Binary { dest, .. }
-        | Instruction::FloatBinary { dest, .. }
-        | Instruction::Unary { dest, .. }
-        | Instruction::FloatUnary { dest, .. }
-        | Instruction::Copy { dest, .. }
-        | Instruction::Cast { dest, .. }
-        | Instruction::Load { dest, .. }
-        | Instruction::GetElementPtr { dest, .. }
-        | Instruction::Phi { dest, .. } => used_vars.contains(dest),
-
-        // Side effects or essential instructions - always keep
-        Instruction::Call { .. }
-        | Instruction::IndirectCall { .. }
-        | Instruction::Store { .. }
-        | Instruction::InlineAsm { .. }
-        | Instruction::Alloca { .. }
-        | Instruction::VaStart { .. }
-        | Instruction::VaEnd { .. }
-        | Instruction::VaCopy { .. }
-        | Instruction::VaArg { .. }
-        | Instruction::Simd { .. } => true,
+    if inst.has_side_effects() {
+        return true;
+    }
+    // Pure computations - only keep if result is used
+    match inst.dest() {
+        Some(dest) => used_vars.contains(&dest),
+        None => true, // No dest and no side-effects shouldn't happen, keep to be safe
     }
 }

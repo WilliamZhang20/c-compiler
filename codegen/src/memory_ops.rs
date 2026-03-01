@@ -181,23 +181,7 @@ pub fn gen_store(generator: &mut FunctionGenerator, addr: &Operand, src: &Operan
     }
 
     // Load address into RAX
-    if let Operand::Var(var) = addr {
-         if let Some(buffer_offset) = generator.alloca_buffers.get(var) {
-              generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
-         } else {
-             let b_op = generator.var_to_op(*var);
-             generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
-         }
-    } else {
-         let op = generator.operand_to_op(addr);
-         if let X86Operand::Label(l) = &op {
-             generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(l.clone())));
-         } else if let X86Operand::RipRelLabel(l) = &op {
-             generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(l.clone())));
-         } else {
-             generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), op));
-         }
-    }
+    generator.load_address_into(addr, X86Reg::Rax);
     
     // Store
     if is_float {
@@ -218,20 +202,7 @@ pub fn gen_gep(generator: &mut FunctionGenerator, dest: VarId, base: &Operand, i
     let d_op = generator.var_to_op(dest);
     let elem_size = generator.get_type_size(element_type) as i64;
     
-    match base {
-        Operand::Global(name) => {
-            generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::RipRelLabel(name.clone())));
-        }
-        Operand::Var(var) => {
-            if let Some(buffer_offset) = generator.alloca_buffers.get(var) {
-                generator.asm.push(X86Instr::Lea(X86Operand::Reg(X86Reg::Rax), X86Operand::Mem(X86Reg::Rbp, *buffer_offset)));
-            } else {
-                let b_op = generator.var_to_op(*var);
-                generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), b_op));
-            }
-        }
-        _ => {}
-    }
+    generator.load_address_into(base, X86Reg::Rax);
 
     generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rcx), i_op));
     if elem_size != 1 {
