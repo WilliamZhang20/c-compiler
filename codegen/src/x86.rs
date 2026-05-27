@@ -251,6 +251,10 @@ pub enum X86Instr {
     Paddd(X86Operand, X86Operand),    // Add packed 32-bit integers
     Psubd(X86Operand, X86Operand),    // Subtract packed 32-bit integers
     Pmulld(X86Operand, X86Operand),   // Multiply packed 32-bit integers (SSE4.1)
+    Pand(X86Operand, X86Operand),     // Packed AND 32-bit integers
+    Pandn(X86Operand, X86Operand),    // Packed AND-NOT 32-bit integers
+    Por(X86Operand, X86Operand),      // Packed OR 32-bit integers
+    Pcmpgtd(X86Operand, X86Operand),    // Compare packed 32-bit integers (gt → all-ones)
     // AVX instructions (256-bit, 8x float)
     Vmovaps(X86Operand, X86Operand),  // AVX move aligned packed single
     Vmovups(X86Operand, X86Operand),  // AVX move unaligned packed single
@@ -264,7 +268,14 @@ pub enum X86Instr {
     Vpaddd(X86Operand, X86Operand, X86Operand),   // AVX2 add packed 32-bit integers
     Vpsubd(X86Operand, X86Operand, X86Operand),   // AVX2 subtract packed 32-bit integers
     Vpmulld(X86Operand, X86Operand, X86Operand),  // AVX2 multiply packed 32-bit integers
+    Vpandd(X86Operand, X86Operand, X86Operand),   // AVX2 packed AND
+    Vpandnd(X86Operand, X86Operand, X86Operand),  // AVX2 packed AND-NOT
+    Vpord(X86Operand, X86Operand, X86Operand),    // AVX2 packed OR
+    Vpcmpgtd(X86Operand, X86Operand, X86Operand), // AVX2 compare dwords (s1 > s2)
     Vxorps(X86Operand, X86Operand, X86Operand),   // AVX XOR packed
+    Vandps(X86Operand, X86Operand, X86Operand),   // AVX bitwise AND (float bits)
+    Vandnps(X86Operand, X86Operand, X86Operand),    // AVX bitwise AND-NOT
+    Vorps(X86Operand, X86Operand, X86Operand),      // AVX bitwise OR
     Vzeroupper,                                     // Clear upper bits of YMM registers
     // SIMD utility instructions
     Pshufd(X86Operand, X86Operand, u8),             // Shuffle packed doublewords
@@ -310,6 +321,8 @@ impl X86Instr {
             X86Instr::Addps(d, s) | X86Instr::Subps(d, s) | X86Instr::Mulps(d, s) |
             X86Instr::Divps(d, s) | X86Instr::Movdqa(d, s) | X86Instr::Movdqu(d, s) |
             X86Instr::Paddd(d, s) | X86Instr::Psubd(d, s) | X86Instr::Pmulld(d, s) |
+            X86Instr::Pand(d, s) | X86Instr::Pandn(d, s) | X86Instr::Pcmpgtd(d, s) |
+            X86Instr::Por(d, s) |
             X86Instr::Pxor(d, s) | X86Instr::Movd(d, s) |
             X86Instr::Vmovaps(d, s) | X86Instr::Vmovups(d, s) |
             X86Instr::Vmovdqa(d, s) | X86Instr::Vmovdqu(d, s) => {
@@ -319,7 +332,11 @@ impl X86Instr {
             X86Instr::Vaddps(d, s1, s2) | X86Instr::Vsubps(d, s1, s2) |
             X86Instr::Vmulps(d, s1, s2) | X86Instr::Vdivps(d, s1, s2) |
             X86Instr::Vpaddd(d, s1, s2) | X86Instr::Vpsubd(d, s1, s2) |
-            X86Instr::Vpmulld(d, s1, s2) | X86Instr::Vxorps(d, s1, s2) |
+            X86Instr::Vpmulld(d, s1, s2) | X86Instr::Vpandd(d, s1, s2) |
+            X86Instr::Vpandnd(d, s1, s2) | X86Instr::Vpcmpgtd(d, s1, s2) |
+            X86Instr::Vpord(d, s1, s2) | X86Instr::Vxorps(d, s1, s2) |
+            X86Instr::Vandps(d, s1, s2) | X86Instr::Vandnps(d, s1, s2) |
+            X86Instr::Vorps(d, s1, s2) |
             X86Instr::Vpxor(d, s1, s2) => {
                 d.references_reg(reg) || s1.references_reg(reg) || s2.references_reg(reg)
             }
@@ -485,6 +502,10 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Paddd(d, src) => { let _ = write!(s, "  paddd {}, {}\n", d, src); }
             X86Instr::Psubd(d, src) => { let _ = write!(s, "  psubd {}, {}\n", d, src); }
             X86Instr::Pmulld(d, src) => { let _ = write!(s, "  pmulld {}, {}\n", d, src); }
+            X86Instr::Pand(d, src) => { let _ = write!(s, "  pand {}, {}\n", d, src); }
+            X86Instr::Pandn(d, src) => { let _ = write!(s, "  pandn {}, {}\n", d, src); }
+            X86Instr::Pcmpgtd(d, src) => { let _ = write!(s, "  pcmpgtd {}, {}\n", d, src); }
+            X86Instr::Por(d, src) => { let _ = write!(s, "  por {}, {}\n", d, src); }
             // AVX
             X86Instr::Vmovaps(d, src) => { let _ = write!(s, "  vmovaps {}, {}\n", d, src); }
             X86Instr::Vmovups(d, src) => { let _ = write!(s, "  vmovups {}, {}\n", d, src); }
@@ -498,7 +519,14 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Vpaddd(d, s1, s2) => { let _ = write!(s, "  vpaddd {}, {}, {}\n", d, s1, s2); }
             X86Instr::Vpsubd(d, s1, s2) => { let _ = write!(s, "  vpsubd {}, {}, {}\n", d, s1, s2); }
             X86Instr::Vpmulld(d, s1, s2) => { let _ = write!(s, "  vpmulld {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpandd(d, s1, s2) => { let _ = write!(s, "  vpandd {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpandnd(d, s1, s2) => { let _ = write!(s, "  vpandnd {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpcmpgtd(d, s1, s2) => { let _ = write!(s, "  vpcmpgtd {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vpord(d, s1, s2) => { let _ = write!(s, "  vpord {}, {}, {}\n", d, s1, s2); }
             X86Instr::Vxorps(d, s1, s2) => { let _ = write!(s, "  vxorps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vandps(d, s1, s2) => { let _ = write!(s, "  vandps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vandnps(d, s1, s2) => { let _ = write!(s, "  vandnps {}, {}, {}\n", d, s1, s2); }
+            X86Instr::Vorps(d, s1, s2) => { let _ = write!(s, "  vorps {}, {}, {}\n", d, s1, s2); }
             X86Instr::Vzeroupper => { s.push_str("  vzeroupper\n"); }
             // SIMD utility
             X86Instr::Pshufd(d, src, imm) => { let _ = write!(s, "  pshufd {}, {}, {}\n", d, src, imm); }

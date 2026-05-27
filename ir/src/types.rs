@@ -318,10 +318,20 @@ pub enum SimdOp {
     Sub,
     /// Element-wise multiplication
     Mul,
+    /// Element-wise bitwise AND (integer vectors)
+    And,
+    /// Element-wise bitwise OR (integer vectors)
+    Or,
+    /// Element-wise bitwise XOR (integer vectors)
+    Xor,
     /// Horizontal add — reduces vector to scalar sum
     HorizontalAdd,
     /// Broadcast scalar to all vector lanes
     Splat,
+    /// Per-lane mask: lane k active iff (iv + k) < bound. Operands: [iv, bound].
+    LaneMask,
+    /// Merge vectors: inactive lanes from `operands[0]`, active from `operands[1]`, mask `operands[2]`.
+    Blend,
 }
 
 /// Control flow terminators for basic blocks

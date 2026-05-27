@@ -595,6 +595,7 @@ mod tests {
                 init: 0,
                 step: 1,
                 bound: 100,
+                bound_operand: Operand::Constant(100),
                 cmp_op: model::BinaryOp::Less,
             }),
             trip_count: Some(200_000),
@@ -648,6 +649,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 100,
+                bound_operand: Operand::Constant(100),
                 cmp_op: model::BinaryOp::Less,
             }),
             trip_count: None,
@@ -671,6 +673,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 10,
+                bound_operand: Operand::Constant(10),
                 cmp_op: model::BinaryOp::Less,
             }),
             trip_count: Some(10),

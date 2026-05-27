@@ -1,14 +1,14 @@
 # Benchmark Results (Linux)
 
-Generated: 2026-03-01 18:16:10
+Generated: 2026-05-26 23:25:13
 
 | Benchmark | Our Compiler (ms) | GCC -O0 (ms) | GCC -O2 (ms) | Speedup vs GCC-O0 | Speedup vs GCC-O2 |
 |-----------|-------------------|--------------|--------------|-------------------|-------------------|
-| fib | 35.21 | 54.91 | 13.62 | 1.56x | 0.39x |
-| array_sum | 4.46 | 85.91 | 4.46 | 19.26x | 1.00x |
-| matmul | 7.73 | 51.41 | 5.46 | 6.65x | 0.71x |
-| bitwise | 1255.42 | 2066.41 | 312.14 | 1.65x | 0.25x |
-| struct_bench | 144.73 | 162.49 | 112.63 | 1.12x | 0.78x |
+| fib | 38.21 | 60.40 | 15.01 | 1.58x | 0.39x |
+| array_sum | 4.91 | 93.52 | 4.80 | 19.05x | 0.98x |
+| matmul | 6.23 | 62.15 | 6.11 | 9.98x | 0.98x |
+| bitwise | 1287.74 | 2164.81 | 323.24 | 1.68x | 0.25x |
+| struct_bench | 157.19 | 177.85 | 121.50 | 1.13x | 0.77x |
 
 ## Notes
 - Measurement methodology: 10 warmup runs + 50 measured runs per benchmark

@@ -28,13 +28,16 @@ pub struct NaturalLoop {
 }
 
 /// Describes a simple induction variable: starts at `init`, incremented by `step` each iteration,
-/// compared against `bound` using `cmp_op` to determine loop exit.
+/// compared against `bound_operand` using `cmp_op` to determine loop exit.
 #[derive(Debug, Clone)]
 pub struct InductionVar {
     pub var: VarId,
     pub init: i64,
     pub step: i64,
+    /// Constant bound when `bound_operand` is `Operand::Constant`.
     pub bound: i64,
+    /// Loop limit (constant or SSA variable).
+    pub bound_operand: Operand,
     pub cmp_op: BinaryOp,
 }
 
@@ -214,14 +217,26 @@ fn detect_induction_var(
         _ => return None,
     };
 
-    // One side should be the IV, other should be the bound
-    // Look for a phi node for the IV in the header
-    let (iv_var, bound) = if let Operand::Constant(c) = right {
-        if let Operand::Var(v) = left { (*v, *c) } else { return None; }
-    } else if let Operand::Constant(c) = left {
-        if let Operand::Var(v) = right { (*v, *c) } else { return None; }
+    // One side should be the IV, other should be the bound (constant or variable).
+    let (iv_var, bound_operand) = if let Operand::Var(v) = left {
+        if matches!(right, Operand::Constant(_) | Operand::Var(_)) {
+            (*v, right.clone())
+        } else {
+            return None;
+        }
+    } else if let Operand::Var(v) = right {
+        if matches!(left, Operand::Constant(_) | Operand::Var(_)) {
+            (*v, left.clone())
+        } else {
+            return None;
+        }
     } else {
-        return None; // Both sides are non-constant
+        return None;
+    };
+
+    let bound = match &bound_operand {
+        Operand::Constant(c) => *c,
+        _ => 0,
     };
 
     // If the loop continues when condition is true (exits on else),
@@ -275,6 +290,7 @@ fn detect_induction_var(
         init,
         step: step_val,
         bound,
+        bound_operand,
         cmp_op: effective_cmp,
     })
 }
@@ -403,10 +419,13 @@ fn find_constant_in_all_blocks(func: &Function, var: VarId) -> Option<i64> {
     None
 }
 
-/// Compute the trip count of a loop given its induction variable info
+/// Compute the trip count of a loop given its induction variable info (constant bound only).
 fn compute_trip_count(iv: &InductionVar) -> Option<usize> {
     if iv.step == 0 {
         return None; // Infinite loop
+    }
+    if !matches!(iv.bound_operand, Operand::Constant(_)) {
+        return None;
     }
 
     let range = iv.bound - iv.init;

@@ -1001,7 +1001,9 @@ impl<'a> FunctionGenerator<'a> {
         width: usize,
     ) {
         let is_float = matches!(elem_type, Type::Float | Type::Double);
-        let use_avx = width > 4;
+        // 256-bit ymm ops (especially AVX2 integer ops like vpandd/vpmulld) need AVX2.
+        let use_avx = width > 4
+            && self.target.simd_level >= model::SimdLevel::AVX2;
 
         match op {
             SimdOp::Load => {
@@ -1063,7 +1065,7 @@ impl<'a> FunctionGenerator<'a> {
                 }
             }
 
-            SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+            SimdOp::Add | SimdOp::Sub | SimdOp::Mul | SimdOp::And | SimdOp::Or | SimdOp::Xor => {
                 // operands[0] = Var(left), operands[1] = Var(right)
                 let dest_var = dest.expect("VectorBinary must have dest");
                 let left_var = match &operands[0] { Operand::Var(v) => *v, _ => return };
@@ -1082,14 +1084,23 @@ impl<'a> FunctionGenerator<'a> {
                             SimdOp::Add => self.asm.push(X86Instr::Vaddps(dst, s1, s2)),
                             SimdOp::Sub => self.asm.push(X86Instr::Vsubps(dst, s1, s2)),
                             SimdOp::Mul => self.asm.push(X86Instr::Vmulps(dst, s1, s2)),
-                            _ => unreachable!(),
+                            _ => return,
                         }
                     } else {
                         match op {
                             SimdOp::Add => self.asm.push(X86Instr::Vpaddd(dst, s1, s2)),
                             SimdOp::Sub => self.asm.push(X86Instr::Vpsubd(dst, s1, s2)),
                             SimdOp::Mul => self.asm.push(X86Instr::Vpmulld(dst, s1, s2)),
-                            _ => unreachable!(),
+                            SimdOp::And => {
+                                if is_float {
+                                    self.asm.push(X86Instr::Vandps(dst, s1, s2));
+                                } else {
+                                    self.asm.push(X86Instr::Vandps(dst, s1, s2));
+                                }
+                            }
+                            SimdOp::Or => self.asm.push(X86Instr::Vpord(dst, s1, s2)),
+                            SimdOp::Xor => self.asm.push(X86Instr::Vpxor(dst, s1, s2)),
+                            _ => return,
                         }
                     }
                 } else {
@@ -1112,14 +1123,17 @@ impl<'a> FunctionGenerator<'a> {
                             SimdOp::Add => self.asm.push(X86Instr::Addps(dst_xmm, right_xmm)),
                             SimdOp::Sub => self.asm.push(X86Instr::Subps(dst_xmm, right_xmm)),
                             SimdOp::Mul => self.asm.push(X86Instr::Mulps(dst_xmm, right_xmm)),
-                            _ => unreachable!(),
+                            _ => return,
                         }
                     } else {
                         match op {
                             SimdOp::Add => self.asm.push(X86Instr::Paddd(dst_xmm, right_xmm)),
                             SimdOp::Sub => self.asm.push(X86Instr::Psubd(dst_xmm, right_xmm)),
                             SimdOp::Mul => self.asm.push(X86Instr::Pmulld(dst_xmm, right_xmm)),
-                            _ => unreachable!(),
+                            SimdOp::And => self.asm.push(X86Instr::Pand(dst_xmm, right_xmm)),
+                            SimdOp::Or => self.asm.push(X86Instr::Por(dst_xmm, right_xmm)),
+                            SimdOp::Xor => self.asm.push(X86Instr::Pxor(dst_xmm, right_xmm)),
+                            _ => return,
                         }
                     }
                 }
@@ -1151,6 +1165,100 @@ impl<'a> FunctionGenerator<'a> {
                     let xmm_dst = X86Operand::Reg(Self::xmm_reg(dest_idx));
                     self.asm.push(X86Instr::Movd(xmm_dst.clone(), X86Operand::Reg(X86Reg::Eax)));
                     self.asm.push(X86Instr::Pshufd(xmm_dst.clone(), xmm_dst, 0x00));
+                }
+            }
+
+            SimdOp::LaneMask => {
+                // operands[0] = scalar IV, operands[1] = bound (scalar)
+                // Build mask in a stack slot: lane k is all-1s iff (iv + k) < bound.
+                let dest_var = dest.expect("LaneMask must have dest");
+                let dest_idx = self.alloc_simd_reg(dest_var);
+                let iv_op = self.operand_to_op(&operands[0]);
+                let bound_op = self.operand_to_op(&operands[1]);
+                let iv32 = match &iv_op {
+                    X86Operand::Reg(r) => X86Operand::Reg(r.to_32bit()),
+                    X86Operand::Mem(r, off) => X86Operand::DwordMem(r.clone(), *off),
+                    other => other.clone(),
+                };
+                let bound32 = match &bound_op {
+                    X86Operand::Reg(r) => X86Operand::Reg(r.to_32bit()),
+                    X86Operand::Mem(r, off) => X86Operand::DwordMem(r.clone(), *off),
+                    X86Operand::Imm(v) => X86Operand::Imm(*v),
+                    other => other.clone(),
+                };
+
+                let spill = if width > 4 { 32 } else { 16 };
+                self.asm.push(X86Instr::Raw(format!("  sub rsp, {}", spill)));
+                for lane in 0..width {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), iv32.clone()));
+                    if lane != 0 {
+                        self.asm.push(X86Instr::Add(
+                            X86Operand::Reg(X86Reg::Eax),
+                            X86Operand::Imm(lane as i64),
+                        ));
+                    }
+                    self.asm.push(X86Instr::Cmp(
+                        X86Operand::Reg(X86Reg::Eax),
+                        bound32.clone(),
+                    ));
+                    self.asm.push(X86Instr::Set("l".to_string(), X86Operand::Reg(X86Reg::Al)));
+                    self.asm.push(X86Instr::Movzx(
+                        X86Operand::Reg(X86Reg::Eax),
+                        X86Operand::Reg(X86Reg::Al),
+                    ));
+                    self.asm.push(X86Instr::Neg(X86Operand::Reg(X86Reg::Eax)));
+                    self.asm.push(X86Instr::Mov(
+                        X86Operand::DwordMem(X86Reg::Rsp, (lane * 4) as i32),
+                        X86Operand::Reg(X86Reg::Eax),
+                    ));
+                }
+                if use_avx {
+                    self.asm.push(X86Instr::Vmovdqu(
+                        X86Operand::Reg(Self::ymm_reg(dest_idx)),
+                        X86Operand::YmmwordMem(X86Reg::Rsp, 0),
+                    ));
+                } else {
+                    self.asm.push(X86Instr::Movdqu(
+                        X86Operand::Reg(Self::xmm_reg(dest_idx)),
+                        X86Operand::XmmwordMem(X86Reg::Rsp, 0),
+                    ));
+                }
+                self.asm.push(X86Instr::Raw(format!("  add rsp, {}", spill)));
+            }
+
+            SimdOp::Blend => {
+                // operands[0] = old mem, [1] = new value, [2] = mask
+                let dest_var = dest.expect("Blend must have dest");
+                let old_var = match &operands[0] { Operand::Var(v) => *v, _ => return };
+                let new_var = match &operands[1] { Operand::Var(v) => *v, _ => return };
+                let mask_var = match &operands[2] { Operand::Var(v) => *v, _ => return };
+                let dest_idx = self.alloc_simd_reg(dest_var);
+                let old_idx = self.simd_reg_map.get(&old_var).copied().unwrap_or(0);
+                let new_idx = self.simd_reg_map.get(&new_var).copied().unwrap_or(0);
+                let mask_idx = self.simd_reg_map.get(&mask_var).copied().unwrap_or(0);
+
+                if use_avx {
+                    let dst = X86Operand::Reg(Self::ymm_reg(dest_idx));
+                    let old = X86Operand::Reg(Self::ymm_reg(old_idx));
+                    let new = X86Operand::Reg(Self::ymm_reg(new_idx));
+                    let mask = X86Operand::Reg(Self::ymm_reg(mask_idx));
+                    let tmp = X86Operand::Reg(Self::ymm_reg(15));
+                    // dst = (~mask & old) | (new & mask) via AVX1 float bitwise ops
+                    self.asm.push(X86Instr::Vandnps(tmp.clone(), mask.clone(), old));
+                    self.asm.push(X86Instr::Vandps(dst.clone(), new.clone(), mask.clone()));
+                    self.asm.push(X86Instr::Vorps(dst.clone(), tmp, dst));
+                } else {
+                    let dst = X86Operand::Reg(Self::xmm_reg(dest_idx));
+                    let old = X86Operand::Reg(Self::xmm_reg(old_idx));
+                    let new = X86Operand::Reg(Self::xmm_reg(new_idx));
+                    let mask = X86Operand::Reg(Self::xmm_reg(mask_idx));
+                    let tmp = X86Operand::Reg(X86Reg::Xmm15);
+                    // tmp = (~mask) & old; dst = (new & mask) | tmp
+                    self.asm.push(X86Instr::Movaps(tmp.clone(), mask.clone()));
+                    self.asm.push(X86Instr::Pandn(tmp.clone(), old));
+                    self.asm.push(X86Instr::Movaps(dst.clone(), new));
+                    self.asm.push(X86Instr::Pand(dst.clone(), mask));
+                    self.asm.push(X86Instr::Por(dst, tmp));
                 }
             }
 

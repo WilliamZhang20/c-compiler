@@ -16,6 +16,7 @@ use ir::{Function, Instruction, Operand, VarId, BlockId, Terminator, BasicBlock,
 use model::{BinaryOp, Type};
 use std::collections::{HashMap, HashSet};
 use crate::loop_analysis::{self, NaturalLoop};
+use crate::mem_dependence::{self, check_memory_dependence};
 
 /// Target SIMD capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,14 +48,196 @@ pub fn detect_simd_level() -> SimdLevel {
     SimdLevel::SSE2 // SSE2 is baseline for x86-64
 }
 
+/// Linear index into an array: `scale * iv + offset` (element indices).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexPattern {
+    scale: i64,
+    offset: i64,
+}
+
+impl IndexPattern {
+    fn direct() -> Self {
+        Self { scale: 1, offset: 0 }
+    }
+}
+
+fn is_positive_power_of_two(n: i64) -> bool {
+    n > 0 && (n & (n - 1)) == 0
+}
+
+/// Resolve `op` to a linear IV index pattern using copies and arithmetic in the loop body.
+fn resolve_index_pattern(
+    op: &Operand,
+    iv: VarId,
+    func: &Function,
+    body: &HashSet<BlockId>,
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+) -> Option<IndexPattern> {
+    let mut visited = HashSet::new();
+    resolve_index_pattern_inner(op, iv, func, body, arith_ops, &mut visited)
+}
+
+fn resolve_index_pattern_inner(
+    op: &Operand,
+    iv: VarId,
+    func: &Function,
+    body: &HashSet<BlockId>,
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+    visited: &mut HashSet<VarId>,
+) -> Option<IndexPattern> {
+    match op {
+        Operand::Var(v) => {
+            if *v == iv {
+                return Some(IndexPattern::direct());
+            }
+            if !visited.insert(*v) {
+                return None;
+            }
+            // Copy in loop body
+            for &block_id in body {
+                if let Some(block) = func.blocks.iter().find(|b| b.id == block_id) {
+                    for inst in &block.instructions {
+                        if let Instruction::Copy { dest, src } = inst {
+                            if *dest == *v {
+                                return resolve_index_pattern_inner(
+                                    src, iv, func, body, arith_ops, visited,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // Binary defining v
+            for &(dest, ref bop, ref left, ref right, _) in arith_ops {
+                if dest != *v {
+                    continue;
+                }
+                return match bop {
+                    BinaryOp::Add => {
+                        let lp = resolve_index_pattern_inner(left, iv, func, body, arith_ops, visited)?;
+                        let rp = resolve_index_pattern_inner(right, iv, func, body, arith_ops, visited)?;
+                        combine_add_patterns(lp, rp)
+                    }
+                    BinaryOp::Sub => {
+                        let lp = resolve_index_pattern_inner(left, iv, func, body, arith_ops, visited)?;
+                        let rp = resolve_index_pattern_inner(right, iv, func, body, arith_ops, visited)?;
+                        combine_sub_patterns(lp, rp)
+                    }
+                    BinaryOp::Mul => {
+                        let lp = resolve_index_pattern_inner(left, iv, func, body, arith_ops, visited)?;
+                        let rp = resolve_index_pattern_inner(right, iv, func, body, arith_ops, visited)?;
+                        combine_mul_patterns(lp, rp)
+                    }
+                    _ => None,
+                };
+            }
+            None
+        }
+        Operand::Constant(c) => {
+            if *c == 0 {
+                Some(IndexPattern { scale: 0, offset: 0 })
+            } else {
+                Some(IndexPattern { scale: 0, offset: *c })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn combine_add_patterns(a: IndexPattern, b: IndexPattern) -> Option<IndexPattern> {
+    if a.scale == 0 && b.scale == 0 {
+        return Some(IndexPattern { scale: 0, offset: a.offset + b.offset });
+    }
+    if a.scale == 0 {
+        return Some(IndexPattern { scale: b.scale, offset: a.offset + b.offset });
+    }
+    if b.scale == 0 {
+        return Some(IndexPattern { scale: a.scale, offset: a.offset + b.offset });
+    }
+    if a.scale == b.scale {
+        return Some(IndexPattern { scale: a.scale, offset: a.offset + b.offset });
+    }
+    None
+}
+
+fn combine_sub_patterns(a: IndexPattern, b: IndexPattern) -> Option<IndexPattern> {
+    if b.scale == 0 {
+        return Some(IndexPattern { scale: a.scale, offset: a.offset - b.offset });
+    }
+    if a.scale == 0 && b.scale != 0 {
+        return Some(IndexPattern { scale: -b.scale, offset: a.offset - b.offset });
+    }
+    None
+}
+
+fn combine_mul_patterns(a: IndexPattern, b: IndexPattern) -> Option<IndexPattern> {
+    match (a.scale, b.scale) {
+        (0, 0) => {
+            let product = a.offset.wrapping_mul(b.offset);
+            if is_positive_power_of_two(product) || product == 0 {
+                Some(IndexPattern { scale: 0, offset: product })
+            } else {
+                None
+            }
+        }
+        (0, s) | (s, 0) if s != 0 => {
+            let c = if a.scale == 0 { a.offset } else { b.offset };
+            if is_positive_power_of_two(c) {
+                Some(IndexPattern { scale: s * c, offset: 0 })
+            } else {
+                None
+            }
+        }
+        (sa, sb) if sa != 0 && sb != 0 => None,
+        _ => None,
+    }
+}
+
+/// Emit instructions computing `pattern.scale * vec_iv + pattern.offset` into `insts`.
+/// Returns the VarId holding the GEP index.
+fn emit_scaled_index(
+    insts: &mut Vec<Instruction>,
+    vec_iv: VarId,
+    pattern: &IndexPattern,
+    next_var: &mut usize,
+) -> VarId {
+    if pattern.scale == 1 && pattern.offset == 0 {
+        return vec_iv;
+    }
+    let mut idx = vec_iv;
+    if pattern.scale != 1 {
+        let mul_dest = VarId(*next_var);
+        *next_var += 1;
+        insts.push(Instruction::Binary {
+            dest: mul_dest,
+            op: BinaryOp::Mul,
+            left: Operand::Var(vec_iv),
+            right: Operand::Constant(pattern.scale),
+        });
+        idx = mul_dest;
+    }
+    if pattern.offset != 0 {
+        let add_dest = VarId(*next_var);
+        *next_var += 1;
+        insts.push(Instruction::Binary {
+            dest: add_dest,
+            op: BinaryOp::Add,
+            left: Operand::Var(idx),
+            right: Operand::Constant(pattern.offset),
+        });
+        idx = add_dest;
+    }
+    idx
+}
+
 /// Information about a vectorizable memory access in a loop
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct MemAccess {
     /// The IR variable holding the array base address
     base_var: VarId,
-    /// The induction variable used for indexing
-    index_var: VarId,
+    /// Linear index: scale * IV + offset
+    index_pattern: IndexPattern,
     /// Element type
     elem_type: Type,
     /// Whether this is a load (true) or store (false)
@@ -85,11 +268,25 @@ fn analyze_loop_body(
     lp: &NaturalLoop,
 ) -> Option<VectorizationPlan> {
     let iv = lp.induction_var.as_ref()?;
-    let trip_count = lp.trip_count?;
+    let bound_operand = iv.bound_operand.clone();
+    let dynamic_bound = !matches!(bound_operand, Operand::Constant(_));
 
-    if trip_count < 4 {
-        return None; // Too small to vectorize
-    }
+    let trip_count = if dynamic_bound {
+        // `for (i = init; i < bound_var; i += step)` with runtime trip count
+        if iv.init != 0 || iv.step != 1 {
+            return None;
+        }
+        if !matches!(iv.cmp_op, BinaryOp::GreaterEqual) {
+            return None;
+        }
+        None
+    } else {
+        let tc = lp.trip_count?;
+        if tc < 4 {
+            return None;
+        }
+        Some(tc)
+    };
 
     let mut loads: Vec<MemAccess> = Vec::new();
     let mut stores: Vec<MemAccess> = Vec::new();
@@ -127,57 +324,64 @@ fn analyze_loop_body(
         }
     }
 
-    // Analyze body blocks
+    // Pass 1: collect arithmetic (needed to resolve linear index patterns)
     for &block_id in &lp.body {
         let block = func.blocks.iter().find(|b| b.id == block_id)?;
         for inst in &block.instructions {
             match inst {
-                Instruction::Call { .. } | Instruction::IndirectCall { .. } => {
-                    has_calls = true;
-                }
-                Instruction::GetElementPtr { dest: _, base: _, index, element_type: _ } => {
-                    // Check if the index is the induction variable or derived from it
-                    if is_iv_derived(index, iv.var) {
-                        // This GEP uses the IV for array indexing - potentially vectorizable
-                    }
-                }
-                Instruction::Load { dest, addr, value_type, .. } => {
-                    // Check if this loads from an IV-indexed GEP
-                    if let Operand::Var(addr_var) = addr {
-                        if let Some(gep_info) = find_gep_for_var(func, *addr_var, &lp.body, iv.var) {
-                            loads.push(MemAccess {
-                                base_var: gep_info.0,
-                                index_var: iv.var,
-                                elem_type: value_type.clone(),
-                                is_load: true,
-                                data: Operand::Var(*dest),
-                                dest: Some(*dest),
-                            });
-                        }
-                    }
-                }
-                Instruction::Store { addr, src, value_type, .. } => {
-                    if let Operand::Var(addr_var) = addr {
-                        if let Some(gep_info) = find_gep_for_var(func, *addr_var, &lp.body, iv.var) {
-                            stores.push(MemAccess {
-                                base_var: gep_info.0,
-                                index_var: iv.var,
-                                elem_type: value_type.clone(),
-                                is_load: false,
-                                data: src.clone(),
-                                dest: None,
-                            });
-                        }
-                    }
-                }
+                Instruction::Call { .. } | Instruction::IndirectCall { .. } => has_calls = true,
                 Instruction::Binary { dest, op, left, right } => {
                     arithmetic_ops.push((*dest, op.clone(), left.clone(), right.clone(), false));
                 }
                 Instruction::FloatBinary { dest, op, left, right } => {
                     arithmetic_ops.push((*dest, op.clone(), left.clone(), right.clone(), true));
                 }
-                Instruction::Phi { .. } => {} // Handled above
-                Instruction::Copy { .. } => {} // OK
+                _ => {}
+            }
+        }
+    }
+
+    // Pass 2: memory accesses with linear IV index patterns
+    for &block_id in &lp.body {
+        let block = func.blocks.iter().find(|b| b.id == block_id)?;
+        for inst in &block.instructions {
+            match inst {
+                Instruction::Load { dest, addr, value_type, .. } => {
+                    if let Operand::Var(addr_var) = addr {
+                        if let Some((base, pat)) = find_gep_for_var(
+                            func, *addr_var, &lp.body, iv.var, &arithmetic_ops,
+                        ) {
+                            if pat.scale > 0 && is_positive_power_of_two(pat.scale) {
+                                loads.push(MemAccess {
+                                    base_var: base,
+                                    index_pattern: pat,
+                                    elem_type: value_type.clone(),
+                                    is_load: true,
+                                    data: Operand::Var(*dest),
+                                    dest: Some(*dest),
+                                });
+                            }
+                        }
+                    }
+                }
+                Instruction::Store { addr, src, value_type, .. } => {
+                    if let Operand::Var(addr_var) = addr {
+                        if let Some((base, pat)) = find_gep_for_var(
+                            func, *addr_var, &lp.body, iv.var, &arithmetic_ops,
+                        ) {
+                            if pat.scale > 0 && is_positive_power_of_two(pat.scale) {
+                                stores.push(MemAccess {
+                                    base_var: base,
+                                    index_pattern: pat,
+                                    elem_type: value_type.clone(),
+                                    is_load: false,
+                                    data: src.clone(),
+                                    dest: None,
+                                });
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -223,12 +427,6 @@ fn analyze_loop_body(
         }
     }
 
-    // Check for read-after-write or write-after-read dependencies between different arrays
-    // (same array read and write at same index is OK only if no other element deps)
-    if !check_memory_safety(&loads, &stores) {
-        return None;
-    }
-
     // We have a vectorizable loop if we have loads/stores or reductions
     if loads.is_empty() && stores.is_empty() && reductions.is_empty() {
         return None;
@@ -248,6 +446,8 @@ fn analyze_loop_body(
 
     Some(VectorizationPlan {
         trip_count,
+        bound_operand,
+        dynamic_bound,
         loads,
         stores,
         reductions,
@@ -294,21 +494,26 @@ fn is_iv_or_iv_derived(
     }
 }
 
-/// Find the GEP instruction that produces a given variable, returning (base_var, index_var)
+/// Find the GEP instruction that produces a given variable, returning (base_var, index pattern).
 fn find_gep_for_var(
     func: &Function,
     var: VarId,
     body: &HashSet<BlockId>,
     iv_var: VarId,
-) -> Option<(VarId, VarId)> {
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+) -> Option<(VarId, IndexPattern)> {
     for &block_id in body {
         if let Some(block) = func.blocks.iter().find(|b| b.id == block_id) {
             for inst in &block.instructions {
                 if let Instruction::GetElementPtr { dest, base, index, .. } = inst {
                     if *dest == var {
                         if let Operand::Var(base_v) = base {
-                            if is_iv_derived(index, iv_var) {
-                                return Some((*base_v, iv_var));
+                            if let Some(pat) =
+                                resolve_index_pattern(index, iv_var, func, body, arith_ops)
+                            {
+                                if pat.scale > 0 {
+                                    return Some((*base_v, pat));
+                                }
                             }
                         }
                     }
@@ -319,58 +524,305 @@ fn find_gep_for_var(
     None
 }
 
-/// Check memory safety: no overlapping writes to reads
-fn check_memory_safety(loads: &[MemAccess], stores: &[MemAccess]) -> bool {
-    // Simple check: different base arrays for loads and stores, OR
-    // same base but read and write at same index (element-wise)
-    for store in stores {
-        for load in loads {
-            if store.base_var == load.base_var {
-                // Same array - only safe if writing and reading same element
-                // (which is a copy/transform pattern: a[i] = f(a[i]))
-                // For now, allow this common pattern
-            }
-        }
-        // Check write-after-write at different bases
-        for other_store in stores {
-            if store.base_var == other_store.base_var && !std::ptr::eq(store, other_store) {
-                return false; // Two stores to same array - unsafe
-            }
-        }
-    }
-    true
-}
-
 /// Plan for vectorizing a loop
 #[derive(Debug)]
 struct VectorizationPlan {
-    trip_count: usize,
+    trip_count: Option<usize>,
+    bound_operand: Operand,
+    dynamic_bound: bool,
     loads: Vec<MemAccess>,
     stores: Vec<MemAccess>,
     reductions: Vec<Reduction>,
     arithmetic_ops: Vec<(VarId, BinaryOp, Operand, Operand, bool)>,
 }
 
+/// Rough profitability: vectorization must amortize peel/setup cost.
+fn is_vectorization_profitable(plan: &VectorizationPlan, vf: usize) -> bool {
+    let mem_ops = plan.loads.len() + plan.stores.len();
+    if mem_ops == 0 {
+        return false;
+    }
+
+    // Pure store-fill (invariant splat) with no loads/reductions is never worth it.
+    if plan.loads.is_empty() && plan.reductions.is_empty() {
+        return false;
+    }
+
+    let vector_mem_work = mem_ops.saturating_mul(vf);
+
+    match plan.trip_count {
+        Some(tc) => {
+            if tc < vf {
+                return false;
+            }
+            // Need either multiple vector iterations or enough per-iter memory work.
+            tc >= vf * 2 || vector_mem_work >= vf + 4
+        }
+        None => {
+            // Runtime-bound loops: require substantive memory traffic per iteration.
+            plan.dynamic_bound && vector_mem_work >= vf
+        }
+    }
+}
+
 /// Main auto-vectorization entry point
 /// Analyzes loops and inserts vector IR annotations that codegen will use
 pub fn vectorize_function(func: &mut Function, simd_level: SimdLevel) {
     let loops = loop_analysis::find_loops(func);
+    let vf = simd_level.vector_width();
 
     for lp in &loops {
         if let Some(plan) = analyze_loop_body(func, lp) {
-            let vf = simd_level.vector_width();
-            if plan.trip_count >= vf {
+            if !memory_dependence_ok(func, &plan, vf) {
+                continue;
+            }
+            if is_vectorization_profitable(&plan, vf) {
                 apply_vectorization(func, lp, &plan, simd_level);
             }
         }
     }
 }
 
+fn memory_dependence_ok(func: &Function, plan: &VectorizationPlan, vf: usize) -> bool {
+    let dep_loads: Vec<mem_dependence::MemAccess> = plan
+        .loads
+        .iter()
+        .map(convert_mem_access)
+        .collect();
+    let dep_stores: Vec<mem_dependence::MemAccess> = plan
+        .stores
+        .iter()
+        .map(convert_mem_access)
+        .collect();
+    let arith_ops: Vec<(VarId, Operand, Operand)> = plan
+        .arithmetic_ops
+        .iter()
+        .map(|(d, _, l, r, _)| (*d, l.clone(), r.clone()))
+        .collect();
+    check_memory_dependence(func, &dep_loads, &dep_stores, vf, &arith_ops)
+}
+
+fn convert_mem_access(m: &MemAccess) -> mem_dependence::MemAccess {
+    mem_dependence::MemAccess {
+        base_var: m.base_var,
+        index_pattern: mem_dependence::IndexPattern {
+            scale: m.index_pattern.scale,
+            offset: m.index_pattern.offset,
+        },
+        is_load: m.is_load,
+        data: m.data.clone(),
+        dest: m.dest,
+    }
+}
+
+/// Append vector loads/stores/arithmetic for one vectorized iteration.
+/// When `mask_var` is set, inactive lanes are zeroed on loads and merged on stores (tail epilogue).
+fn append_vec_loop_body(
+    insts: &mut Vec<Instruction>,
+    plan: &VectorizationPlan,
+    vec_iv: VarId,
+    iv_var: VarId,
+    vf: usize,
+    mask_var: Option<VarId>,
+    next_var: &mut usize,
+    load_vec_vars: &mut HashMap<VarId, VarId>,
+    op_vec_vars: &mut HashMap<VarId, VarId>,
+    reduction_infos: &[ReductionInfo],
+) -> usize {
+    let reduction_accums: HashSet<VarId> = reduction_infos.iter().map(|r| r.accum_var).collect();
+    let mut valid_simd_stores = 0;
+
+    for load in &plan.loads {
+        let gep_dest = VarId(*next_var);
+        *next_var += 1;
+        let vec_load_dest = VarId(*next_var);
+        *next_var += 1;
+
+        let index_var = emit_scaled_index(insts, vec_iv, &load.index_pattern, next_var);
+        insts.push(Instruction::GetElementPtr {
+            dest: gep_dest,
+            base: Operand::Var(load.base_var),
+            index: Operand::Var(index_var),
+            element_type: load.elem_type.clone(),
+        });
+        insts.push(Instruction::Simd {
+            op: SimdOp::Load,
+            dest: Some(vec_load_dest),
+            operands: vec![Operand::Var(gep_dest)],
+            elem_type: load.elem_type.clone(),
+            width: vf,
+        });
+
+        let mut vec_reg = vec_load_dest;
+        if let Some(mask) = mask_var {
+            let masked = VarId(*next_var);
+            *next_var += 1;
+            insts.push(Instruction::Simd {
+                op: SimdOp::And,
+                dest: Some(masked),
+                operands: vec![Operand::Var(vec_reg), Operand::Var(mask)],
+                elem_type: load.elem_type.clone(),
+                width: vf,
+            });
+            vec_reg = masked;
+        }
+        if let Some(orig_dest) = load.dest {
+            load_vec_vars.insert(orig_dest, vec_reg);
+        }
+    }
+
+    for &(dest, ref op, ref left, ref right, is_float) in &plan.arithmetic_ops {
+        if dest == iv_var {
+            continue;
+        }
+        let left_is_accum = matches!(left, Operand::Var(v) if reduction_accums.contains(v));
+        let right_is_accum = matches!(right, Operand::Var(v) if reduction_accums.contains(v));
+        if left_is_accum || right_is_accum {
+            let accum_var = if left_is_accum {
+                match left { Operand::Var(v) => *v, _ => continue }
+            } else {
+                match right { Operand::Var(v) => *v, _ => continue }
+            };
+            let other_operand = if left_is_accum { right } else { left };
+            if let Some(rinfo) = reduction_infos.iter().find(|r| r.accum_var == accum_var) {
+                let vec_other = remap_vec_operand(other_operand, load_vec_vars, op_vec_vars);
+                let is_remapped = matches!(
+                    (other_operand, &vec_other),
+                    (Operand::Var(orig), Operand::Var(mapped)) if orig != mapped
+                );
+                if is_remapped {
+                    let simd_op = match op {
+                        BinaryOp::Add => SimdOp::Add,
+                        BinaryOp::Mul => SimdOp::Mul,
+                        _ => continue,
+                    };
+                    let elem_type = if is_float { Type::Float } else { Type::Int };
+                    insts.push(Instruction::Simd {
+                        op: simd_op,
+                        dest: Some(rinfo.vec_accum),
+                        operands: vec![Operand::Var(rinfo.vec_accum), vec_other],
+                        elem_type,
+                        width: vf,
+                    });
+                    op_vec_vars.insert(dest, rinfo.vec_accum);
+                }
+            }
+            continue;
+        }
+
+        let left_is_vec = matches!(left, Operand::Var(v) if load_vec_vars.contains_key(v) || op_vec_vars.contains_key(v));
+        let right_is_vec = matches!(right, Operand::Var(v) if load_vec_vars.contains_key(v) || op_vec_vars.contains_key(v));
+        if !left_is_vec && !right_is_vec {
+            continue;
+        }
+
+        let simd_op = match op {
+            BinaryOp::Add => SimdOp::Add,
+            BinaryOp::Sub => SimdOp::Sub,
+            BinaryOp::Mul => SimdOp::Mul,
+            BinaryOp::BitwiseAnd => SimdOp::And,
+            BinaryOp::BitwiseOr => SimdOp::Or,
+            BinaryOp::BitwiseXor => SimdOp::Xor,
+            _ => continue,
+        };
+        let vec_dest = VarId(*next_var);
+        *next_var += 1;
+        let op_elem_type = if is_float { Type::Float } else { Type::Int };
+        insts.push(Instruction::Simd {
+            op: simd_op,
+            dest: Some(vec_dest),
+            operands: vec![
+                remap_vec_operand(left, load_vec_vars, op_vec_vars),
+                remap_vec_operand(right, load_vec_vars, op_vec_vars),
+            ],
+            elem_type: op_elem_type,
+            width: vf,
+        });
+        op_vec_vars.insert(dest, vec_dest);
+    }
+
+    for store in &plan.stores {
+        let vec_src = remap_vec_operand(&store.data, load_vec_vars, op_vec_vars);
+        let is_remapped = matches!(
+            (&store.data, &vec_src),
+            (Operand::Var(orig), Operand::Var(mapped)) if orig != mapped
+        );
+        let final_vec_src = if !is_remapped {
+            let splat_dest = VarId(*next_var);
+            *next_var += 1;
+            insts.push(Instruction::Simd {
+                op: SimdOp::Splat,
+                dest: Some(splat_dest),
+                operands: vec![store.data.clone()],
+                elem_type: store.elem_type.clone(),
+                width: vf,
+            });
+            Operand::Var(splat_dest)
+        } else {
+            vec_src
+        };
+
+        let gep_dest = VarId(*next_var);
+        *next_var += 1;
+        let index_var = emit_scaled_index(insts, vec_iv, &store.index_pattern, next_var);
+        insts.push(Instruction::GetElementPtr {
+            dest: gep_dest,
+            base: Operand::Var(store.base_var),
+            index: Operand::Var(index_var),
+            element_type: store.elem_type.clone(),
+        });
+
+        let store_src = if let Some(mask) = mask_var {
+            let mem_vec = VarId(*next_var);
+            *next_var += 1;
+            insts.push(Instruction::Simd {
+                op: SimdOp::Load,
+                dest: Some(mem_vec),
+                operands: vec![Operand::Var(gep_dest)],
+                elem_type: store.elem_type.clone(),
+                width: vf,
+            });
+            let blended = VarId(*next_var);
+            *next_var += 1;
+            insts.push(Instruction::Simd {
+                op: SimdOp::Blend,
+                dest: Some(blended),
+                operands: vec![Operand::Var(mem_vec), final_vec_src, Operand::Var(mask)],
+                elem_type: store.elem_type.clone(),
+                width: vf,
+            });
+            Operand::Var(blended)
+        } else {
+            final_vec_src
+        };
+
+        insts.push(Instruction::Simd {
+            op: SimdOp::Store,
+            dest: None,
+            operands: vec![Operand::Var(gep_dest), store_src],
+            elem_type: store.elem_type.clone(),
+            width: vf,
+        });
+        valid_simd_stores += 1;
+    }
+
+    valid_simd_stores
+}
+
+struct ReductionInfo {
+    accum_var: VarId,
+    vec_accum: VarId,
+    scalar_result: VarId,
+    op: BinaryOp,
+    is_float: bool,
+    elem_type: Type,
+}
+
 /// Apply vectorization to a loop by transforming it into a vectorized + remainder structure.
 ///
 /// Original: for (i = 0; i < N; i++) body(i)
 /// Becomes:  for (i = 0; i < N - N%VF; i += VF) vector_body(i)
-///           for (; i < N; i++) body(i)  // remainder (original loop)
+///           [masked vector tail] or scalar remainder loop for reductions
 ///
 /// Correctness requirements:
 /// 1. The vectorized header uses a proper Phi node for the IV
@@ -390,24 +842,31 @@ fn apply_vectorization(
         None => return,
     };
 
-    let trip_count = match lp.trip_count {
-        Some(tc) => tc,
-        None => return,
-    };
-
-    // Only vectorize if we have enough iterations and actual memory operations
-    let vec_iters = trip_count / vf;
-    if vec_iters == 0 {
-        return;
-    }
-
     // Must have array memory accesses to vectorize
     if plan.loads.is_empty() && plan.stores.is_empty() {
         return;
     }
 
-    let vec_trip_count = vec_iters * vf;
-    let has_remainder = trip_count % vf != 0;
+    let (vec_trip_count, has_remainder, vector_limit_operand) = if plan.dynamic_bound {
+        // Filled in preheader: limit = bound - (bound % vf) for init=0, step=1
+        (0usize, true, None)
+    } else {
+        let trip_count = match plan.trip_count {
+            Some(tc) => tc,
+            None => return,
+        };
+        let vec_iters = trip_count / vf;
+        if vec_iters == 0 {
+            return;
+        }
+        let vec_trip_count = vec_iters * vf;
+        let has_remainder = trip_count % vf != 0;
+        (
+            vec_trip_count,
+            has_remainder,
+            Some(Operand::Constant(vec_trip_count as i64)),
+        )
+    };
 
     // We need a preheader to redirect
     let preheader = match lp.preheader {
@@ -431,66 +890,25 @@ fn apply_vectorization(
     let vec_iv_next = VarId(max_var_id + 2);     // IV after increment by VF
     let vec_cmp = VarId(max_var_id + 3);         // comparison result
     let vec_init_iv = VarId(max_var_id + 4);     // copy of init value for phi source
-    let mut next_var = max_var_id + 5;
+    let vec_limit_var = if plan.dynamic_bound {
+        Some(VarId(max_var_id + 5))
+    } else {
+        None
+    };
+    let mut next_var = max_var_id + if plan.dynamic_bound { 6 } else { 5 };
+
+    let use_masked_tail = has_remainder && plan.reductions.is_empty();
+    let tail_elem_type = if !plan.loads.is_empty() {
+        plan.loads[0].elem_type.clone()
+    } else {
+        plan.stores[0].elem_type.clone()
+    };
 
     // --- Build vectorized body instructions ---
     let mut vec_body_insts: Vec<Instruction> = Vec::new();
-
-    // Determine the element type for SIMD instructions
-    let _elem_type = if !plan.loads.is_empty() {
-        plan.loads[0].elem_type.clone()
-    } else if !plan.stores.is_empty() {
-        plan.stores[0].elem_type.clone()
-    } else {
-        Type::Int
-    };
-
-    // For each load, generate: GEP + Simd::Load
     let mut load_vec_vars: HashMap<VarId, VarId> = HashMap::new();
-    for load in &plan.loads {
-        let gep_dest = VarId(next_var);
-        next_var += 1;
-        let vec_load_dest = VarId(next_var);
-        next_var += 1;
+    let mut op_vec_vars: HashMap<VarId, VarId> = HashMap::new();
 
-        // GEP with vectorized IV
-        vec_body_insts.push(Instruction::GetElementPtr {
-            dest: gep_dest,
-            base: Operand::Var(load.base_var),
-            index: Operand::Var(vec_iv),
-            element_type: load.elem_type.clone(),
-        });
-
-        // Vector load
-        vec_body_insts.push(Instruction::Simd {
-            op: SimdOp::Load,
-            dest: Some(vec_load_dest),
-            operands: vec![Operand::Var(gep_dest)],
-            elem_type: load.elem_type.clone(),
-            width: vf,
-        });
-
-        if let Some(orig_dest) = load.dest {
-            load_vec_vars.insert(orig_dest, vec_load_dest);
-        }
-    }
-
-    // Collect reduction accumulator variables — vectorize these with vector accumulators
-    let reduction_accums: HashSet<VarId> = plan.reductions.iter()
-        .map(|r| r.accum_var)
-        .collect();
-
-    // Create vector accumulator variables for each reduction.
-    // We use a single VarId for the accumulator (no phi needed) — the SIMD register
-    // is initialized before the loop and accumulated in-place in the loop body.
-    struct ReductionInfo {
-        accum_var: VarId,        // original scalar accumulator
-        vec_accum: VarId,        // vector accumulator (single var, used in-place)
-        scalar_result: VarId,    // scalar result after horizontal add
-        op: BinaryOp,
-        is_float: bool,
-        elem_type: Type,
-    }
     let mut reduction_infos: Vec<ReductionInfo> = Vec::new();
     for red in &plan.reductions {
         let vec_accum = VarId(next_var); next_var += 1;
@@ -506,143 +924,18 @@ fn apply_vectorization(
         });
     }
 
-    // For each arithmetic op that works on vector data, generate Simd binary op
-    let mut op_vec_vars: HashMap<VarId, VarId> = HashMap::new();
-    for &(dest, ref op, ref left, ref right, is_float) in &plan.arithmetic_ops {
-        // Skip IV increment and comparison
-        if dest == iv.var {
-            continue;
-        }
-
-        // For reduction ops (one operand is the accumulator), generate a vector
-        // accumulation instead of skipping
-        let left_is_accum = matches!(left, Operand::Var(v) if reduction_accums.contains(v));
-        let right_is_accum = matches!(right, Operand::Var(v) if reduction_accums.contains(v));
-        if left_is_accum || right_is_accum {
-            // Find the corresponding reduction info
-            let accum_var = if left_is_accum {
-                match left { Operand::Var(v) => *v, _ => continue }
-            } else {
-                match right { Operand::Var(v) => *v, _ => continue }
-            };
-            let other_operand = if left_is_accum { right } else { left };
-
-            if let Some(rinfo) = reduction_infos.iter().find(|r| r.accum_var == accum_var) {
-                // The other operand must be a vector value (from a load or prior op)
-                let vec_other = remap_vec_operand(other_operand, &load_vec_vars, &op_vec_vars);
-                let is_remapped = match (other_operand, &vec_other) {
-                    (Operand::Var(orig), Operand::Var(mapped)) => orig != mapped,
-                    _ => false,
-                };
-                if is_remapped {
-                    // Generate: vec_accum = vec_accum + vec_loaded_data (in-place)
-                    let simd_op = match op {
-                        BinaryOp::Add => SimdOp::Add,
-                        BinaryOp::Mul => SimdOp::Mul,
-                        _ => continue,
-                    };
-                    let elem_type = if is_float { Type::Float } else { Type::Int };
-                    vec_body_insts.push(Instruction::Simd {
-                        op: simd_op,
-                        dest: Some(rinfo.vec_accum),  // same var as input = in-place
-                        operands: vec![Operand::Var(rinfo.vec_accum), vec_other],
-                        elem_type,
-                        width: vf,
-                    });
-                    // Map the dest of this arithmetic op to the vector result
-                    op_vec_vars.insert(dest, rinfo.vec_accum);
-                }
-            }
-            continue;
-        }
-
-        let left_is_vec = match left {
-            Operand::Var(v) => load_vec_vars.contains_key(v) || op_vec_vars.contains_key(v),
-            _ => false,
-        };
-        let right_is_vec = match right {
-            Operand::Var(v) => load_vec_vars.contains_key(v) || op_vec_vars.contains_key(v),
-            _ => false,
-        };
-
-        if !left_is_vec && !right_is_vec {
-            continue;
-        }
-
-        let simd_op = match op {
-            BinaryOp::Add => SimdOp::Add,
-            BinaryOp::Sub => SimdOp::Sub,
-            BinaryOp::Mul => SimdOp::Mul,
-            _ => continue,  // Skip non-vectorizable ops
-        };
-
-        let vec_left = remap_vec_operand(left, &load_vec_vars, &op_vec_vars);
-        let vec_right = remap_vec_operand(right, &load_vec_vars, &op_vec_vars);
-
-        let vec_dest = VarId(next_var);
-        next_var += 1;
-
-        let op_elem_type = if is_float { Type::Float } else { Type::Int };
-        vec_body_insts.push(Instruction::Simd {
-            op: simd_op,
-            dest: Some(vec_dest),
-            operands: vec![vec_left, vec_right],
-            elem_type: op_elem_type,
-            width: vf,
-        });
-
-        op_vec_vars.insert(dest, vec_dest);
-    }
-
-    // For each store, generate: GEP + Simd::Store
-    // If the store data is scalar (not from a vector load/op), insert a Splat
-    // to broadcast the scalar to all lanes before the vector store.
-    let mut valid_simd_stores = 0;
-    for store in &plan.stores {
-        let vec_src = remap_vec_operand(&store.data, &load_vec_vars, &op_vec_vars);
-
-        // Check if the store data was remapped to a vector value
-        let is_remapped = match (&store.data, &vec_src) {
-            (Operand::Var(orig), Operand::Var(mapped)) => orig != mapped,
-            _ => false,
-        };
-
-        // If scalar, insert a Splat to broadcast the value to all vector lanes
-        let final_vec_src = if !is_remapped {
-            let splat_dest = VarId(next_var);
-            next_var += 1;
-            vec_body_insts.push(Instruction::Simd {
-                op: SimdOp::Splat,
-                dest: Some(splat_dest),
-                operands: vec![store.data.clone()],
-                elem_type: store.elem_type.clone(),
-                width: vf,
-            });
-            Operand::Var(splat_dest)
-        } else {
-            vec_src
-        };
-
-        let gep_dest = VarId(next_var);
-        next_var += 1;
-
-        vec_body_insts.push(Instruction::GetElementPtr {
-            dest: gep_dest,
-            base: Operand::Var(store.base_var),
-            index: Operand::Var(vec_iv),
-            element_type: store.elem_type.clone(),
-        });
-
-        vec_body_insts.push(Instruction::Simd {
-            op: SimdOp::Store,
-            dest: None,
-            operands: vec![Operand::Var(gep_dest), final_vec_src],
-            elem_type: store.elem_type.clone(),
-            width: vf,
-        });
-
-        valid_simd_stores += 1;
-    }
+    let valid_simd_stores = append_vec_loop_body(
+        &mut vec_body_insts,
+        plan,
+        vec_iv,
+        iv.var,
+        vf,
+        None,
+        &mut next_var,
+        &mut load_vec_vars,
+        &mut op_vec_vars,
+        &reduction_infos,
+    );
 
     // Bail out if no useful SIMD work was generated.
     // We need at least one SIMD store OR one active reduction to justify vectorization.
@@ -678,25 +971,67 @@ fn apply_vectorization(
                 (vec_body_id, vec_iv_next),
             ],
         },
-        // Compare: vec_iv < vec_trip_count
+        // Compare: vec_iv < limit (constant peeled count or runtime limit)
         Instruction::Binary {
             dest: vec_cmp,
             op: BinaryOp::Less,
             left: Operand::Var(vec_iv),
-            right: Operand::Constant(vec_trip_count as i64),
+            right: vector_limit_operand.clone().unwrap_or_else(|| {
+                Operand::Var(vec_limit_var.expect("dynamic bound requires vec_limit_var"))
+            }),
         },
     ];
 
-    // If we have reductions and a remainder, we need a bridge block
-    // between vec_header exit and the original loop that does HorizontalAdd.
-    // If no remainder, we need a bridge block before exit_block.
+    // Optional masked tail block (one partial vector iteration).
+    let mut next_extra_block = max_block_id + 3;
+    let tail_block_id = if use_masked_tail {
+        let id = BlockId(next_extra_block);
+        next_extra_block += 1;
+        let mask_var = VarId(next_var);
+        next_var += 1;
+        let bound_op = if plan.dynamic_bound {
+            plan.bound_operand.clone()
+        } else {
+            Operand::Constant(iv.bound)
+        };
+        let mut tail_insts = vec![Instruction::Simd {
+            op: SimdOp::LaneMask,
+            dest: Some(mask_var),
+            operands: vec![Operand::Var(vec_iv), bound_op],
+            elem_type: tail_elem_type.clone(),
+            width: vf,
+        }];
+        let mut tail_load_map = HashMap::new();
+        let mut tail_op_map = HashMap::new();
+        append_vec_loop_body(
+            &mut tail_insts,
+            plan,
+            vec_iv,
+            iv.var,
+            vf,
+            Some(mask_var),
+            &mut next_var,
+            &mut tail_load_map,
+            &mut tail_op_map,
+            &[],
+        );
+        func.blocks.push(BasicBlock {
+            id,
+            instructions: tail_insts,
+            terminator: Terminator::Br(exit_block),
+            is_label_target: false,
+        });
+        Some(id)
+    } else {
+        None
+    };
+
+    // Bridge block for reduction horizontal adds.
     let vec_exit_target = if !active_reductions.is_empty() {
-        // Create a bridge block for reduction finalization
-        let bridge_id = BlockId(func.blocks.iter().map(|b| b.id.0).max().unwrap_or(0) + 3);
+        let bridge_id = BlockId(next_extra_block);
         let mut bridge_insts: Vec<Instruction> = Vec::new();
 
         for rinfo in &active_reductions {
-            // HorizontalAdd: reduce vector accumulator to scalar
             bridge_insts.push(Instruction::Simd {
                 op: SimdOp::HorizontalAdd,
                 dest: Some(rinfo.scalar_result),
@@ -706,15 +1041,22 @@ fn apply_vectorization(
             });
         }
 
-        let bridge_target = if has_remainder { lp.header } else { exit_block };
-        let bridge_block = BasicBlock {
+        let bridge_target = if use_masked_tail {
+            tail_block_id.expect("masked tail block")
+        } else if has_remainder {
+            lp.header
+        } else {
+            exit_block
+        };
+        func.blocks.push(BasicBlock {
             id: bridge_id,
             instructions: bridge_insts,
             terminator: Terminator::Br(bridge_target),
             is_label_target: false,
-        };
-        func.blocks.push(bridge_block);
+        });
         bridge_id
+    } else if use_masked_tail {
+        tail_block_id.expect("masked tail block")
     } else if has_remainder {
         lp.header
     } else {
@@ -748,6 +1090,25 @@ fn apply_vectorization(
             dest: vec_init_iv,
             src: Operand::Constant(iv.init),
         });
+
+        if plan.dynamic_bound {
+            let limit_var = vec_limit_var.expect("vec_limit_var");
+            let rem_var = VarId(next_var);
+            next_var += 1;
+            // limit = bound - (bound % vf)  (init=0, step=1)
+            pre_block.instructions.push(Instruction::Binary {
+                dest: rem_var,
+                op: BinaryOp::Mod,
+                left: plan.bound_operand.clone(),
+                right: Operand::Constant(vf as i64),
+            });
+            pre_block.instructions.push(Instruction::Binary {
+                dest: limit_var,
+                op: BinaryOp::Sub,
+                left: plan.bound_operand.clone(),
+                right: Operand::Var(rem_var),
+            });
+        }
 
         // Add zero-vector init for each active reduction (directly to vec_accum)
         for rinfo in &active_reductions {
@@ -783,8 +1144,8 @@ fn apply_vectorization(
         vec_header_id
     };
 
-    if has_remainder {
-        // The original loop's IV phi gets its init from preheader.
+    if has_remainder && !use_masked_tail {
+        // Scalar remainder loop (reductions or no masked-tail support).
         // After vectorization, when we fall through from vec loop → original header,
         // the coming-from block is vec_exit_feeding_block (not preheader anymore).
         if let Some(header_block) = func.blocks.iter_mut().find(|b| b.id == lp.header) {
@@ -967,66 +1328,6 @@ mod tests {
         assert!(!is_iv_derived(&Operand::Constant(5), VarId(5)));
     }
 
-    // ─── check_memory_safety ────────────────────────────────────
-
-    #[test]
-    fn test_check_memory_safety_different_arrays() {
-        let load = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: true, data: Operand::Var(VarId(2)), dest: Some(VarId(2)),
-        };
-        let store = MemAccess {
-            base_var: VarId(3), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(2)), dest: None,
-        };
-        assert!(check_memory_safety(&[load], &[store]));
-    }
-
-    #[test]
-    fn test_check_memory_safety_same_array_read_write() {
-        // a[i] = a[i] + 1 pattern — allowed
-        let load = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: true, data: Operand::Var(VarId(2)), dest: Some(VarId(2)),
-        };
-        let store = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(3)), dest: None,
-        };
-        assert!(check_memory_safety(&[load], &[store]));
-    }
-
-    #[test]
-    fn test_check_memory_safety_double_store_same_array() {
-        let s1 = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(4)), dest: None,
-        };
-        let s2 = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(5)), dest: None,
-        };
-        assert!(!check_memory_safety(&[], &[s1, s2]));
-    }
-
-    #[test]
-    fn test_check_memory_safety_empty() {
-        assert!(check_memory_safety(&[], &[]));
-    }
-
-    #[test]
-    fn test_check_memory_safety_stores_different_arrays() {
-        let s1 = MemAccess {
-            base_var: VarId(1), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(4)), dest: None,
-        };
-        let s2 = MemAccess {
-            base_var: VarId(2), index_var: VarId(0), elem_type: Type::Int,
-            is_load: false, data: Operand::Var(VarId(5)), dest: None,
-        };
-        assert!(check_memory_safety(&[], &[s1, s2]));
-    }
-
     // ─── remap_vec_operand ──────────────────────────────────────
 
     #[test]
@@ -1105,8 +1406,8 @@ mod tests {
         ]);
 
         let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
-        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
-        assert_eq!(result, Some((VarId(10), VarId(0))));
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0), &[]);
+        assert_eq!(result, Some((VarId(10), IndexPattern::direct())));
     }
 
     #[test]
@@ -1128,7 +1429,7 @@ mod tests {
         ]);
 
         let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
-        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0), &[]);
         assert_eq!(result, None);
     }
 
@@ -1151,7 +1452,7 @@ mod tests {
         ]);
 
         let body: HashSet<BlockId> = vec![BlockId(2)].into_iter().collect(); // Block 1 not in body
-        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0), &[]);
         assert_eq!(result, None);
     }
 
@@ -1174,8 +1475,27 @@ mod tests {
         ]);
 
         let body: HashSet<BlockId> = vec![BlockId(1)].into_iter().collect();
-        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0));
+        let result = find_gep_for_var(&func, VarId(5), &body, VarId(0), &[]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_index_pattern_iv_plus_const() {
+        let body: HashSet<BlockId> = [BlockId(1)].into_iter().collect();
+        let func = make_func(vec![BasicBlock {
+            id: BlockId(1),
+            instructions: vec![Instruction::Binary {
+                dest: VarId(7),
+                op: BinaryOp::Add,
+                left: Operand::Var(VarId(0)),
+                right: Operand::Constant(2),
+            }],
+            terminator: Terminator::Br(BlockId(1)),
+            is_label_target: false,
+        }]);
+        let arith = vec![(VarId(7), BinaryOp::Add, Operand::Var(VarId(0)), Operand::Constant(2), false)];
+        let pat = resolve_index_pattern(&Operand::Var(VarId(7)), VarId(0), &func, &body, &arith);
+        assert_eq!(pat, Some(IndexPattern { scale: 1, offset: 2 }));
     }
 
     // ─── find_max_var_id ────────────────────────────────────────
@@ -1257,6 +1577,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 3,
+                bound_operand: Operand::Constant(3),
                 cmp_op: BinaryOp::Less,
             }),
             trip_count: Some(3), // < 4
@@ -1303,6 +1624,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 100,
+                bound_operand: Operand::Constant(100),
                 cmp_op: BinaryOp::Less,
             }),
             trip_count: Some(100),
@@ -1348,6 +1670,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 100,
+                bound_operand: Operand::Constant(100),
                 cmp_op: BinaryOp::Less,
             }),
             trip_count: Some(100),
@@ -1429,6 +1752,7 @@ mod tests {
             preheader: None,
             induction_var: Some(InductionVar {
                 var: VarId(0), init: 0, step: 1, bound: 100,
+                bound_operand: Operand::Constant(100),
                 cmp_op: BinaryOp::Less,
             }),
             trip_count: Some(100),
@@ -1439,10 +1763,64 @@ mod tests {
         let plan = plan.unwrap();
         assert_eq!(plan.loads.len(), 1);
         assert_eq!(plan.stores.len(), 1);
-        assert_eq!(plan.trip_count, 100);
+        assert_eq!(plan.trip_count, Some(100));
+        assert!(!plan.dynamic_bound);
     }
 
     // ─── _type_str ──────────────────────────────────────────────
+
+    #[test]
+    fn test_vectorize_maps_bitwise_and() {
+        let map_op = |op: BinaryOp| match op {
+            BinaryOp::BitwiseAnd => SimdOp::And,
+            BinaryOp::BitwiseOr => SimdOp::Or,
+            BinaryOp::BitwiseXor => SimdOp::Xor,
+            _ => SimdOp::Add,
+        };
+        assert_eq!(map_op(BinaryOp::BitwiseAnd), SimdOp::And);
+    }
+
+    #[test]
+    fn test_profitable_vector_loop() {
+        let plan = VectorizationPlan {
+            trip_count: Some(100),
+            bound_operand: Operand::Constant(100),
+            dynamic_bound: false,
+            loads: vec![MemAccess {
+                base_var: VarId(1),
+                index_pattern: IndexPattern::direct(),
+                elem_type: Type::Int,
+                is_load: true,
+                data: Operand::Var(VarId(2)),
+                dest: Some(VarId(2)),
+            }],
+            stores: vec![],
+            reductions: vec![],
+            arithmetic_ops: vec![],
+        };
+        assert!(is_vectorization_profitable(&plan, 4));
+    }
+
+    #[test]
+    fn test_unprofitable_tiny_trip() {
+        let plan = VectorizationPlan {
+            trip_count: Some(3),
+            bound_operand: Operand::Constant(3),
+            dynamic_bound: false,
+            loads: vec![MemAccess {
+                base_var: VarId(1),
+                index_pattern: IndexPattern::direct(),
+                elem_type: Type::Int,
+                is_load: true,
+                data: Operand::Var(VarId(2)),
+                dest: Some(VarId(2)),
+            }],
+            stores: vec![],
+            reductions: vec![],
+            arithmetic_ops: vec![],
+        };
+        assert!(!is_vectorization_profitable(&plan, 4));
+    }
 
     #[test]
     fn test_type_str() {

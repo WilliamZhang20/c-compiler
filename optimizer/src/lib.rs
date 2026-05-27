@@ -30,6 +30,8 @@ mod block_layout;
 mod loop_interchange;
 pub mod loop_analysis;
 pub mod vectorize;
+mod mem_dependence;
+mod slp;
 mod inline;
 mod sroa;
 
@@ -170,6 +172,16 @@ impl FunctionPass for Vectorize {
     }
 }
 
+struct SlpVectorize {
+    vf: usize,
+}
+impl FunctionPass for SlpVectorize {
+    fn name(&self) -> &str { "slp" }
+    fn run(&self, func: &mut ir::Function) {
+        slp::slp_vectorize_function(func, self.vf);
+    }
+}
+
 struct RemovePhis;
 impl FunctionPass for RemovePhis {
     fn name(&self) -> &str { "remove-phis" }
@@ -214,6 +226,7 @@ pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
             _ => vectorize::SimdLevel::SSE2,
         };
         pm.add_pass(Box::new(Vectorize { level: vec_level }));
+        pm.add_pass(Box::new(SlpVectorize { vf: vec_level.vector_width() }));
     }
 
     // ── Round 2: clean up after LICM / vectorize / etc. ────────
@@ -384,5 +397,36 @@ mod tests {
     fn optimizer_handles_if_else() {
         let ir = compile_to_ir("int f(int x) { if (x > 0) { return 1; } else { return 0; } }");
         assert!(!ir.functions.is_empty());
+    }
+
+    #[test]
+    fn nested_struct_ssa_after_sroa_and_mem2reg() {
+        let src = include_str!("../../testing/test_nested_struct.c");
+        let tokens = lexer::lex(src).unwrap();
+        let ast = parser::parse_tokens(&tokens).unwrap();
+        let mut lowerer = ir::Lowerer::new();
+        let mut ir_prog = lowerer.lower_program(&ast).unwrap();
+        for func in &mut ir_prog.functions {
+            if func.name != "main" {
+                continue;
+            }
+            assert!(
+                ir::verify_ssa(func).is_ok(),
+                "before SROA: {}",
+                ir::verify_ssa(func).unwrap_err()
+            );
+            scalar_replacement_of_aggregates(func);
+            assert!(
+                ir::verify_ssa(func).is_ok(),
+                "after SROA: {}",
+                ir::verify_ssa(func).unwrap_err()
+            );
+            ir::mem2reg(func);
+            assert!(
+                ir::verify_ssa(func).is_ok(),
+                "after mem2reg: {}",
+                ir::verify_ssa(func).unwrap_err()
+            );
+        }
     }
 }

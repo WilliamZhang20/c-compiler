@@ -257,26 +257,34 @@ pub fn scalar_replacement_of_aggregates(func: &mut Function) {
         }
     }
 
-    // Step 7: Remove GEP instructions for eligible allocas, and apply
-    // variable substitution throughout the function
-    let gep_dests: HashSet<VarId> = gep_to_field.keys().copied().collect();
+    // Allocas fully promoted: has at least one GEP and every GEP has a substitution target.
+    let fully_promoted: HashSet<VarId> = eligible_allocas
+        .iter()
+        .copied()
+        .filter(|alloca| {
+            let geps: Vec<_> = gep_to_field
+                .iter()
+                .filter(|(_, (root, _))| root == alloca)
+                .collect();
+            !geps.is_empty() && geps.iter().all(|(gep_dest, _)| subst.contains_key(gep_dest))
+        })
+        .collect();
 
     for block in &mut func.blocks {
-        // Remove GEPs that we're replacing (including chained GEPs where
-        // the base is another GEP, not directly the alloca)
+        // Only remove GEPs we can rewrite (leaf fields with scalar allocas).
         block.instructions.retain(|inst| {
             if let Instruction::GetElementPtr { dest, .. } = inst {
-                if gep_dests.contains(dest) {
-                    return false; // Remove this GEP
+                if subst.contains_key(dest) {
+                    return false;
                 }
             }
             true
         });
 
-        // Remove original aggregate allocas
+        // Remove original aggregate allocas only when fully promoted.
         block.instructions.retain(|inst| {
             if let Instruction::Alloca { dest, .. } = inst {
-                if eligible_allocas.contains(dest) {
+                if fully_promoted.contains(dest) {
                     return false;
                 }
             }
