@@ -308,6 +308,9 @@ fn inline_call_site(
                 hint: *hint,
             },
             Terminator::Unreachable => Terminator::Unreachable,
+            Terminator::IndirectBr { target } => Terminator::IndirectBr {
+                target: remap_operand(target, var_offset),
+            },
         };
 
         inlined_blocks.push(new_block);

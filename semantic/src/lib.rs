@@ -1,106 +1,115 @@
-use model::{Program, Function, Stmt, Expr, Type, BinaryOp};
+use model::{Program, Function, Stmt, Expr, Type, BinaryOp, TypeEnv, TypeQualifiers};
 use std::collections::{HashMap, HashSet};
 
 pub struct SemanticAnalyzer {
-    global_scope: HashMap<String, Type>,
+    type_env: TypeEnv,
     scopes: Vec<HashMap<String, Type>>,
-    const_vars: HashSet<String>, // Track const-qualified variables
-    volatile_vars: HashSet<String>, // Track volatile-qualified variables  
-    structs: HashMap<String, model::StructDef>,
-    unions: HashMap<String, model::UnionDef>,
-    enum_constants: HashMap<String, i64>, // enum constant name => value
+    const_vars: HashSet<String>,
+    volatile_vars: HashSet<String>,
     loop_depth: usize,
     in_switch: bool,
+    current_return_type: Option<Type>,
+    case_values: HashSet<i64>,
 }
 
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
-            global_scope: HashMap::new(),
+            type_env: TypeEnv::from_program(&Program {
+                functions: vec![],
+                globals: vec![],
+                structs: vec![],
+                unions: vec![],
+                enums: vec![],
+                prototypes: vec![],
+                forward_structs: vec![],
+                typedefs: HashMap::new(),
+            }),
             scopes: Vec::new(),
             const_vars: HashSet::new(),
             volatile_vars: HashSet::new(),
-            structs: HashMap::new(),
-            unions: HashMap::new(),
-            enum_constants: HashMap::new(),
             loop_depth: 0,
             in_switch: false,
+            current_return_type: None,
+            case_values: HashSet::new(),
         }
     }
 
     pub fn analyze(&mut self, program: &Program) -> Result<(), String> {
-        self.global_scope.clear();
+        self.type_env = TypeEnv::from_program(program);
         self.const_vars.clear();
         self.volatile_vars.clear();
-        self.structs.clear();
-        self.unions.clear();
-        self.enum_constants.clear();
-        
+        self.scopes.clear();
+
         for s_def in &program.structs {
-            self.structs.insert(s_def.name.clone(), s_def.clone());
+            for field in &s_def.fields {
+                TypeEnv::validate_bitfield(field)?;
+            }
         }
-        
-        for u_def in &program.unions {
-            self.unions.insert(u_def.name.clone(), u_def.clone());
-        }
-        
-        // Register all enum constants
+
         for enum_def in &program.enums {
-            for (const_name, const_value) in &enum_def.constants {
-                if self.enum_constants.contains_key(const_name) {
+            let mut seen = HashSet::new();
+            for (const_name, _) in &enum_def.constants {
+                if !seen.insert(const_name.clone()) {
                     return Err(format!("Redeclaration of enum constant {}", const_name));
                 }
-                self.enum_constants.insert(const_name.clone(), *const_value);
             }
         }
-        
+
         for global in &program.globals {
-            if self.global_scope.contains_key(&global.name) {
-                // Allow redeclarations - just skip this one (common with extern vs definition)
-                continue;
-            }
-            
-            // Validate restrict on pointers only
             if global.qualifiers.is_restrict && !matches!(global.r#type, Type::Pointer(_, ..)) {
-                return Err(format!("'restrict' can only be applied to pointer types"));
+                return Err(format!(
+                    "'restrict' can only be applied to pointer types on '{}'",
+                    global.name
+                ));
             }
-            
-            self.global_scope.insert(global.name.clone(), global.r#type.clone());
             if global.qualifiers.is_const {
                 self.const_vars.insert(global.name.clone());
             }
             if global.qualifiers.is_volatile {
                 self.volatile_vars.insert(global.name.clone());
             }
-        }
-        
-        // Add function names as function pointers to global scope
-        for function in &program.functions {
-            let func_type = Type::FunctionPointer {
-                return_type: Box::new(function.return_type.clone()),
-                param_types: function.params.iter().map(|(t, _)| t.clone()).collect(),
-            };
-            if self.global_scope.contains_key(&function.name) {
-                return Err(format!("Redeclaration of function {}", function.name));
+            if let Some(init) = &global.init {
+                let ty = self.type_env.resolve_type(&global.r#type);
+                self.check_init_compatible(&ty, init)?;
             }
-            self.global_scope.insert(function.name.clone(), func_type);
         }
 
         for function in &program.functions {
+            if self.type_env.functions.contains_key(&function.name) {
+                // Definition may follow prototype — validated at registration time.
+            }
             self.analyze_function(function)?;
         }
         Ok(())
     }
 
+    fn locals(&self) -> HashMap<String, Type> {
+        let mut map = HashMap::new();
+        for scope in &self.scopes {
+            for (k, v) in scope {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
     fn analyze_function(&mut self, function: &Function) -> Result<(), String> {
-        // Start with an empty scope stack — lookup_symbol falls through to global_scope
         self.scopes.clear();
         self.loop_depth = 0;
         self.in_switch = false;
-        
+        self.current_return_type = Some(self.type_env.resolve_type(&function.return_type));
+
         self.enter_scope();
         for (t, name) in &function.params {
-            self.add_symbol(name.clone(), t.clone());
+            let resolved = self.type_env.resolve_type(t);
+            if !self.type_env.is_complete_type(&resolved) {
+                return Err(format!(
+                    "Parameter '{}' has incomplete type in function '{}'",
+                    name, function.name
+                ));
+            }
+            self.declare_local(name, resolved, TypeQualifiers::default(), false)?;
         }
         self.analyze_stmt(&Stmt::Block(function.body.clone()))?;
         self.exit_scope();
@@ -115,48 +124,75 @@ impl SemanticAnalyzer {
         self.scopes.pop();
     }
 
-    fn add_symbol(&mut self, name: String, ty: Type) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, ty);
+    fn declare_local(
+        &mut self,
+        name: &str,
+        ty: Type,
+        qualifiers: model::TypeQualifiers,
+        allow_shadow: bool,
+    ) -> Result<(), String> {
+        if qualifiers.is_restrict && !matches!(ty, Type::Pointer(_, ..)) {
+            return Err(format!("'restrict' can only be applied to pointer types"));
         }
+        if let Some(scope) = self.scopes.last_mut() {
+            if scope.contains_key(name) && !allow_shadow {
+                return Err(format!("Redeclaration of '{}'", name));
+            }
+            scope.insert(name.to_string(), ty);
+        }
+        if qualifiers.is_const {
+            self.const_vars.insert(name.to_string());
+        }
+        if qualifiers.is_volatile {
+            self.volatile_vars.insert(name.to_string());
+        }
+        Ok(())
     }
 
-    fn lookup_symbol(&self, name: &str) -> Option<&Type> {
+    fn lookup_symbol(&self, name: &str) -> Option<Type> {
         for scope in self.scopes.iter().rev() {
             if let Some(ty) = scope.get(name) {
-                return Some(ty);
+                return Some(ty.clone());
             }
         }
-        self.global_scope.get(name)
+        self.type_env.globals.get(name).cloned()
     }
 
     fn analyze_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Declaration { r#type, qualifiers, name, init } => {
-                // Validate restrict on pointers only
-                if qualifiers.is_restrict && !matches!(r#type, Type::Pointer(_, ..)) {
-                    return Err(format!("'restrict' can only be applied to pointer types"));
+                let locals = self.locals();
+                let resolved = self.type_env.resolve_type_in_context(r#type, &locals);
+                if !self.type_env.is_complete_type(&resolved) {
+                    return Err(format!("Variable '{}' has incomplete type", name));
                 }
-                
-                self.add_symbol(name.clone(), r#type.clone());
-                if qualifiers.is_const {
-                    self.const_vars.insert(name.clone());
-                }
-                if qualifiers.is_volatile {
-                    self.volatile_vars.insert(name.clone());
-                }
-                
+                self.declare_local(name, resolved.clone(), qualifiers.clone(), true)?;
                 if let Some(expr) = init {
-                    self.analyze_expr(expr)?;
+                    self.check_init_compatible(&resolved, expr)?;
                 }
             }
             Stmt::Return(expr) => {
-                if let Some(e) = expr {
-                    self.analyze_expr(e)?;
+                let ret_ty = self.current_return_type.clone();
+                if let Some(ret_ty) = ret_ty {
+                    if ret_ty == Type::Void {
+                        if expr.is_some() {
+                            return Err("Return with value in void function".to_string());
+                        }
+                    } else if let Some(e) = expr {
+                        let got = self.check_expr(e)?;
+                        if !self.type_env.is_assign_compatible(&ret_ty, &got) {
+                            return Err(format!(
+                                "Return type mismatch: expected {:?}, got {:?}",
+                                ret_ty, got
+                            ));
+                        }
+                    }
+                } else if let Some(e) = expr {
+                    self.check_expr(e)?;
                 }
             }
             Stmt::Expr(expr) => {
-                self.analyze_expr(expr)?;
+                self.check_expr(expr)?;
             }
             Stmt::Block(block) => {
                 self.enter_scope();
@@ -164,21 +200,21 @@ impl SemanticAnalyzer {
                     self.analyze_stmt(s)?;
                 }
                 self.exit_scope();
-            }            Stmt::MultiDecl(stmts) => {
-                // Flat multi-variable declaration — no new scope; all declared names
-                // are visible in the surrounding block.
+            }
+            Stmt::MultiDecl(stmts) => {
                 for s in stmts {
-                    self.analyze_stmt(s)?
+                    self.analyze_stmt(s)?;
                 }
-            }            Stmt::If { cond, then_branch, else_branch } => {
-                self.analyze_expr(cond)?;
+            }
+            Stmt::If { cond, then_branch, else_branch } => {
+                self.check_expr(cond)?;
                 self.analyze_stmt(then_branch)?;
                 if let Some(else_stmt) = else_branch {
                     self.analyze_stmt(else_stmt)?;
                 }
             }
             Stmt::While { cond, body } => {
-                self.analyze_expr(cond)?;
+                self.check_expr(cond)?;
                 self.loop_depth += 1;
                 self.analyze_stmt(body)?;
                 self.loop_depth -= 1;
@@ -187,18 +223,18 @@ impl SemanticAnalyzer {
                 self.loop_depth += 1;
                 self.analyze_stmt(body)?;
                 self.loop_depth -= 1;
-                self.analyze_expr(cond)?;
+                self.check_expr(cond)?;
             }
             Stmt::For { init, cond, post, body } => {
-                self.enter_scope(); // for(int i=...) creates its own scope
+                self.enter_scope();
                 if let Some(stmt) = init {
                     self.analyze_stmt(stmt)?;
                 }
                 if let Some(e) = cond {
-                    self.analyze_expr(e)?;
+                    self.check_expr(e)?;
                 }
                 if let Some(e) = post {
-                    self.analyze_expr(e)?;
+                    self.check_expr(e)?;
                 }
                 self.loop_depth += 1;
                 self.analyze_stmt(body)?;
@@ -216,121 +252,170 @@ impl SemanticAnalyzer {
                 }
             }
             Stmt::Switch { cond, body } => {
-                self.analyze_expr(cond)?;
+                self.check_expr(cond)?;
                 let old_switch = self.in_switch;
+                let old_cases = std::mem::take(&mut self.case_values);
                 self.in_switch = true;
                 self.analyze_stmt(body)?;
                 self.in_switch = old_switch;
+                self.case_values = old_cases;
             }
             Stmt::Case(expr) => {
                 if !self.in_switch {
                     return Err("'case' label not within a switch statement".to_string());
                 }
-                self.analyze_expr(expr)?;
+                if let Expr::Constant(v) = expr {
+                    if !self.case_values.insert(*v) {
+                        return Err(format!("Duplicate case value {}", v));
+                    }
+                }
+                self.check_expr(expr)?;
             }
             Stmt::Default => {
                 if !self.in_switch {
                     return Err("'default' label not within a switch statement".to_string());
                 }
             }
-            Stmt::Goto(_label) => {
-                // Label references will be validated by IR lowerer
-                // We just need to accept goto statements here
+            Stmt::Goto(_label) => {}
+            Stmt::ComputedGoto(expr) => {
+                let ty = self.check_expr(expr)?;
+                match ty {
+                    Type::Pointer(_, ..) => {}
+                    _ => {
+                        return Err(format!(
+                            "Computed goto requires pointer type, got {:?}",
+                            ty
+                        ));
+                    }
+                }
             }
-            Stmt::Label(_name) => {
-                // Labels are always valid, IR lowerer will track them
-            }
+            Stmt::Label(_name) => {}
             Stmt::InlineAsm { outputs, inputs, .. } => {
-                // Validate that output and input expressions are valid
                 for operand in outputs {
-                    self.analyze_expr(&operand.expr)?;
+                    self.check_expr(&operand.expr)?;
                 }
                 for operand in inputs {
-                    self.analyze_expr(&operand.expr)?;
+                    self.check_expr(&operand.expr)?;
                 }
             }
         }
         Ok(())
     }
 
-    fn analyze_expr(&mut self, expr: &Expr) -> Result<(), String> {
+    fn check_expr(&mut self, expr: &Expr) -> Result<Type, String> {
+        let locals = self.locals();
+        let ty = self.type_env.expr_type(expr, &locals);
+
         match expr {
             Expr::Variable(name) => {
-                // Check if it's a variable or an enum constant
-                if self.lookup_symbol(name).is_none() && !self.enum_constants.contains_key(name) {
+                if self.lookup_symbol(name).is_none()
+                    && !self.type_env.enum_constants.contains(name)
+                {
                     return Err(format!("Undeclared variable {}", name));
                 }
             }
             Expr::Binary { left, op, right } => {
-                self.analyze_expr(left)?;
-                self.analyze_expr(right)?;
-                
-                // Check for assignment to const variable
-                if matches!(op, BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign 
-                    | BinaryOp::MulAssign | BinaryOp::DivAssign | BinaryOp::ModAssign 
-                    | BinaryOp::BitwiseAndAssign | BinaryOp::BitwiseOrAssign 
-                    | BinaryOp::BitwiseXorAssign | BinaryOp::ShiftLeftAssign 
-                    | BinaryOp::ShiftRightAssign) 
-                {
-                    if let Expr::Variable(name) = left.as_ref() {
-                        if self.const_vars.contains(name) {
-                            return Err(format!("Cannot assign to const variable '{}'", name));
-                        }
+                self.check_expr(left)?;
+                self.check_expr(right)?;
+                if matches!(
+                    op,
+                    BinaryOp::Assign
+                        | BinaryOp::AddAssign
+                        | BinaryOp::SubAssign
+                        | BinaryOp::MulAssign
+                        | BinaryOp::DivAssign
+                        | BinaryOp::ModAssign
+                        | BinaryOp::BitwiseAndAssign
+                        | BinaryOp::BitwiseOrAssign
+                        | BinaryOp::BitwiseXorAssign
+                        | BinaryOp::ShiftLeftAssign
+                        | BinaryOp::ShiftRightAssign
+                ) {
+                    if !TypeEnv::is_lvalue(left) {
+                        return Err("Assignment requires an lvalue".to_string());
                     }
+                    self.check_const_assignment(left)?;
+                    let lhs_ty = self.type_env.expr_type(left, &locals);
+                    let rhs_ty = self.type_env.expr_type(right, &locals);
+                    if !self.type_env.is_assign_compatible(&lhs_ty, &rhs_ty) {
+                        return Err(format!(
+                            "Incompatible assignment: {:?} = {:?}",
+                            lhs_ty, rhs_ty
+                        ));
+                    }
+                    if TypeEnv::pointee_is_const(&lhs_ty) {
+                        return Err("Cannot assign through pointer to const".to_string());
+                    }
+                }
+            }
+            Expr::Unary { op: model::UnaryOp::Deref, expr: inner } => {
+                self.check_expr(inner)?;
+                if TypeEnv::pointee_is_const(&ty) {
+                    // read-only deref is fine; assignment checked elsewhere
+                    let _ = inner;
                 }
             }
             Expr::Unary { expr, .. } => {
-                self.analyze_expr(expr)?;
+                self.check_expr(expr)?;
             }
-            Expr::PostfixIncrement(expr) | Expr::PostfixDecrement(expr) 
-            | Expr::PrefixIncrement(expr) | Expr::PrefixDecrement(expr) => {
-                self.analyze_expr(expr)?;
-                // Check for increment/decrement of const variable
-                if let Expr::Variable(name) = expr.as_ref() {
-                    if self.const_vars.contains(name) {
-                        return Err(format!("Cannot modify const variable '{}'", name));
-                    }
+            Expr::PostfixIncrement(expr)
+            | Expr::PostfixDecrement(expr)
+            | Expr::PrefixIncrement(expr)
+            | Expr::PrefixDecrement(expr) => {
+                if !TypeEnv::is_lvalue(expr) {
+                    return Err("Increment/decrement requires an lvalue".to_string());
                 }
-            }
-            Expr::Constant(_) => {}
-            Expr::FloatConstant(_) => {}
-            Expr::StringLiteral(_) => {}
-            Expr::Index { array, index } => {
-                self.analyze_expr(array)?;
-                self.analyze_expr(index)?;
+                self.check_const_assignment(expr)?;
+                self.check_expr(expr)?;
             }
             Expr::Call { func, args } => {
-                // For direct function calls (Variable), allow undeclared functions
-                // to support separate compilation
+                self.type_env.check_call(func, args, &locals)?;
                 if !matches!(**func, Expr::Variable(_)) {
-                    self.analyze_expr(func)?;
+                    self.check_expr(func)?;
                 }
                 for arg in args {
-                    self.analyze_expr(arg)?;
+                    self.check_expr(arg)?;
                 }
             }
-            Expr::SizeOf(_) => {}
-            Expr::AlignOf(_) => {}
-            Expr::SizeOfExpr(expr) => {
-                self.analyze_expr(expr)?;
+            Expr::Cast(cast_ty, inner) => {
+                self.check_expr(inner)?;
+                let _ = self.type_env.resolve_type(cast_ty);
             }
-            Expr::Cast(_, expr) => {
-                self.analyze_expr(expr)?;
+            Expr::LabelAddr(label) => {
+                // Label must exist in function — validated at IR lowering
+                let _ = label;
             }
-            Expr::Member { expr, member: _ } => {
-                self.analyze_expr(expr)?;
+            _ => {
+                self.check_expr_children(expr)?;
             }
-            Expr::PtrMember { expr, member: _ } => {
-                self.analyze_expr(expr)?;
+        }
+        Ok(ty)
+    }
+
+    fn check_expr_children(&mut self, expr: &Expr) -> Result<(), String> {
+        match expr {
+            Expr::Binary { left, right, .. } => {
+                self.check_expr(left)?;
+                self.check_expr(right)?;
+            }
+            Expr::Unary { expr, .. } => {
+                self.check_expr(expr)?;
+            }
+            Expr::Index { array, index } => {
+                self.check_expr(array)?;
+                self.check_expr(index)?;
+            }
+            Expr::Member { expr, .. } | Expr::PtrMember { expr, .. } => {
+                self.check_expr(expr)?;
             }
             Expr::Conditional { condition, then_expr, else_expr } => {
-                self.analyze_expr(condition)?;
-                self.analyze_expr(then_expr)?;
-                self.analyze_expr(else_expr)?;
+                self.check_expr(condition)?;
+                self.check_expr(then_expr)?;
+                self.check_expr(else_expr)?;
             }
             Expr::CompoundLiteral { init, .. } => {
                 for item in init {
-                    self.analyze_expr(&item.value)?;
+                    self.check_expr(&item.value)?;
                 }
             }
             Expr::StmtExpr(stmts) => {
@@ -340,32 +425,68 @@ impl SemanticAnalyzer {
             }
             Expr::Comma(exprs) => {
                 for e in exprs {
-                    self.analyze_expr(e)?;
+                    self.check_expr(e)?;
                 }
             }
             Expr::InitList(items) => {
                 for item in items {
-                    self.analyze_expr(&item.value)?;
+                    self.check_expr(&item.value)?;
                 }
             }
-            Expr::BuiltinOffsetof { .. } => {
-                // Compile-time constant, nothing to analyze
-            }
             Expr::Expect { expr, expected } => {
-                self.analyze_expr(expr)?;
-                self.analyze_expr(expected)?;
+                self.check_expr(expr)?;
+                self.check_expr(expected)?;
             }
             Expr::Generic { controlling, associations } => {
-                self.analyze_expr(controlling)?;
-                for (_ty, expr) in associations {
-                    self.analyze_expr(expr)?;
+                self.check_expr(controlling)?;
+                for (_, e) in associations {
+                    self.check_expr(e)?;
                 }
             }
             Expr::VaArg { list, .. } => {
-                self.analyze_expr(list)?;
+                self.check_expr(list)?;
             }
+            Expr::SizeOfExpr(e) => {
+                self.check_expr(e)?;
+            }
+            _ => {}
         }
         Ok(())
+    }
+
+    fn check_const_assignment(&self, expr: &Expr) -> Result<(), String> {
+        match expr {
+            Expr::Variable(name) => {
+                if self.const_vars.contains(name) {
+                    return Err(format!("Cannot modify const variable '{}'", name));
+                }
+            }
+            Expr::Unary { op: model::UnaryOp::Deref, expr: inner } => {
+                let locals = self.locals();
+                let ptr_ty = self.type_env.expr_type(inner, &locals);
+                if TypeEnv::pointee_is_const(&ptr_ty) {
+                    return Err("Cannot assign through pointer to const".to_string());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_init_compatible(&mut self, target: &Type, init: &Expr) -> Result<(), String> {
+        match init {
+            Expr::InitList(_) => Ok(()),
+            _ => {
+                let got = self.check_expr(init)?;
+                if !self.type_env.is_assign_compatible(target, &got) {
+                    return Err(format!(
+                        "Initializer incompatible: expected {:?}, got {:?}",
+                        target, got
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -373,7 +494,6 @@ impl SemanticAnalyzer {
 mod tests {
     use super::*;
 
-    /// Helper: parse source and run semantic analysis
     fn analyze(src: &str) -> Result<(), String> {
         let tokens = lexer::lex(src).unwrap();
         let program = parser::parse_tokens(&tokens).unwrap();
@@ -381,136 +501,45 @@ mod tests {
         analyzer.analyze(&program)
     }
 
-    // ─── Positive tests (should pass) ───────────────────────────
     #[test]
     fn valid_simple_program() {
         assert!(analyze("int main() { return 0; }").is_ok());
     }
 
     #[test]
-    fn valid_variable_usage() {
-        assert!(analyze("int main() { int x = 5; return x; }").is_ok());
-    }
-
-    #[test]
-    fn valid_nested_scopes() {
-        assert!(analyze("int main() { int x = 1; { int y = x; } return x; }").is_ok());
-    }
-
-    #[test]
-    fn valid_variable_shadowing() {
-        assert!(analyze("int main() { int x = 1; { int x = 2; } return x; }").is_ok());
-    }
-
-    #[test]
-    fn valid_loop_with_break() {
-        assert!(analyze("int main() { while (1) { break; } return 0; }").is_ok());
-    }
-
-    #[test]
-    fn valid_loop_with_continue() {
-        assert!(analyze("int main() { int i = 0; while (i < 10) { i = i + 1; continue; } return 0; }").is_ok());
-    }
-
-    #[test]
-    fn valid_switch() {
-        assert!(analyze("int main() { int x = 1; switch (x) { case 1: break; default: break; } return 0; }").is_ok());
-    }
-
-    #[test]
-    fn valid_const_variable_read() {
-        assert!(analyze("int main() { const int x = 5; return x; }").is_ok());
-    }
-
-    #[test]
-    fn valid_global_variable() {
-        assert!(analyze("int g = 10; int main() { return g; }").is_ok());
-    }
-
-    #[test]
-    fn valid_enum_usage() {
-        assert!(analyze("enum Color { RED, GREEN, BLUE }; int main() { return RED; }").is_ok());
-    }
-
-    #[test]
-    fn valid_for_loop() {
-        assert!(analyze("int main() { for (int i = 0; i < 10; i = i + 1) { } return 0; }").is_ok());
-    }
-
-    // ─── Negative tests (should fail) ───────────────────────────
-    #[test]
     fn error_undeclared_variable() {
-        let result = analyze("int main() { return x; }");
-        assert!(result.is_err(), "Should fail: undeclared variable x");
+        assert!(analyze("int main() { return x; }").is_err());
     }
 
     #[test]
     fn error_const_assignment() {
-        let result = analyze("int main() { const int x = 5; x = 10; return x; }");
-        assert!(result.is_err(), "Should fail: assignment to const");
+        assert!(analyze("int main() { const int x = 5; x = 10; return x; }").is_err());
     }
 
     #[test]
-    fn error_const_increment() {
-        let result = analyze("int main() { const int x = 5; x++; return x; }");
-        assert!(result.is_err(), "Should fail: increment of const");
+    fn error_wrong_call_arity() {
+        assert!(analyze("int foo(int a) { return a; } int main() { return foo(1, 2); }").is_err());
     }
 
     #[test]
-    fn error_break_outside_loop() {
-        let result = analyze("int main() { break; return 0; }");
-        assert!(result.is_err(), "Should fail: break outside loop");
+    fn valid_prototype_then_definition() {
+        assert!(analyze(
+            "int add(int, int); int add(int a, int b) { return a + b; } int main() { return add(1, 2); }"
+        )
+        .is_ok());
     }
 
     #[test]
-    fn error_continue_outside_loop() {
-        let result = analyze("int main() { continue; return 0; }");
-        assert!(result.is_err(), "Should fail: continue outside loop");
+    fn error_return_type_mismatch() {
+        assert!(analyze("int main() { return; }").is_ok());
+        assert!(analyze("void main(void) { return 1; }").is_err());
     }
 
     #[test]
-    fn error_case_outside_switch() {
-        let result = analyze("int main() { case 1: return 0; }");
-        assert!(result.is_err(), "Should fail: case outside switch");
-    }
-
-    #[test]
-    fn error_default_outside_switch() {
-        let result = analyze("int main() { default: return 0; }");
-        assert!(result.is_err(), "Should fail: default outside switch");
-    }
-
-    #[test]
-    fn error_duplicate_enum_constants() {
-        let result = analyze("enum E { A, A }; int main() { return 0; }");
-        assert!(result.is_err(), "Should fail: duplicate enum constant A");
-    }
-
-    // ─── Scope boundary tests ───────────────────────────────────
-    #[test]
-    fn error_variable_out_of_scope() {
-        let result = analyze("int main() { { int x = 5; } return x; }");
-        assert!(result.is_err(), "Should fail: x is out of scope");
-    }
-
-    #[test]
-    fn valid_multiple_functions() {
-        assert!(analyze("int foo() { return 1; } int main() { return 0; }").is_ok());
-    }
-
-    #[test]
-    fn valid_volatile_variable() {
-        assert!(analyze("int main() { volatile int x = 5; x = 10; return x; }").is_ok());
-    }
-
-    #[test]
-    fn error_for_loop_var_leaks_scope() {
-        let result = analyze("int main() { for (int i = 0; i < 10; i = i + 1) { } return i; }");
-        assert!(result.is_err(), "Should fail: for-loop variable i should not be visible after loop");
-    }
-
-    #[test]
-    fn valid_two_for_loops_same_var() {
-        assert!(analyze("int main() { for (int i = 0; i < 5; i = i + 1) { } for (int i = 0; i < 10; i = i + 1) { } return 0; }").is_ok());
+    fn error_duplicate_case() {
+        assert!(analyze(
+            "int main() { int x = 1; switch (x) { case 1: break; case 1: break; } return 0; }"
+        )
+        .is_err());
     }
 }

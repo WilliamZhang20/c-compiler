@@ -45,8 +45,13 @@ impl<'a> StatementParser for Parser<'a> {
             return Ok(Stmt::Continue);
         }
 
-        // Goto statement
+        // Goto statement (including computed goto: goto *expr)
         if self.match_token(|t| matches!(t, Token::Goto)) {
+            if self.match_token(|t| matches!(t, Token::Star)) {
+                let expr = self.parse_expr()?;
+                self.expect(|t| matches!(t, Token::Semicolon), "';'")?;
+                return Ok(Stmt::ComputedGoto(Box::new(expr)));
+            }
             let label = match self.advance() {
                 Some(Token::Identifier { value }) => value.clone(),
                 other => return Err(format!("expected label name after 'goto', found {:?}", other)),
@@ -495,34 +500,76 @@ impl<'a> Parser<'a> {
         self.expect(|t| matches!(t, Token::OpenBrace), "'{'")?;
         let mut items = Vec::new();
 
-        // Handle empty initializer list `{}`
         if self.match_token(|t| matches!(t, Token::CloseBrace)) {
             return Ok(Expr::InitList(items));
         }
 
         loop {
             let designator = if self.match_token(|t| matches!(t, Token::Dot)) {
-                // Designated field: .field = expr
                 let field_name = match self.advance() {
                     Some(Token::Identifier { value }) => value.clone(),
                     other => return Err(format!("expected field name after '.', found {:?}", other)),
                 };
+                if self.match_token(|t| matches!(t, Token::Dot)) {
+                    let child = match self.advance() {
+                        Some(Token::Identifier { value }) => value.clone(),
+                        other => {
+                            return Err(format!(
+                                "expected nested field name, found {:?}",
+                                other
+                            ))
+                        }
+                    };
+                    self.expect(|t| matches!(t, Token::Equal), "'='")?;
+                    let value = if self.check(|t| matches!(t, Token::OpenBrace)) {
+                        self.parse_init_list()?
+                    } else {
+                        self.parse_assignment()?
+                    };
+                    items.push(InitItem {
+                        designator: Some(Designator::Field(field_name)),
+                        value: Expr::InitList(vec![InitItem {
+                            designator: Some(Designator::Field(child)),
+                            value,
+                        }]),
+                    });
+                    if !self.match_token(|t| matches!(t, Token::Comma)) {
+                        break;
+                    }
+                    if self.check(|t| matches!(t, Token::CloseBrace)) {
+                        break;
+                    }
+                    continue;
+                }
                 self.expect(|t| matches!(t, Token::Equal), "'='")?;
                 Some(Designator::Field(field_name))
             } else if self.match_token(|t| matches!(t, Token::OpenBracket)) {
-                // Designated index: [index] = expr
                 let index = match self.advance() {
                     Some(Token::Constant { value, .. }) => *value,
                     other => return Err(format!("expected constant index in designator, found {:?}", other)),
                 };
-                self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
-                self.expect(|t| matches!(t, Token::Equal), "'='")?;
-                Some(Designator::Index(index))
+                if self.match_token(|t| matches!(t, Token::Ellipsis)) {
+                    let end = match self.advance() {
+                        Some(Token::Constant { value, .. }) => *value,
+                        other => {
+                            return Err(format!(
+                                "expected end index in range designator, found {:?}",
+                                other
+                            ))
+                        }
+                    };
+                    self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                    self.expect(|t| matches!(t, Token::Equal), "'='")?;
+                    Some(Designator::Range { start: index, end })
+                } else {
+                    self.expect(|t| matches!(t, Token::CloseBracket), "']'")?;
+                    self.expect(|t| matches!(t, Token::Equal), "'='")?;
+                    Some(Designator::Index(index))
+                }
             } else {
                 None
             };
 
-            // Parse the value — may be a nested init list or an assignment expr
             let value = if self.check(|t| matches!(t, Token::OpenBrace)) {
                 self.parse_init_list()?
             } else {
@@ -534,7 +581,6 @@ impl<'a> Parser<'a> {
             if !self.match_token(|t| matches!(t, Token::Comma)) {
                 break;
             }
-            // Allow trailing comma before closing brace
             if self.check(|t| matches!(t, Token::CloseBrace)) {
                 break;
             }

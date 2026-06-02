@@ -32,6 +32,8 @@ pub struct Codegen {
     func_return_types: HashMap<String, Type>,
     enable_regalloc: bool,
     target: TargetConfig,
+    profile_generate: bool,
+    profile_counters: Vec<String>,
 }
 
 impl Codegen {
@@ -44,6 +46,8 @@ impl Codegen {
             func_return_types: HashMap::new(),
             enable_regalloc: true,
             target: TargetConfig::host(),
+            profile_generate: false,
+            profile_counters: Vec::new(),
         }
     }
 
@@ -56,6 +60,15 @@ impl Codegen {
             func_return_types: HashMap::new(),
             enable_regalloc: true,
             target,
+            profile_generate: false,
+            profile_counters: Vec::new(),
+        }
+    }
+
+    pub fn set_profile_generate(&mut self, enable: bool) {
+        self.profile_generate = enable;
+        if !enable {
+            self.profile_counters.clear();
         }
     }
 
@@ -225,7 +238,21 @@ impl Codegen {
                 }
             }
             
-            let func_gen = FunctionGenerator::new(
+            // Label address constants for computed goto (&&label) — emit in rodata before function body
+        for label in &func.label_addrs {
+            if let Some(block_id) = func.labels.get(label) {
+                let sym = format!("__label_addr_{}", label);
+                output.push_str(&format!(".globl {}\n", sym));
+                output.push_str(&format!(".type {}, @object\n", sym));
+                output.push_str(".section .rodata\n");
+                output.push_str(&format!("{}:\n", sym));
+                output.push_str(&format!("    .quad {}_{}\n", func.name, block_id.0));
+                output.push_str(&format!(".size {}, 8\n", sym));
+                output.push_str(".text\n");
+            }
+        }
+
+        let func_gen = FunctionGenerator::new(
                 &self.structs,
                 &self.unions,
                 &self.func_return_types,
@@ -233,6 +260,12 @@ impl Codegen {
                 &mut self.next_float_const,
                 self.enable_regalloc,
                 &self.target,
+                self.profile_generate,
+                if self.profile_generate {
+                    Some(&mut self.profile_counters)
+                } else {
+                    None
+                },
             );
             
             let mut func_asm = func_gen.gen_function(func);
@@ -293,6 +326,19 @@ impl Codegen {
         // Add .note.GNU-stack section for Linux to mark stack as non-executable
         if matches!(self.target.platform, model::Platform::Linux) {
             output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
+        }
+
+        // PGO counter storage
+        if !self.profile_counters.is_empty() {
+            output.push_str("\n.section .bss\n");
+            for counter in &self.profile_counters {
+                output.push_str(&format!(".globl {}\n", counter));
+                output.push_str(&format!(".type {}, @object\n", counter));
+                output.push_str(".align 8\n");
+                output.push_str(&format!("{}:\n", counter));
+                output.push_str("    .quad 0\n");
+                output.push_str(&format!(".size {}, 8\n", counter));
+            }
         }
         
         output

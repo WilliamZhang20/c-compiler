@@ -1,11 +1,12 @@
 use model::Token;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Core parser struct that maintains parsing state
 pub(crate) struct Parser<'a> {
     pub(crate) tokens: &'a [Token],
     pub(crate) pos: usize,
     pub(crate) typedefs: HashSet<String>,
+    pub(crate) typedef_defs: HashMap<String, model::Type>,
 }
 
 impl<'a> Parser<'a> {
@@ -17,6 +18,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             typedefs,
+            typedef_defs: HashMap::new(),
         }
     }
 

@@ -102,6 +102,22 @@ struct Args {
     /// Do not omit frame pointer
     #[arg(long = "fno-omit-frame-pointer")]
     fno_omit_frame_pointer: bool,
+
+    /// Generate position-independent code (shared libraries / modules)
+    #[arg(long = "fPIC", alias = "fpic")]
+    fpic: bool,
+
+    /// Generate position-independent executable
+    #[arg(long = "fPIE", alias = "fpie")]
+    fpie: bool,
+
+    /// Instrument code and emit profile counters (-fprofile-generate)
+    #[arg(long = "fprofile-generate")]
+    fprofile_generate: bool,
+
+    /// Use profile data to guide optimization (-fprofile-use=FILE)
+    #[arg(long = "fprofile-use", value_name = "FILE")]
+    fprofile_use: Option<String>,
 }
 
 fn main() {
@@ -213,7 +229,12 @@ fn main() {
         log!("Step 5: Done");
         
         log!("Step 6: Optimization...");
-        let ir_prog = optimizer::optimize(ir_prog);
+        let profile = if let Some(ref path) = args.fprofile_use {
+            Some(optimizer::load_profile(std::path::Path::new(path)).expect("Failed to load profile"))
+        } else {
+            None
+        };
+        let ir_prog = optimizer::optimize_with_options(ir_prog, model::SimdLevel::detect(), profile);
         log!("Step 6: Done");
 
         if stop_after_codegen {
@@ -226,7 +247,15 @@ fn main() {
         let mut target = model::TargetConfig::host();
         target.no_red_zone = args.mno_red_zone;
         target.no_sse = args.mno_sse || args.mno_80387;
+        if args.fpie {
+            target.pic_mode = model::PicMode::Pie;
+        } else if args.fpic {
+            target.pic_mode = model::PicMode::Pic;
+        }
         let mut codegen = codegen::Codegen::with_target(target);
+        if args.fprofile_generate {
+            codegen.set_profile_generate(true);
+        }
         let asm = codegen.gen_program(&ir_prog);
         log!("Step 7: Done");
 
@@ -260,6 +289,9 @@ fn main() {
     if args.mno_80387 { machine_flags.push("-mno-80387".to_string()); }
     if args.fno_stack_protector { machine_flags.push("-fno-stack-protector".to_string()); }
     if args.fno_omit_frame_pointer { machine_flags.push("-fno-omit-frame-pointer".to_string()); }
+    if args.fpic { machine_flags.push("-fPIC".to_string()); }
+    if args.fpie { machine_flags.push("-fPIE".to_string()); }
+    if args.fpie { machine_flags.push("-pie".to_string()); }
 
     // -c: assemble each .s to .o, skip linking
     if compile_only {

@@ -1234,6 +1234,10 @@ impl Lowerer {
                 Ok(Operand::Constant(offset))
             }
             AstExpr::Expect { expr, .. } => self.lower_expr(expr),
+            AstExpr::LabelAddr(label) => {
+                self.cf.label_addrs.insert(label.clone());
+                Ok(Operand::Global(format!("__label_addr_{}", label)))
+            }
             AstExpr::Generic { controlling, associations } => {
                 // Resolve _Generic at compile time based on controlling expression type
                 let ctrl_type = self.get_expr_type(controlling);

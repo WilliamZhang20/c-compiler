@@ -105,10 +105,16 @@ impl Codegen {
 
     /// Find an init item for a given positional index (handles designated initializers).
     pub(crate) fn find_init_item<'b>(&self, items: &'b [model::InitItem], index: usize) -> Option<&'b model::InitItem> {
-        // Check designated first
         for item in items {
             if let Some(model::Designator::Index(idx)) = &item.designator {
                 if *idx as usize == index {
+                    return Some(item);
+                }
+            }
+            if let Some(model::Designator::Range { start, end }) = &item.designator {
+                let s = *start as usize;
+                let e = *end as usize;
+                if index >= s && index <= e {
                     return Some(item);
                 }
             }

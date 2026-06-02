@@ -256,6 +256,8 @@ mod tests {
             var_types: HashMap::new(),
             attributes: vec![],
             is_static: false,
+            label_addrs: vec![],
+            labels: HashMap::new(),
         }
     }
 

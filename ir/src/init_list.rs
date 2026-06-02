@@ -14,20 +14,24 @@ impl Lowerer {
         elem_size: i64,
         bid: BlockId,
     ) -> Result<(), String> {
+        let mut positional = 0usize;
         for item in items {
-            let index = match &item.designator {
-                Some(model::Designator::Index(idx)) => *idx as usize,
+            let indices: Vec<usize> = match &item.designator {
+                Some(model::Designator::Index(idx)) => vec![*idx as usize],
+                Some(model::Designator::Range { start, end }) => {
+                    (*start as usize..=*end as usize).collect()
+                }
                 Some(model::Designator::Field(_)) => {
                     return Err("Field designator not valid in array initializer".to_string());
                 }
                 None => {
-                    // Positional: determine position from how many items we've stored so far
-                    // We rely on the caller to pass items in order; compute from slice position
-                    let pos = items.iter().position(|x| std::ptr::eq(x, item)).unwrap_or(0);
-                    pos
+                    let idx = positional;
+                    positional += 1;
+                    vec![idx]
                 }
             };
 
+            for index in indices {
             let byte_offset = (index as i64) * elem_size;
             let dest_var = if byte_offset == 0 {
                 base_var
@@ -67,6 +71,7 @@ impl Lowerer {
                     });
                 }
             }
+            }
         }
         Ok(())
     }
@@ -105,6 +110,9 @@ impl Lowerer {
                 }
                 Some(model::Designator::Index(_)) => {
                     return Err("Index designator not valid in struct initializer".to_string());
+                }
+                Some(model::Designator::Range { .. }) => {
+                    return Err("Range designator not valid in struct initializer".to_string());
                 }
                 None => {
                     let idx = field_idx;

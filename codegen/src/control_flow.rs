@@ -199,6 +199,13 @@ impl<'a> FunctionGenerator<'a> {
                 self.resolve_phis(*then_block, current_bid, func);
                 self.asm.push(X86Instr::Jmp(format!("{}_{}", func_name, then_block.0)));
             }
+            IrTerminator::IndirectBr { target } => {
+                let t_op = self.operand_to_op(target);
+                if t_op != X86Operand::Reg(X86Reg::Rax) {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), t_op));
+                }
+                self.asm.push(X86Instr::Raw("    jmp rax".to_string()));
+            }
             _ => {
                 // Trap/Unreachable -> Ret
                 if !self.current_saved_regs.is_empty() {

@@ -12,7 +12,7 @@ pub(crate) trait DeclarationParser {
     fn parse_function(&mut self) -> Result<Function, String>;
     fn parse_function_prototype(&mut self) -> Result<model::FunctionPrototype, String>;
     fn parse_forward_struct_name(&mut self) -> Result<String, String>;
-    fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String>;
+    fn parse_function_params(&mut self) -> Result<(Vec<(model::Type, String)>, bool), String>;
     fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String>;
     fn parse_static_assert(&mut self) -> Result<(), String>;
 }
@@ -163,13 +163,13 @@ impl<'a> DeclarationParser for Parser<'a> {
             enums,
             prototypes,
             forward_structs,
+            typedefs: self.typedef_defs.clone(),
         })
     }
 
     fn parse_typedef(&mut self) -> Result<(), String> {
-        let _ty = self.parse_type()?;
-        
-        // Check if there's an inline struct/union/enum definition
+        let base_ty = self.parse_type()?;
+        let base_ty_clone = base_ty.clone();
         if self.check(|t| matches!(t, Token::OpenBrace)) {
             // Skip the inline definition body
             self.skip_block_internal()?;
@@ -252,13 +252,13 @@ impl<'a> DeclarationParser for Parser<'a> {
         }
         
         // Parse typedef aliases (can be multiple, comma-separated)
-        // If we can't parse it (e.g., anonymous typedef from headers), just skip to semicolon
+        let mut alias_ty = base_ty_clone.clone();
         loop {
             // Skip pointer stars and qualifiers
             while self.match_token(|t| matches!(t, Token::Star)) {
-                // Skip any const/volatile/restrict after the star
+                alias_ty = model::Type::ptr(alias_ty);
                 while self.match_token(|t| matches!(t, Token::Const | Token::Volatile | Token::Restrict)) {
-                    // Just consume the qualifiers
+                    // qualifiers on pointer — consumed for parse progress
                 }
             }
             
@@ -270,38 +270,43 @@ impl<'a> DeclarationParser for Parser<'a> {
                     n
                 }
                 Some(Token::Semicolon) | _ => {
-                    // No identifier (e.g., typedef struct {...}; or complex typedef we don't understand)
-                    // Just skip to semicolon
                     while !self.match_token(|t| matches!(t, Token::Semicolon)) && !self.is_at_end() {
                         self.advance();
                     }
                     return Ok(());
                 }
             };
-            self.typedefs.insert(name);
+            self.typedefs.insert(name.clone());
+            self.typedef_defs.insert(name, alias_ty.clone());
             
-            // Check for array syntax: typedef int arr[10]; (supports multi-dimensional)
+            // Check for array syntax: typedef int arr[10];
             while self.match_token(|t| matches!(t, Token::OpenBracket)) {
-                // Check if array size is provided (empty brackets [] are allowed)
-                if !self.check(|t| matches!(t, Token::CloseBracket)) {
-                    // Skip the size expression (could be constant or expression)
-                    while !self.check(|t| matches!(t, Token::CloseBracket)) && !self.is_at_end() {
-                        self.advance();
+                let size = if self.check(|t| matches!(t, Token::CloseBracket)) {
+                    0
+                } else {
+                    match self.parse_array_size() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            while !self.match_token(|t| matches!(t, Token::Semicolon)) && !self.is_at_end() {
+                                self.advance();
+                            }
+                            return Ok(());
+                        }
                     }
-                }
+                };
                 if !self.match_token(|t| matches!(t, Token::CloseBracket)) {
-                    // Malformed array, skip to semicolon
                     while !self.match_token(|t| matches!(t, Token::Semicolon)) && !self.is_at_end() {
                         self.advance();
                     }
                     return Ok(());
                 }
+                alias_ty = model::Type::Array(Box::new(alias_ty), size);
             }
             
-            // Check for comma (multiple aliases)
             if !self.match_token(|t| matches!(t, Token::Comma)) {
                 break;
             }
+            alias_ty = base_ty_clone.clone();
         }
         
         // Final semicolon
@@ -377,7 +382,7 @@ impl<'a> DeclarationParser for Parser<'a> {
         };
 
         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
-        let params = self.parse_function_params()?;
+        let (params, is_variadic) = self.parse_function_params()?;
         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
         
         // Parse attributes after function declaration (e.g., void foo() __attribute__((noreturn)))
@@ -393,6 +398,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             body: body_block,
             is_inline,
             is_static,
+            is_variadic,
             attributes,
         })
     }
@@ -426,14 +432,7 @@ impl<'a> DeclarationParser for Parser<'a> {
         };
         
         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
-        let params = self.parse_function_params()?;
-        
-        // Check for variadic
-        let is_variadic = self.check(|t| matches!(t, Token::Ellipsis));
-        if is_variadic {
-            self.advance();
-        }
-        
+        let (params, is_variadic) = self.parse_function_params()?;
         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
         
         // Skip post-declaration attributes
@@ -474,20 +473,18 @@ impl<'a> DeclarationParser for Parser<'a> {
         Ok(name)
     }
 
-    fn parse_function_params(&mut self) -> Result<Vec<(model::Type, String)>, String> {
+    fn parse_function_params(&mut self) -> Result<(Vec<(model::Type, String)>, bool), String> {
         let mut params = Vec::new();
+        let mut is_variadic = false;
 
         if self.check(|t| matches!(t, Token::CloseParenthesis)) {
-            return Ok(params);
+            return Ok((params, is_variadic));
         }
 
         loop {
             if self.match_token(|t| matches!(t, Token::Ellipsis)) {
-                // Just skip ellipsis for now
-                if !self.match_token(|t| matches!(t, Token::Comma)) {
-                    break;
-                }
-                continue;
+                is_variadic = true;
+                break;
             }
 
             let mut p_type = self.parse_type()?;
@@ -525,7 +522,7 @@ impl<'a> DeclarationParser for Parser<'a> {
             }
         }
 
-        Ok(params)
+        Ok((params, is_variadic))
     }
 
     fn parse_globals(&mut self) -> Result<Vec<GlobalVar>, String> {

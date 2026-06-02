@@ -589,6 +589,12 @@ impl Lowerer {
                 }
                 self.current_block = None;  // Dead code after goto
             }
+            AstStmt::ComputedGoto(expr) => {
+                let bid = self.current_block.ok_or("Computed goto outside of block")?;
+                let target = self.lower_expr(expr)?;
+                self.blocks[bid.0].terminator = Terminator::IndirectBr { target };
+                self.current_block = None;
+            }
             AstStmt::InlineAsm { template, outputs, inputs, clobbers, is_volatile } => {
                 // Lower inline assembly to IR
                 let bid = self.current_block.ok_or("Inline assembly outside of block")?;

@@ -363,6 +363,8 @@ pub enum Terminator {
     },
     Ret(Option<Operand>),
     Unreachable,
+    /// Computed goto: `goto *ptr`
+    IndirectBr { target: Operand },
 }
 
 impl Terminator {
@@ -414,9 +416,18 @@ pub struct Function {
     pub attributes: Vec<model::Attribute>,
     /// Whether this function has internal (static) linkage
     pub is_static: bool,
+    /// Labels whose addresses are taken (`&&label`) in this function.
+    pub label_addrs: Vec<String>,
+    /// All labels defined in this function (name → block id).
+    pub labels: HashMap<String, BlockId>,
 }
 
 impl Function {
+    /// Default metadata for test helpers and partial construction.
+    pub fn default_meta() -> (Vec<String>, HashMap<String, BlockId>) {
+        (Vec::new(), HashMap::new())
+    }
+
     /// Compute a predecessor map for all blocks in this function.
     ///
     /// Returns a mapping from each `BlockId` to the list of `BlockId`s whose

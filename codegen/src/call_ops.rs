@@ -800,7 +800,11 @@ pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &
     let int_moves = marshal_args(generator, &flat_args, &param_regs, &float_regs, shadow_space);
     emit_parallel_int_moves(generator, &param_regs, int_moves);
 
-    generator.asm.push(X86Instr::Call(name.to_string()));
+    generator.asm.push(X86Instr::Call(if generator.target.pic_mode != model::PicMode::None {
+        format!("{}@PLT", name)
+    } else {
+        name.to_string()
+    }));
 
     if let Some(d) = dest {
         let ret_type = generator.func_return_types.get(name).cloned();

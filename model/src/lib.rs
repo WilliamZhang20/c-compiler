@@ -1,10 +1,13 @@
-// Target platform configuration
+use std::collections::HashMap;
 pub mod target;
-pub use target::{Platform, CallingConvention, TargetConfig, SimdLevel};
+pub use target::{Platform, CallingConvention, TargetConfig, SimdLevel, PicMode};
 
 // Centralized type layout computation
 pub mod layout;
 pub use layout::TypeLayout;
+
+pub mod typing;
+pub use typing::{FunctionSig, TypeEnv};
 
 /// Suffix on an integer constant, controlling its type.
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
@@ -201,6 +204,8 @@ pub struct Program {
     pub enums: Vec<EnumDef>,
     pub prototypes: Vec<FunctionPrototype>,
     pub forward_structs: Vec<String>,
+    /// Typedef name → underlying type (for semantic resolution and layout).
+    pub typedefs: HashMap<String, Type>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -267,6 +272,7 @@ pub struct Function {
     pub body: Block,
     pub is_inline: bool,
     pub is_static: bool,
+    pub is_variadic: bool,
     pub attributes: Vec<Attribute>,
 }
 
@@ -314,6 +320,8 @@ pub enum Stmt {
     Case(Expr),
     Default,
     Goto(String),  // label name
+    /// GCC computed goto: `goto *ptr;`
+    ComputedGoto(Box<Expr>),
     Label(String), // label name
     /// A comma-separated multi-variable declaration lowered as flat siblings,
     /// sharing the scope of the enclosing block (no new scope created).
@@ -412,6 +420,8 @@ pub enum Expr {
         expr: Box<Expr>,
         expected: Box<Expr>,
     },
+    /// GCC extension: address of a label (`&&label`).
+    LabelAddr(String),
 }
 
 /// A single item inside a brace-enclosed initializer list.
@@ -430,6 +440,8 @@ pub enum Designator {
     Field(String),
     /// `[constant_index]`
     Index(i64),
+    /// GCC designated range: `[lo ... hi]`
+    Range { start: i64, end: i64 },
 }
 
 #[derive(Debug, PartialEq, Clone)]

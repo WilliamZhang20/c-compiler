@@ -108,6 +108,17 @@ impl SimdLevel {
     }
 }
 
+/// Position-independent code mode (-fPIC / -fPIE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PicMode {
+    #[default]
+    None,
+    /// Shared library / module PIC (-fPIC).
+    Pic,
+    /// Position-independent executable (-fPIE).
+    Pie,
+}
+
 /// Complete target configuration
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
@@ -118,6 +129,8 @@ pub struct TargetConfig {
     pub no_red_zone: bool,
     /// When true, do not emit SSE/FPU instructions (kernel code).
     pub no_sse: bool,
+    /// PIC/PIE code generation for shared objects and PIE executables.
+    pub pic_mode: PicMode,
 }
 
 impl TargetConfig {
@@ -130,6 +143,7 @@ impl TargetConfig {
             simd_level: SimdLevel::detect(),
             no_red_zone: false,
             no_sse: false,
+            pic_mode: PicMode::None,
         }
     }
 
@@ -141,7 +155,13 @@ impl TargetConfig {
             simd_level: SimdLevel::detect(),
             no_red_zone: false,
             no_sse: false,
+            pic_mode: PicMode::None,
         }
+    }
+
+    pub fn with_pic_mode(mut self, mode: PicMode) -> Self {
+        self.pic_mode = mode;
+        self
     }
 }
 

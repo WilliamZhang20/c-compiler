@@ -34,6 +34,7 @@ mod mem_dependence;
 mod polyhedral;
 mod slp;
 mod inline;
+mod profile;
 mod recurrence;
 mod sroa;
 
@@ -259,18 +260,32 @@ pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
 //  Public entry points
 // ═══════════════════════════════════════════════════════════════════
 
+pub use profile::{load_profile, write_profile, apply_profile_layout, BlockProfile, profile_counter_name};
+
 /// Main optimization entry point (auto-detects SIMD level).
 pub fn optimize(program: IRProgram) -> IRProgram {
-    optimize_with_simd(program, SimdLevel::detect())
+    optimize_with_options(program, SimdLevel::detect(), None)
 }
 
 /// Optimize with explicit SIMD level control.
 pub fn optimize_with_simd(mut program: IRProgram, simd_level: SimdLevel) -> IRProgram {
-    // Interprocedural inlining (small, non-looping functions)
+    optimize_with_options(program, simd_level, None)
+}
+
+/// Optimize with optional PGO profile data for block layout.
+pub fn optimize_with_options(
+    mut program: IRProgram,
+    simd_level: SimdLevel,
+    profile: Option<BlockProfile>,
+) -> IRProgram {
     inline::inline_functions(&mut program);
 
     let pipeline = default_pipeline(simd_level);
     pipeline.run(&mut program);
+
+    if let Some(ref prof) = profile {
+        apply_profile_layout(&mut program, prof);
+    }
     program
 }
 

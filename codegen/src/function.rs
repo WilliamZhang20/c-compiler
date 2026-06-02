@@ -38,6 +38,8 @@ pub struct FunctionGenerator<'a> {
     pub(crate) va_save_area_offset: Option<i32>,
     /// Next synthetic VarId for codegen-generated temporaries
     pub(crate) next_temp_var: usize,
+    pub(crate) profile_generate: bool,
+    pub(crate) profile_counters: Option<&'a mut Vec<String>>,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -54,6 +56,8 @@ impl<'a> FunctionGenerator<'a> {
         next_float_const: &'a mut usize,
         enable_regalloc: bool,
         target: &'a model::TargetConfig,
+        profile_generate: bool,
+        profile_counters: Option<&'a mut Vec<String>>,
     ) -> Self {
         Self {
             asm: Vec::new(),
@@ -74,7 +78,9 @@ impl<'a> FunctionGenerator<'a> {
             simd_reg_map: HashMap::new(),
             next_simd_reg: 0,
             va_save_area_offset: None,
-            next_temp_var: 100_000, // Start high to avoid collisions with IR-generated VarIds
+            next_temp_var: 100_000,
+            profile_generate,
+            profile_counters,
         }
     }
 
@@ -419,6 +425,18 @@ impl<'a> FunctionGenerator<'a> {
             
             self.current_block = block.id;
             self.asm.push(X86Instr::Label(format!("{}_{}", func.name, block.id.0)));
+            if self.profile_generate {
+                let counter = format!("__profc_{}_{}", func.name, block.id.0);
+                if let Some(counters) = self.profile_counters.as_deref_mut() {
+                    if !counters.contains(&counter) {
+                        counters.push(counter.clone());
+                    }
+                }
+                self.asm.push(X86Instr::Raw(format!(
+                    "    inc qword ptr {}[rip]",
+                    counter
+                )));
+            }
             for inst in &block.instructions {
                 self.gen_instr(inst);
             }
@@ -697,6 +715,9 @@ impl<'a> FunctionGenerator<'a> {
                 X86Operand::RipRelLabel(label)
             }
             Operand::Var(v) => self.var_to_op(*v),
+            Operand::Global(s) if s.starts_with("__label_addr_") => {
+                X86Operand::GlobalQwordMem(s.clone())
+            }
             Operand::Global(s) => X86Operand::Label(s.clone()),
         }
     }

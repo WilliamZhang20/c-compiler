@@ -11,6 +11,7 @@ pub(crate) struct ControlFlowContext {
     pub current_default: Option<BlockId>,
     pub labels: HashMap<String, BlockId>,             // label name => block
     pub pending_gotos: Vec<(String, BlockId)>,        // (label, goto_block) for forward gotos
+    pub label_addrs: HashSet<String>,                 // labels with address taken (&&label)
 }
 
 impl ControlFlowContext {
@@ -22,6 +23,7 @@ impl ControlFlowContext {
             current_default: None,
             labels: HashMap::new(),
             pending_gotos: Vec::new(),
+            label_addrs: HashSet::new(),
         }
     }
 
@@ -32,6 +34,7 @@ impl ControlFlowContext {
         self.current_default = None;
         self.labels.clear();
         self.pending_gotos.clear();
+        self.label_addrs.clear();
     }
 }
 
@@ -284,6 +287,9 @@ impl Lowerer {
             }
             AstExpr::VaArg { r#type, .. } => r#type.clone(),
             AstExpr::Expect { expr, .. } => self.get_expr_type(expr),
+            AstExpr::LabelAddr(label) => {
+                Type::Pointer(Box::new(Type::Void), model::TypeQualifiers::default())
+            }
             AstExpr::Generic { controlling, associations } => {
                 // Resolve to the matching association's expression type
                 let ctrl_type = self.get_expr_type(controlling);
@@ -440,6 +446,8 @@ impl Lowerer {
             var_types: self.var_types.clone(),
             attributes: f.attributes.clone(),
             is_static: f.is_static,
+            label_addrs: self.cf.label_addrs.iter().cloned().collect(),
+            labels: self.cf.labels.clone(),
         })
     }
 

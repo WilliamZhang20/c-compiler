@@ -8,17 +8,17 @@ This document catalogs every identified gap organized by compiler stage.
 
 ## Project status (refreshed 2026-06-02)
 
-**Integration tests**: 174 C programs in `testing/`; 167 run with `// EXPECT` (7 skipped, e.g. missing headers). Run `cargo test`.
+**Integration tests**: 177 C programs in `testing/`; run `cargo test`.
+
+**Semantic analysis** (2026-06-02): `model::TypeEnv` drives type inference, integer promotions, assignment/call checking, typedef/`typeof` resolution, duplicate `case` detection, and `const` through pointers.
+
+**Driver flags added**: `-fPIC`/`-fpic`, `-fPIE`/`-fpie`, `-fprofile-generate`, `-fprofile-use=FILE`.
+
+**PGO**: Built-in text profile format (`func:block count`); no external profiling libraries required. Instrumentation emits `__profc_*` counters; `-fprofile-use` guides block layout after the main optimizer pipeline.
 
 **Benchmarks** (`benchmarks/run_benchmarks.sh`): compares this compiler (release build) against **GCC -O0**, **GCC -O2**, and **GCC -O3**. Latest Linux numbers: `benchmarks/results_linux.md`.
 
 **Optimizer pipeline** (14 passes, see `optimizer/README.md`): mem2reg → algebraic → strength → copy prop → load forwarding → CSE → fold/DCE → **loop interchange** → **LICM** → **prefetch** → **auto-vectorization** (packed/strided/indexed gather-scatter, aggressive polyhedral nest gate, `mem_dependence`) → phi removal → CFG simplify → **block layout** (`__builtin_expect` hints).
-
-**Recently completed (low-hanging fruit)**:
-- Linear sum recurrence elimination: `f(n<=T) ? base(n) : Σ f(n-dᵢ)` → O(n) loop (`optimizer/src/recurrence.rs`).
-- `__builtin_expect` preserved as `Expr::Expect`; `BranchHint` on `CondBr`; block layout places hot successor first.
-- `__builtin_clz` / `__builtin_ctz` / `__builtin_popcount` (+ `l`/`ll` variants): branch-free `bsr`/`bsf`/`popcnt` + `cmovz` for zero (GCC -O2 style); constant args folded at codegen.
-- Polyhedral vectorization gate relaxed (innermost loops; outer IV allowed in inner GEP indices); reduction dependence guard (`scale==0` store + IV-strided loads).
 
 ---
 

@@ -376,6 +376,8 @@ mod tests {
             var_types: std::collections::HashMap::new(),
             attributes: vec![],
             is_static: false,
+            label_addrs: vec![],
+            labels: std::collections::HashMap::new(),
         }
     }
 

@@ -365,6 +365,24 @@ impl<'a> Parser<'a> {
 
     // Unary (+ - ! ~ * & sizeof cast)
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, String> {
+        // GCC label address: &&label
+        if self.check(|t| matches!(t, Token::Ampersand))
+            && self.check_at(1, |t| matches!(t, Token::Ampersand))
+        {
+            self.advance();
+            self.advance();
+            let label = match self.advance() {
+                Some(Token::Identifier { value }) => value.clone(),
+                other => {
+                    return Err(format!(
+                        "expected label name after '&&', found {:?}",
+                        other
+                    ))
+                }
+            };
+            return Ok(Expr::LabelAddr(label));
+        }
+
         if self.match_token(|t| {
             matches!(
                 t,
