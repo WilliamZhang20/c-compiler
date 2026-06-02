@@ -190,7 +190,12 @@ fn detect_induction_var(
 
     // Look for a conditional branch in the header
     let (cond_var, then_block, else_block) = match &header_block.terminator {
-        Terminator::CondBr { cond: Operand::Var(v), then_block, else_block } => {
+        Terminator::CondBr {
+            cond: Operand::Var(v),
+            then_block,
+            else_block,
+            ..
+        } => {
             (*v, *then_block, *else_block)
         }
         _ => return None,
@@ -503,11 +508,11 @@ mod tests {
                             right: Operand::Constant(10),
                         },
                     ],
-                    terminator: Terminator::CondBr {
-                        cond: Operand::Var(VarId(2)),
-                        then_block: BlockId(2),
-                        else_block: BlockId(3),
-                    },
+                    terminator: Terminator::cond_br(
+                        Operand::Var(VarId(2)),
+                        BlockId(2),
+                        BlockId(3),
+                    ),
                     is_label_target: false,
                 },
                 BasicBlock {

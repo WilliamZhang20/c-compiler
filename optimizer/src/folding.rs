@@ -264,6 +264,7 @@ pub fn optimize_function(func: &mut Function) {
                     cond,
                     then_block,
                     else_block,
+                    ..
                 } => {
                     let c = resolve_operand(cond, &constants);
                     if let Operand::Constant(val) = c {

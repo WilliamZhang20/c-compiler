@@ -176,7 +176,12 @@ impl<'a> FunctionGenerator<'a> {
                 self.resolve_phis(*id, current_bid, func);
                 self.asm.push(X86Instr::Jmp(format!("{}_{}", func_name, id.0)));
             }
-            IrTerminator::CondBr { cond, then_block, else_block } => {
+            IrTerminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 let c_op = self.operand_to_op(cond);
                 let current_bid = self.get_current_block_id();
                 

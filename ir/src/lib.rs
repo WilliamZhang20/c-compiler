@@ -13,7 +13,10 @@ mod mem2reg;
 mod ssa_utils;
 
 // Public exports
-pub use types::{VarId, BlockId, Operand, Instruction, SimdOp, Terminator, BasicBlock, Function, IRProgram};
+pub use types::{
+    BranchHint, VarId, BlockId, Operand, Instruction, SimdOp, Terminator, BasicBlock, Function,
+    IRProgram,
+};
 pub use lowerer::Lowerer;
 pub use mem2reg::mem2reg;
 pub use ssa_utils::remove_phis;

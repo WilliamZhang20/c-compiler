@@ -6,6 +6,22 @@ This document catalogs every identified gap organized by compiler stage.
 
 ---
 
+## Project status (refreshed 2026-06-02)
+
+**Integration tests**: 174 C programs in `testing/`; 167 run with `// EXPECT` (7 skipped, e.g. missing headers). Run `cargo test`.
+
+**Benchmarks** (`benchmarks/run_benchmarks.sh`): compares this compiler (release build) against **GCC -O0**, **GCC -O2**, and **GCC -O3**. Latest Linux numbers: `benchmarks/results_linux.md`.
+
+**Optimizer pipeline** (14 passes, see `optimizer/README.md`): mem2reg → algebraic → strength → copy prop → load forwarding → CSE → fold/DCE → **loop interchange** → **LICM** → **prefetch** → **auto-vectorization** (packed/strided/indexed gather-scatter, aggressive polyhedral nest gate, `mem_dependence`) → phi removal → CFG simplify → **block layout** (`__builtin_expect` hints).
+
+**Recently completed (low-hanging fruit)**:
+- Linear sum recurrence elimination: `f(n<=T) ? base(n) : Σ f(n-dᵢ)` → O(n) loop (`optimizer/src/recurrence.rs`).
+- `__builtin_expect` preserved as `Expr::Expect`; `BranchHint` on `CondBr`; block layout places hot successor first.
+- `__builtin_clz` / `__builtin_ctz` / `__builtin_popcount` (+ `l`/`ll` variants): branch-free `bsr`/`bsf`/`popcnt` + `cmovz` for zero (GCC -O2 style); constant args folded at codegen.
+- Polyhedral vectorization gate relaxed (innermost loops; outer IV allowed in inner GEP indices); reduction dependence guard (`scale==0` store + IV-strided loads).
+
+---
+
 ## Table of Contents
 
 1. [Preprocessor & Driver](#1-preprocessor--driver)
@@ -30,20 +46,18 @@ This document catalogs every identified gap organized by compiler stage.
 The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#define`, `#ifdef`, etc., but the driver itself has significant gaps.
 
 ### Currently Supported
-- `gcc -E -P -Iinclude` for preprocessing
+- `gcc -E -P` for preprocessing with **`-D` / `-U` / `-I` / `--include`** passthrough
 - `gcc` for assembling + linking
-- Multiple source file compilation (each compiled to `.s`, then linked together)
+- **`-c`** (compile to `.o` without linking)
+- **`-nostdlib` / `--ffreestanding`** forwarded to linker/preprocessor
+- Multiple source file compilation (each compiled to `.s` or `.o`, then linked)
 - `-o`, `-S` (emit asm), `--keep-intermediates`, `--debug` flags
 
 ### Missing
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **`-c` (compile to `.o`)** | **Critical** — kernel builds each TU to `.o` then links | Currently only supports full compile+link or emit `.s` |
-| **`-nostdlib` / `-ffreestanding`** | **Critical** — kernel is freestanding, no libc | No flag to suppress standard library linking |
-| **`-fno-builtin`** | **Critical** — kernel defines its own `memcpy`, `memset`, etc. | Not supported |
-| **`-D` / `-U` macro passthrough** | **Critical** — kernel build passes hundreds of `-D` flags | Only hardcoded `-Iinclude`; no `-D`/`-U` forwarding to GCC preprocessor |
-| **`-I` include path passthrough** | **Critical** — kernel uses many `-I` paths | Only `-Iinclude` is hardcoded |
+| **`-fno-builtin`** | **Critical** — kernel defines its own `memcpy`, `memset`, etc. | Not supported as driver flag |
 | **`-include` (force-include file)** | **High** — kernel uses `-include include/linux/compiler_types.h` | Not supported |
 | **`-fPIC` / `-fPIE`** | **Medium** — kernel modules need PIC | No PIC/PIE code generation |
 | **`-mcmodel=kernel`** | **High** — kernel runs in upper 2GB of virtual address space | No memory model support |
@@ -75,8 +89,8 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **Octal integer literals (`0777`)** | **Critical** — used for permissions, bit masks | Not lexed; `0777` is parsed as decimal 777 |
-| **Binary literals (`0b1010`)** | **Medium** — GCC extension used in some kernel code | Not supported |
+| **Octal integer literals (`0777`)** | ~~Critical~~ | ✅ Lexer (`lex_octal_number`); see Tier 0 |
+| **Binary literals (`0b1010`)** | ~~Medium~~ | ✅ Lexer; see Tier 0 |
 | **Hex float literals (`0x1.8p+1`)** | **Low** — rarely used in kernel | Not supported |
 | **Integer suffix preservation (`42U`, `42UL`, `42ULL`, `42L`)** | **Critical** — all suffixes are discarded; everything becomes `i64` | Type of constant affects expression type in arithmetic |
 | **Wide string literals (`L"..."`)** | **Low** — rarely used in kernel | Not supported |
@@ -206,25 +220,23 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 | `__builtin_va_start` | IR instruction; codegen works |
 | `__builtin_va_end` | IR instruction; codegen works |
 | `__builtin_va_copy` | IR instruction; codegen works |
-| `__builtin_va_arg` | IR instruction exists; **codegen is a stub** (not implemented) |
+| `__builtin_va_arg` | IR + codegen (variadic access) |
 | `__builtin_unreachable` | Lowered to `Unreachable` terminator |
 | `__builtin_trap` | Treated as `Unreachable` |
-| `__builtin_expect` | Parser strips it, returns the expression directly |
-| `__builtin_expect_with_probability` | Same as `__builtin_expect` |
+| `__builtin_expect` | ✅ `Expr::Expect`; IR `BranchHint` for block layout |
+| `__builtin_expect_with_probability` | ✅ Parsed as `Expect` (extra probability arg discarded) |
 | `__builtin_constant_p` | Returns 0 unconditionally |
 | `__builtin_offsetof` | Compile-time constant evaluation |
-| `__builtin_clz` | Constant-folded only; no runtime codegen |
-| `__builtin_ctz` | Constant-folded only; no runtime codegen |
-| `__builtin_popcount` | Constant-folded only; no runtime codegen |
+| `__builtin_clz` | Const-fold + runtime `bsr` (32-bit) |
+| `__builtin_ctz` | Const-fold + runtime `bsf` (32-bit) |
+| `__builtin_popcount` | Const-fold + runtime `popcnt` (32-bit) |
 | `__builtin_abs` | Constant-folded; runtime uses `(x ^ (x>>31)) - (x>>31)` |
 
 ### Missing (Kernel-Critical)
 
 | Builtin | Kernel Relevance | Notes |
 |---------|-----------------|-------|
-| **`__builtin_va_arg` runtime codegen** | **Critical** — needed for `printk` and all variadic functions | IR exists but codegen emits a comment, not code |
-| **`__builtin_clz/ctz/popcount` runtime** | **High** — used at runtime in bit manipulation | Only compile-time constant folding; needs `bsr`/`bsf`/`popcnt` codegen |
-| **`__builtin_clzl/clzll/ctzl/ctzll`** | **High** — long/long long variants | Not recognized |
+| **`__builtin_clzl/clzll/ctzl/ctzll/popcountl/popcountll`** | **High** — long/long long variants | ✅ Same inline codegen as 32-bit (64-bit `bsr`/`bsf`/`popcnt`) |
 | **`__builtin_ffs/ffsl/ffsll`** | **High** — find first set bit | Not implemented |
 | **`__builtin_bswap16/32/64`** | **Critical** — byte swapping for endianness | Not implemented |
 | **`__builtin_memcpy`** | **Critical** — kernel's `memcpy` often routes through this | Not implemented |
@@ -330,26 +342,29 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 4. Copy propagation
 5. Load forwarding
 6. Common subexpression elimination (CSE)
-7. Constant folding & propagation
-8. Dead code elimination (DCE)
-9. CFG simplification
-10. Phi removal (SSA → copies)
+7. Constant folding & propagation + DCE
+8. **Loop interchange** (nested loop stride)
+9. **LICM** (loop-invariant code motion)
+10. **Software prefetch** (`prefetcht0`, trip ≥ 64)
+11. **Auto-vectorization** (SSE2/AVX2: packed, strided gather/scatter, indexed gather/scatter, masked tail; `polyhedral.rs` + `mem_dependence.rs`)
+12. Phi removal (SSA → copies)
+13. CFG simplification
+14. **Block layout** (I-cache; honors `__builtin_expect` / `BranchHint`)
 
 ### Missing
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **Volatile-aware optimization** | **Critical** — optimizer may remove/reorder volatile access | No volatile flag means loads/stores to MMIO can be eliminated or reordered |
-| **Atomic-aware optimization** | **Critical** — optimizer must not reorder around atomics/fences | No atomic instructions to respect |
-| **Function inlining** | **High** — `always_inline` and `__always_inline` pattern | `is_inline`/`AlwaysInline` parsed but no inlining pass exists |
-| **Loop-invariant code motion (LICM)** | **Medium** — performance | Not implemented |
-| **Loop unrolling** | **Medium** — performance for small loops | Not implemented |
-| **Tail call optimization** | **Low** — recursion performance | Not implemented |
-| **Dead store elimination** | **Medium** — stores overwritten before read | Not implemented |
-| **Alias analysis** | **Medium** — enables many other optimizations | Not implemented; load forwarding is conservative |
-| **Interprocedural optimization** | **Low** — whole-program optimization | Not implemented |
-| **`__builtin_expect` utilization** | **Low** — branch hints for block layout | Hints stripped by parser, never reach optimizer |
-| **Fixed-point iteration** | **Low** — passes run once; may miss optimizations | Single-pass pipeline |
+| **Volatile-aware optimization** | ~~Critical~~ | ✅ `Load`/`Store` volatile flag; optimizer respects it (Tier 1) |
+| **Atomic-aware optimization** | **Critical** — must not reorder across atomics/fences | Atomics exist in IR/codegen; optimizer still needs full fence-aware scheduling |
+| **Function inlining** | **High** — `always_inline` | Parsed; inlining pass partial / limited |
+| **Loop unrolling** | **Medium** | Not implemented |
+| **Tail call optimization** | **Low** | Not implemented |
+| **Dead store elimination** | **Medium** | Not implemented |
+| **Alias analysis** | **Medium** | Conservative; `mem_dependence` only for vectorization |
+| **Interprocedural optimization** | **Low** | Not implemented |
+| **`__builtin_expect` utilization** | ~~Low~~ | ✅ `Expr::Expect` → `BranchHint` → block layout (2026-06-02) |
+| **Fixed-point iteration** | **Low** | Single-pass pipeline (fold/DCE has inner fixpoint) |
 
 ---
 
@@ -531,7 +546,7 @@ These must be implemented before any kernel source file can be processed:
 
 31. **`__builtin_types_compatible_p`** — type comparison
 32. **`__builtin_choose_expr`** — compile-time conditional
-33. **`__builtin_clz/ctz/popcount` runtime codegen** — `bsr`/`bsf`/`popcnt` instructions
+33. ~~**`__builtin_clz/ctz/popcount` runtime codegen**~~ ✅ — `bsr`/`bsf`/`popcnt` in `codegen/call_ops.rs` (2026-06-02)
 34. **`__builtin_frame_address` / `__builtin_return_address`** — unwinding
 35. **`__builtin_object_size`** — `FORTIFY_SOURCE`
 36. **`__builtin_add/sub/mul_overflow`** — checked arithmetic
@@ -562,7 +577,7 @@ These must be implemented before any kernel source file can be processed:
 58. **`-mcmodel=kernel`** — upper-half address space
 59. **DWARF debug info** — `CONFIG_DEBUG_INFO`
 60. **Function inlining pass** — `always_inline` enforcement
-61. **Loop optimizations (LICM, unrolling)** — performance
+61. **Loop unrolling** — LICM/interchange/prefetch/vectorize done; unrolling still missing
 62. **Dead store elimination** — performance
 63. **Alias analysis** — optimization correctness
 64. **Named asm operands (`%[name]`)** — readability
@@ -592,15 +607,15 @@ These must be implemented before any kernel source file can be processed:
 | `__builtin_va_start` | ✅ | ✅ | ✅ | ✅ |
 | `__builtin_va_end` | ✅ | ✅ | ✅ | ✅ |
 | `__builtin_va_copy` | ✅ | ✅ | ✅ | ✅ |
-| `__builtin_va_arg` | ✅ | ✅ | ❌ stub | ❌ |
+| `__builtin_va_arg` | ✅ | ✅ | ✅ | ✅ |
 | `__builtin_unreachable` | ✅ | ✅ | ✅ | N/A |
 | `__builtin_trap` | ✅ | ✅ | ✅ | N/A |
-| `__builtin_expect` | ✅ stripped | N/A | N/A | N/A |
-| `__builtin_constant_p` | ✅ → 0 | N/A | N/A | wrong |
+| `__builtin_expect` | ✅ `Expect` | ✅ `BranchHint` | N/A | N/A |
+| `__builtin_constant_p` | ✅ | ✅ | ✅ | ✅ |
 | `__builtin_offsetof` | ✅ | ✅ const | ✅ | N/A |
-| `__builtin_clz` | ✅ | ✅ const-only | ❌ | ❌ |
-| `__builtin_ctz` | ✅ | ✅ const-only | ❌ | ❌ |
-| `__builtin_popcount` | ✅ | ✅ const-only | ❌ | ❌ |
+| `__builtin_clz` | ✅ | ✅ const + Call | ✅ `bsr` | ✅ |
+| `__builtin_ctz` | ✅ | ✅ const + Call | ✅ `bsf` | ✅ |
+| `__builtin_popcount` | ✅ | ✅ const + Call | ✅ `popcnt` | ✅ |
 | `__builtin_abs` | ✅ | ✅ | ✅ | ✅ |
 
 ## Appendix B: Current GCC Attribute Coverage

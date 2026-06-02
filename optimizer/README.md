@@ -22,7 +22,7 @@ The passes execute in this order for each function:
 | 8 | Loop interchange | `loop_interchange.rs` | Swaps nested loop order for sequential memory access |
 | 9 | LICM | `licm.rs` | Hoists loop-invariant computations to preheader |
 | 10 | Prefetch insertion | `prefetch.rs` | Inserts software prefetch hints for array loops |
-| 11 | Auto-vectorization | `vectorize.rs` | Converts scalar loops to SIMD (SSE2/AVX2) |
+| 11 | Auto-vectorization | `vectorize.rs`, `polyhedral.rs`, `mem_dependence.rs` | Converts scalar loops to SIMD (SSE2/AVX2), including gather/scatter |
 | 12 | Phi removal | `ir` crate | Lowers phi nodes into copies at predecessor block ends |
 | 13 | CFG simplification | `cfg_simplify.rs` | Merges blocks; removes dead blocks; bypasses empty blocks |
 | 14 | Block layout | `block_layout.rs` | Reorders blocks for instruction cache locality |
@@ -84,7 +84,31 @@ Hoists instructions whose operands are all defined outside the loop into the loo
 Inserts software prefetch hints (`prefetcht0`) for induction-variable-indexed array accesses inside loops. For each qualifying load, emits a GEP + inline-assembly prefetch targeting 16 elements ahead. Only activates when the loop has a known induction variable and trip count ≥ 64, avoiding overhead for small loops.
 
 ### `vectorize.rs` — Auto-vectorization (SSE2/AVX2)
-Transforms scalar loops into SIMD operations. Analyzes loop bodies for consecutive IV-indexed loads/stores and arithmetic without complex control flow or function calls, then generates a vectorized loop body (with SIMD Load/Store/Add/Sub/Mul IR instructions and VF-stride induction variable) plus a scalar remainder loop for leftover iterations. Selects 4-wide (SSE2) or 8-wide (AVX2) depending on detected hardware support.
+Transforms scalar loops into SIMD operations. For each natural loop with analyzable induction variable and trip count, builds a `VectorizationPlan` (loads, stores, reductions, arithmetic). Legality and profitability run before IR rewrite:
+
+1. **`polyhedral::allows_vectorization`** — for nested loops, requires a perfect affine nest and inner-only memory indexing (outer IV must not appear in inner GEP indices).
+2. **`memory_dependence_ok`** (`mem_dependence.rs`) — no cross-chunk dependence between vectorized load/store sites; strided indices use widened spans (`offset .. offset + scale*(vf-1)`); gather/scatter use per-lane index ranges.
+3. **`is_vectorization_profitable`** — trip count and memory-op count thresholds.
+
+**Memory access modes** (`MemAccessMode`):
+
+- **Packed** — unit stride (`scale == 1`): GEP + `Simd::Load` / `Simd::Store`.
+- **GatherScatter** — strided affine index with power-of-two scale (e.g. `2*i`): `Simd::IndexSeq` then `Simd::Gather` / `Simd::Scatter`.
+- **Indexed** — `a[idx[i]]` where `idx[i]` is a load from an index array at the loop IV: vector load of indices, then gather/scatter on the data array.
+
+Also supports vectorized bitwise ops, masked tail epilogues (`LaneMask`, `Blend`), and horizontal reductions. Emits a vectorized loop (IV += VF) plus scalar remainder. Width: 4 (SSE2) or 8 (AVX2) from `SimdLevel::detect()`.
+
+### `polyhedral.rs` — Affine nest checks (vectorization gate)
+Lightweight polyhedral-style analysis (not full ISL/Polly). **Aggressive policy:**
+
+- **Innermost loops** — no nest constraints; legality is delegated to `mem_dependence`.
+- **Nested loops** — outer-only blocks may use loads and address arithmetic (`Mul`, shifts, bitwise ops); stores in outer-only blocks still disqualify a perfect nest.
+- **Outer-loop vectorization** — when widening the parent IV, outer-only GEPs must not use the child IV in their index.
+
+`prepare_affine_nests` walks nests for validation; `allows_vectorization` gates `vectorize_function`.
+
+### `mem_dependence.rs` — Vectorization dependence testing
+Tracks memory accesses with linear `IndexPattern` (`scale * iv + offset`). Computes per-chunk index spans for dependence tests between loads and stores at vector width `vf`, including non-unit stride and gather/scatter lanes. Rejects **reduction-style** patterns: invariant-index store (`scale == 0`) together with IV-strided loads (e.g. `c[i][j] += a[i][k]` with IV `k`). Used by `vectorize.rs` before applying a plan.
 
 ### `block_layout.rs` — Basic block reordering
 Reorders basic blocks for instruction cache locality. Uses a modified BFS/DFS that prioritizes placing loop body blocks immediately after loop headers (keeping hot loops tight in memory) and deferring cold exit paths, reducing I-cache misses along the most likely execution path.

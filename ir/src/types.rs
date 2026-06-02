@@ -332,6 +332,23 @@ pub enum SimdOp {
     LaneMask,
     /// Merge vectors: inactive lanes from `operands[0]`, active from `operands[1]`, mask `operands[2]`.
     Blend,
+    /// Vector of element indices: lane k = scale * (iv + k) + offset. Operands: [iv].
+    IndexSeq,
+    /// Gather: operands [array_base, index_vector_var].
+    Gather,
+    /// Scatter: operands [array_base, index_vector_var, value_vector_var].
+    Scatter,
+}
+
+/// Branch layout hint from `__builtin_expect` / `likely` / `unlikely`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchHint {
+    #[default]
+    None,
+    /// `__builtin_expect(cond, 1)` — `then_block` is the predicted hot path.
+    LikelyThen,
+    /// `__builtin_expect(cond, 0)` — `else_block` is the predicted hot path.
+    LikelyElse,
 }
 
 /// Control flow terminators for basic blocks
@@ -342,9 +359,35 @@ pub enum Terminator {
         cond: Operand,
         then_block: BlockId,
         else_block: BlockId,
+        hint: BranchHint,
     },
     Ret(Option<Operand>),
     Unreachable,
+}
+
+impl Terminator {
+    pub fn cond_br(cond: Operand, then_block: BlockId, else_block: BlockId) -> Self {
+        Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            hint: BranchHint::None,
+        }
+    }
+
+    pub fn cond_br_hint(
+        cond: Operand,
+        then_block: BlockId,
+        else_block: BlockId,
+        hint: BranchHint,
+    ) -> Self {
+        Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            hint,
+        }
+    }
 }
 
 /// Basic block with instructions and terminator

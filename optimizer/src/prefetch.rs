@@ -549,11 +549,11 @@ mod tests {
                         ],
                     },
                 ],
-                terminator: ir::Terminator::CondBr {
-                    cond: Operand::Var(VarId(0)),
-                    then_block: BlockId(2),
-                    else_block: BlockId(3),
-                },
+                terminator: ir::Terminator::cond_br(
+                    Operand::Var(VarId(0)),
+                    BlockId(2),
+                    BlockId(3),
+                ),
                 is_label_target: false,
             },
             ir::BasicBlock {

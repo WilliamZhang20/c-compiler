@@ -14,6 +14,8 @@ The **IR** crate defines the compiler's intermediate representation and implemen
 AST → Lowerer → IRProgram (with SSA) → mem2reg → optimizer → remove_phis → codegen
 ```
 
+The optimizer may insert `Instruction::Simd` (auto-vectorization pass); codegen lowers these to SSE/AVX instructions. Scalar IR is unchanged for non-vectorized loops.
+
 ## IR data model (`types.rs`)
 
 | Type | Description |
@@ -21,7 +23,8 @@ AST → Lowerer → IRProgram (with SSA) → mem2reg → optimizer → remove_ph
 | `VarId(usize)` | SSA variable identifier |
 | `BlockId(usize)` | Basic block identifier |
 | `Operand` | `Constant(i64)`, `FloatConstant(f64)`, `Var(VarId)`, `Global(String)` |
-| `Instruction` | 16 variants: `Binary`, `FloatBinary`, `Unary`, `FloatUnary`, `Copy`, `Cast`, `Phi`, `Alloca`, `Load`, `Store`, `GetElementPtr`, `Call`, `IndirectCall`, `InlineAsm`, `VaStart/End/Copy/Arg` |
+| `Instruction` | Includes `Binary`, `FloatBinary`, `Unary`, `FloatUnary`, `Copy`, `Cast`, `Phi`, `Alloca`, `Load`, `Store`, `GetElementPtr`, `Simd`, `Call`, `IndirectCall`, `InlineAsm`, `VaStart/End/Copy/Arg` |
+| `SimdOp` | Vector ops: `Load`, `Store`, `Add`, `Sub`, `Mul`, `And`, `Or`, `Xor`, `HorizontalAdd`, `Splat`, `LaneMask`, `Blend`, `IndexSeq`, `Gather`, `Scatter` (see `types.rs`) |
 | `Terminator` | `Br(block)`, `CondBr(cond, then, else)`, `Ret(operand)`, `Unreachable` |
 | `BasicBlock` | instructions + terminator + `is_label_target` flag |
 | `Function` | blocks + `var_types: HashMap<VarId, Type>` (survives through optimizer to codegen) + `is_static: bool` for internal linkage |

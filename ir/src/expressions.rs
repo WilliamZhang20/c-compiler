@@ -1,9 +1,27 @@
 use model::{BinaryOp, UnaryOp, Type, Expr as AstExpr};
-use crate::types::{Operand, Instruction, Terminator};
+use crate::types::{BranchHint, Operand, Instruction, Terminator};
 use crate::lowerer::Lowerer;
 
 /// Expression lowering implementation
 impl Lowerer {
+    /// Lower a branch condition, extracting `__builtin_expect` layout hints.
+    pub(crate) fn lower_branch_condition(
+        &mut self,
+        expr: &AstExpr,
+    ) -> Result<(Operand, BranchHint), String> {
+        match expr {
+            AstExpr::Expect { expr: inner, expected } => {
+                let hint = match expected.as_ref() {
+                    AstExpr::Constant(1) => BranchHint::LikelyThen,
+                    AstExpr::Constant(0) => BranchHint::LikelyElse,
+                    _ => BranchHint::None,
+                };
+                Ok((self.lower_expr(inner)?, hint))
+            }
+            _ => Ok((self.lower_expr(expr)?, BranchHint::None)),
+        }
+    }
+
     /// Lower an AST expression to an IR operand
     pub(crate) fn lower_expr(&mut self, expr: &AstExpr) -> Result<Operand, String> {
         match expr {
@@ -92,11 +110,8 @@ impl Lowerer {
                     let false_id = self.new_block();
                     let merge_id = self.new_block();
 
-                    self.blocks[entry_bid.0].terminator = Terminator::CondBr {
-                        cond: lhs_val,
-                        then_block: rhs_id,
-                        else_block: false_id,
-                    };
+                    self.blocks[entry_bid.0].terminator =
+                        Terminator::cond_br(lhs_val, rhs_id, false_id);
 
                     // false_id: lhs was 0, emit 0
                     self.sealed_blocks.insert(false_id);
@@ -141,11 +156,8 @@ impl Lowerer {
                     let true_id = self.new_block();
                     let merge_id = self.new_block();
 
-                    self.blocks[entry_bid.0].terminator = Terminator::CondBr {
-                        cond: lhs_val,
-                        then_block: true_id,
-                        else_block: rhs_id,
-                    };
+                    self.blocks[entry_bid.0].terminator =
+                        Terminator::cond_br(lhs_val, true_id, rhs_id);
 
                     // true_id: lhs was truthy, emit 1
                     self.sealed_blocks.insert(true_id);
@@ -800,18 +812,46 @@ impl Lowerer {
                         self.blocks[bid.0].terminator = Terminator::Unreachable;
                         self.current_block = None;
                         return Ok(Operand::Constant(0));
-                    } else if name == "__builtin_clz" || name == "__builtin_ctz" 
-                           || name == "__builtin_popcount" || name == "__builtin_abs" {
+                    } else if matches!(
+                        name.as_str(),
+                        "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount"
+                            | "__builtin_clzl" | "__builtin_ctzl" | "__builtin_popcountl"
+                            | "__builtin_clzll" | "__builtin_ctzll" | "__builtin_popcountll"
+                    ) || name == "__builtin_abs" {
                         // Numeric builtins — evaluate at compile time
                         if args.len() == 1 {
                             let val = self.lower_expr(&args[0])?;
                             if let Operand::Constant(v) = val {
-                                let result = match name.as_str() {
-                                    "__builtin_clz" => if v == 0 { 32 } else { (v as u32).leading_zeros() as i64 },
-                                    "__builtin_ctz" => if v == 0 { 32 } else { (v as u32).trailing_zeros() as i64 },
-                                    "__builtin_popcount" => (v as u32).count_ones() as i64,
-                                    "__builtin_abs" => v.abs(),
-                                    _ => unreachable!(),
+                                let is64 = matches!(
+                                    name.as_str(),
+                                    "__builtin_clzl" | "__builtin_ctzl" | "__builtin_popcountl"
+                                        | "__builtin_clzll" | "__builtin_ctzll" | "__builtin_popcountll"
+                                );
+                                let result = if is64 {
+                                    let u = v as u64;
+                                    match name.as_str() {
+                                        "__builtin_clzl" | "__builtin_clzll" => {
+                                            if u == 0 { 64 } else { u.leading_zeros() as i64 }
+                                        }
+                                        "__builtin_ctzl" | "__builtin_ctzll" => {
+                                            if u == 0 { 64 } else { u.trailing_zeros() as i64 }
+                                        }
+                                        "__builtin_popcountl" | "__builtin_popcountll" => {
+                                            u.count_ones() as i64
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                } else {
+                                    match name.as_str() {
+                                        "__builtin_clz" => {
+                                            if v == 0 { 32 } else { (v as u32).leading_zeros() as i64 }
+                                        }
+                                        "__builtin_ctz" => {
+                                            if v == 0 { 32 } else { (v as u32).trailing_zeros() as i64 }
+                                        }
+                                        "__builtin_popcount" => (v as u32).count_ones() as i64,
+                                        _ => unreachable!(),
+                                    }
                                 };
                                 return Ok(Operand::Constant(result));
                             }
@@ -841,7 +881,22 @@ impl Lowerer {
                                 });
                                 return Ok(Operand::Var(result));
                             }
-                            // Other non-constant builtins: fall through to call (will likely fail at link)
+                            // Non-constant clz/ctz/popcount: emit call; codegen inlines with CPU instructions.
+                            if matches!(
+                                name.as_str(),
+                                "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount"
+                                    | "__builtin_clzl" | "__builtin_ctzl" | "__builtin_popcountl"
+                                    | "__builtin_clzll" | "__builtin_ctzll" | "__builtin_popcountll"
+                            ) {
+                                let bid = self.current_block.ok_or("builtin outside block")?;
+                                let result = self.new_var();
+                                self.blocks[bid.0].instructions.push(Instruction::Call {
+                                    dest: Some(result),
+                                    name: name.clone(),
+                                    args: vec![val],
+                                });
+                                return Ok(Operand::Var(result));
+                            }
                         }
                     } else if name == "__builtin_bswap16" || name == "__builtin_bswap32" || name == "__builtin_bswap64" {
                         // Byte-swap builtins
@@ -1027,11 +1082,8 @@ impl Lowerer {
                 let else_id  = self.new_block();
                 let merge_id = self.new_block();
 
-                self.blocks[entry_bid.0].terminator = Terminator::CondBr {
-                    cond: cond_val,
-                    then_block: then_id,
-                    else_block: else_id,
-                };
+                self.blocks[entry_bid.0].terminator =
+                    Terminator::cond_br(cond_val, then_id, else_id);
 
                 // Then branch – evaluate then_expr and materialise it into a var.
                 self.sealed_blocks.insert(then_id);
@@ -1181,6 +1233,7 @@ impl Lowerer {
                 let (offset, _field_type, _) = self.get_member_offset(&struct_name, member);
                 Ok(Operand::Constant(offset))
             }
+            AstExpr::Expect { expr, .. } => self.lower_expr(expr),
             AstExpr::Generic { controlling, associations } => {
                 // Resolve _Generic at compile time based on controlling expression type
                 let ctrl_type = self.get_expr_type(controlling);

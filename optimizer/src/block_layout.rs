@@ -70,7 +70,28 @@ pub fn optimize_block_layout(func: &mut Function) {
                         worklist.push_front(*target);
                     }
                 }
-                Some(Terminator::CondBr { then_block, else_block, .. }) => {
+                Some(Terminator::CondBr {
+                    then_block,
+                    else_block,
+                    hint,
+                    ..
+                }) => {
+                    use ir::BranchHint;
+                    if *hint == BranchHint::LikelyThen {
+                        if !visited.contains(then_block) {
+                            worklist.push_front(*then_block);
+                        }
+                        if !visited.contains(else_block) {
+                            worklist.push_back(*else_block);
+                        }
+                    } else if *hint == BranchHint::LikelyElse {
+                        if !visited.contains(else_block) {
+                            worklist.push_front(*else_block);
+                        }
+                        if !visited.contains(then_block) {
+                            worklist.push_back(*then_block);
+                        }
+                    } else {
                     // For conditional branches in loop headers:
                     // Place the loop body block next (fall-through),
                     // and the exit block later.
@@ -102,6 +123,7 @@ pub fn optimize_block_layout(func: &mut Function) {
                             // Push exit/cold path to back
                             worklist.push_back(*else_block);
                         }
+                    }
                     }
                 }
                 _ => {

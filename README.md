@@ -4,7 +4,7 @@ A C compiler targeting x86-64 Linux and Windows, written in Rust. It handles the
 
 Originally based on [_Writing a C Compiler_](https://norasandler.com/book/) by Nora Sandler, the project has been extended well beyond the book's scope with C99/C11 features, GCC extensions, SSA-based optimizations, and graph-coloring register allocation.
 
-**Performance**: The compiler **beats or ties GCC -O0** on all 5 benchmark programs (matrix multiply, fibonacci, array sum, bitwise ops, struct access). This comes from a 14-pass SSA optimization pipeline (constant folding, strength reduction, CSE, copy propagation, DCE, auto-vectorization, LICM, loop interchange, prefetching, block layout) and graph-coloring register allocation that minimizes spills.
+**Performance**: The compiler targets competitive performance against **GCC -O0**, **GCC -O2**, and **GCC -O3** on benchmark programs (matrix multiply, fibonacci, array sum, bitwise ops, struct access), using a 14-pass SSA optimization pipeline (constant folding, strength reduction, CSE, copy propagation, DCE, auto-vectorization, LICM, loop interchange, prefetching, block layout) and graph-coloring register allocation.
 
 ## Building and Running
 
@@ -197,7 +197,7 @@ The optimizer runs 14 passes in a fixed sequence:
 8. **Loop interchange** — swaps nested loop iteration order when the inner loop has stride-N access on the outer induction variable, converting column-major to row-major traversal for cache locality
 9. **Loop-invariant code motion (LICM)** — hoists computations whose operands are loop-invariant into the loop preheader using fixed-point iteration
 10. **Software prefetch insertion** — emits `prefetcht0` hints for IV-indexed array accesses in loops with trip count ≥ 64, prefetching 16 elements ahead
-11. **Auto-vectorization** — transforms scalar loops into SIMD operations (SSE2 4-wide / AVX2 8-wide) for consecutive IV-indexed loads, stores, and arithmetic; generates a vectorized body plus scalar remainder loop
+11. **Auto-vectorization** — transforms scalar loops into SIMD operations (SSE2 4-wide / AVX2 8-wide) for unit-stride, strided (`a[2*i]`), and indexed (`a[idx[i]]`) memory access, with polyhedral-style nest checks and dependence analysis; generates a vectorized body plus scalar remainder loop
 12. **Phi removal** — deconstructs phi nodes into copies at predecessor block ends
 13. **CFG simplification** — merge single-successor/single-predecessor block pairs, bypass empty blocks, eliminate dead blocks, fold constant branches
 14. **Block layout** — reorders basic blocks for I-cache locality, keeping hot loop bodies tight and deferring cold exit paths
@@ -215,19 +215,34 @@ cargo test --lib
 cargo test --test integration_tests
 ```
 
-The integration test harness (`driver/tests/integration_tests.rs`) discovers all `.c` files in `testing/`, compiles each one using the compiler, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the source file.
+The integration test harness (`driver/tests/integration_tests.rs` and `driver/tests/inprocess_tests.rs`) discovers all `.c` files in `testing/`, compiles each one using the compiler, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the source file.
 
-**Current status**: 165 integration test programs (160 with EXPECT annotations), all passing. 268 unit tests across all crates.
+**Current status**: 174 integration test programs in `testing/` (167 run with EXPECT checks, 7 skipped e.g. missing headers), all passing. Unit tests across all crates run via `cargo test`.
 
 Run `./coverage.sh` for line-level coverage analysis via `cargo-tarpaulin` (use `--quick` to reuse the last report).
 
 ### Auto-Vectorization
 
-The auto-vectorizer (pass 11) analyzes loop bodies for consecutive IV-indexed loads/stores with compatible arithmetic (Add, Sub, Mul). When a loop qualifies:
-- Detects hardware SIMD support (SSE2 → 4-wide, AVX2 → 8-wide)
-- Generates a vectorized loop body using SIMD IR instructions (`SimdLoad`, `SimdStore`, `SimdAdd`, etc.)
-- Adjusts the induction variable stride to the vector width
-- Emits a scalar remainder loop for iterations not divisible by the vector factor
+The auto-vectorizer (pass 11, `optimizer/src/vectorize.rs`) analyzes natural loops for memory and arithmetic that can execute in SIMD form. Before widening, `polyhedral.rs` applies an aggressive nest policy (innermost loops are always eligible; nested loops require a near-perfect outer shell). `mem_dependence.rs` proves that vectorized chunks do not introduce cross-iteration conflicts—including rejecting reduction loops with a fixed store slot and IV-strided loads (e.g. matmul inner `k`).
+
+**Access modes**
+
+| Pattern | Example | IR |
+|--------|---------|-----|
+| Packed | `a[i]`, `b[i]` | `Simd::Load` / `Simd::Store` on a GEP |
+| Strided gather/scatter | `a[2*i] = b[2*i]` | `Simd::IndexSeq` + `Gather` / `Scatter` |
+| Indexed | `a[idx[i]] = b[idx[i]]` | vector load of `idx[i]`, then `Gather` / `Scatter` |
+
+**When a loop qualifies**
+
+- Trip count and memory traffic meet profitability heuristics; no internal branches or calls in the vectorized body
+- Hardware SIMD level sets vector width (SSE2 → 4-wide, AVX2 → 8-wide)
+- Vectorized header/body uses `Simd` ops (`Load`, `Store`, `Add`, `Sub`, `Mul`, bitwise ops, `LaneMask`/`Blend` for masked tails, `IndexSeq`, `Gather`, `Scatter`)
+- IV advances by VF per vector iteration; a scalar remainder loop handles leftover iterations
+
+**Codegen** (`codegen/src/function.rs`): contiguous ops use `vmovdqu` / `vpaddd`; gathers use AVX2 `vpgatherdd` when available; scatters use a scalar per-lane loop (GNU `as` does not accept `vpscatterdd` in Intel syntax on typical Linux toolchains). Stack arrays use `lea` into `r10` as the gather/scatter base.
+
+**Tests**: `testing/test_vectorize_*.c` (copy, bitwise, masked tail, strided gather, indexed gather, etc.).
 
 ### Cache Locality Optimizations
 
@@ -238,14 +253,14 @@ Three passes target memory hierarchy performance:
 
 ## Benchmarks
 
-Five benchmark programs in `benchmarks/` compare this compiler against GCC -O0:
+Five benchmark programs in `benchmarks/` compare this compiler against **GCC -O0**, **GCC -O2**, and **GCC -O3** (see `benchmarks/run_benchmarks.sh`):
 
 | Benchmark | Description |
 |---|---|
-| `fib.c` | Recursive Fibonacci |
+| `fib.c` | Iterative Fibonacci (O(n) loop in source) |
 | `array_sum.c` | Array summation |
 | `matmul.c` | Matrix multiplication |
-| `bitwise.c` | Bitwise operations |
+| `bitwise.c` | Bit manipulation (`__builtin_popcount`) |
 | `struct_bench.c` | Struct field access patterns |
 
 Run benchmarks with `benchmarks/run_benchmarks.sh`. Results are in `benchmarks/results_linux.md`.

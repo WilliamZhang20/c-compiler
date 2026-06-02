@@ -285,6 +285,10 @@ pub enum X86Instr {
     Vextracti128(X86Operand, X86Operand, u8),       // Extract 128-bit from 256-bit
     Vpxor(X86Operand, X86Operand, X86Operand),      // AVX packed XOR
     Vpbroadcastd(X86Operand, X86Operand),            // AVX2 broadcast dword to all lanes
+    /// dest = gather from [R10 + index*4] with mask (R10 set by caller).
+    Vpgatherdd(X86Operand, X86Operand, X86Operand),
+    /// scatter value to [R10 + index*4] with mask (R10 set by caller).
+    Vpscatterdd(X86Operand, X86Operand, X86Operand),
     Raw(String), // Raw assembly string (for inline asm)
 }
 
@@ -337,7 +341,8 @@ impl X86Instr {
             X86Instr::Vpord(d, s1, s2) | X86Instr::Vxorps(d, s1, s2) |
             X86Instr::Vandps(d, s1, s2) | X86Instr::Vandnps(d, s1, s2) |
             X86Instr::Vorps(d, s1, s2) |
-            X86Instr::Vpxor(d, s1, s2) => {
+            X86Instr::Vpxor(d, s1, s2) |
+            X86Instr::Vpgatherdd(d, s1, s2) | X86Instr::Vpscatterdd(d, s1, s2) => {
                 d.references_reg(reg) || s1.references_reg(reg) || s2.references_reg(reg)
             }
             // Single-operand read-modify-write
@@ -383,7 +388,7 @@ impl X86Instr {
             X86Instr::Vmulps(dest, _, _) | X86Instr::Vdivps(dest, _, _) |
             X86Instr::Vpaddd(dest, _, _) | X86Instr::Vpsubd(dest, _, _) |
             X86Instr::Vpmulld(dest, _, _) | X86Instr::Vxorps(dest, _, _) |
-            X86Instr::Vpxor(dest, _, _) => dest.is_direct_reg(reg),
+            X86Instr::Vpxor(dest, _, _) | X86Instr::Vpgatherdd(dest, _, _) => dest.is_direct_reg(reg),
             // Idiv: kills rax (quotient) and rdx (remainder)
             X86Instr::Idiv(_) => reg.physical_id() == 0 || reg.physical_id() == 2,
             // Set: partial write — handled by partially_writes_phys_reg.
@@ -438,7 +443,15 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
     for instr in instructions {
         match instr {
             X86Instr::Label(l) => { let _ = write!(s, "{}:\n", l); }
-            X86Instr::Mov(d, src) => { let _ = write!(s, "  mov {}, {}\n", d, src); }
+            X86Instr::Mov(d, src) => {
+                // 32-bit writes to eax zero-extend rax; gas rejects `mov rax, eax`.
+                if matches!(d, X86Operand::Reg(X86Reg::Rax))
+                    && matches!(src, X86Operand::Reg(X86Reg::Eax))
+                {
+                    continue;
+                }
+                let _ = write!(s, "  mov {}, {}\n", d, src);
+            }
             X86Instr::Add(d, src) => { let _ = write!(s, "  add {}, {}\n", d, src); }
             X86Instr::Sub(d, src) => { let _ = write!(s, "  sub {}, {}\n", d, src); }
             X86Instr::Neg(d) => { let _ = write!(s, "  neg {}\n", d); }
@@ -535,6 +548,12 @@ pub fn emit_asm(instructions: &[X86Instr]) -> String {
             X86Instr::Vextracti128(d, src, imm) => { let _ = write!(s, "  vextracti128 {}, {}, {}\n", d, src, imm); }
             X86Instr::Vpxor(d, s1, s2) => { let _ = write!(s, "  vpxor {}, {}, {}\n", d, s1, s2); }
             X86Instr::Vpbroadcastd(d, src) => { let _ = write!(s, "  vpbroadcastd {}, {}\n", d, src); }
+            X86Instr::Vpgatherdd(d, idx, mask) => {
+                let _ = write!(s, "  vpgatherdd {}, DWORD PTR [r10 + {}*4], {}\n", d, idx, mask);
+            }
+            X86Instr::Vpscatterdd(idx, val, mask) => {
+                let _ = write!(s, "  vpscatterdd DWORD PTR [r10 + {}*4], {}, {}\n", idx, val, mask);
+            }
             X86Instr::Raw(asm_str) => { let _ = write!(s, "  {}\n", asm_str); }
         }
     }

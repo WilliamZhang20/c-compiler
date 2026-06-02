@@ -351,6 +351,10 @@ impl SemanticAnalyzer {
             Expr::BuiltinOffsetof { .. } => {
                 // Compile-time constant, nothing to analyze
             }
+            Expr::Expect { expr, expected } => {
+                self.analyze_expr(expr)?;
+                self.analyze_expr(expected)?;
+            }
             Expr::Generic { controlling, associations } => {
                 self.analyze_expr(controlling)?;
                 for (_ty, expr) in associations {

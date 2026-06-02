@@ -17,6 +17,7 @@ use model::{BinaryOp, Type};
 use std::collections::{HashMap, HashSet};
 use crate::loop_analysis::{self, NaturalLoop};
 use crate::mem_dependence::{self, check_memory_dependence};
+use crate::polyhedral;
 
 /// Target SIMD capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +231,17 @@ fn emit_scaled_index(
     idx
 }
 
+/// How a vectorized memory access is implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemAccessMode {
+    /// Packed unit-stride load/store (`scale == 1`).
+    Packed,
+    /// Strided gather/scatter (`scale > 1`, e.g. `a[2*i]`).
+    GatherScatter,
+    /// Indirect via index array (`a[idx[i]]`).
+    Indexed { index_base: VarId },
+}
+
 /// Information about a vectorizable memory access in a loop
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -238,14 +250,11 @@ struct MemAccess {
     base_var: VarId,
     /// Linear index: scale * IV + offset
     index_pattern: IndexPattern,
-    /// Element type
     elem_type: Type,
-    /// Whether this is a load (true) or store (false)
     is_load: bool,
-    /// The destination variable (for loads) or source operand (for stores)
     data: Operand,
-    /// The destination var for loads
     dest: Option<VarId>,
+    mode: MemAccessMode,
 }
 
 /// Describes a vectorizable reduction pattern (e.g., sum += a[i])
@@ -348,37 +357,35 @@ fn analyze_loop_body(
             match inst {
                 Instruction::Load { dest, addr, value_type, .. } => {
                     if let Operand::Var(addr_var) = addr {
-                        if let Some((base, pat)) = find_gep_for_var(
+                        if let Some((base, pat, mode)) = resolve_gep_access(
                             func, *addr_var, &lp.body, iv.var, &arithmetic_ops,
                         ) {
-                            if pat.scale > 0 && is_positive_power_of_two(pat.scale) {
-                                loads.push(MemAccess {
-                                    base_var: base,
-                                    index_pattern: pat,
-                                    elem_type: value_type.clone(),
-                                    is_load: true,
-                                    data: Operand::Var(*dest),
-                                    dest: Some(*dest),
-                                });
-                            }
+                            loads.push(MemAccess {
+                                base_var: base,
+                                index_pattern: pat,
+                                elem_type: value_type.clone(),
+                                is_load: true,
+                                data: Operand::Var(*dest),
+                                dest: Some(*dest),
+                                mode,
+                            });
                         }
                     }
                 }
                 Instruction::Store { addr, src, value_type, .. } => {
                     if let Operand::Var(addr_var) = addr {
-                        if let Some((base, pat)) = find_gep_for_var(
+                        if let Some((base, pat, mode)) = resolve_gep_access(
                             func, *addr_var, &lp.body, iv.var, &arithmetic_ops,
                         ) {
-                            if pat.scale > 0 && is_positive_power_of_two(pat.scale) {
-                                stores.push(MemAccess {
-                                    base_var: base,
-                                    index_pattern: pat,
-                                    elem_type: value_type.clone(),
-                                    is_load: false,
-                                    data: src.clone(),
-                                    dest: None,
-                                });
-                            }
+                            stores.push(MemAccess {
+                                base_var: base,
+                                index_pattern: pat,
+                                elem_type: value_type.clone(),
+                                is_load: false,
+                                data: src.clone(),
+                                dest: None,
+                                mode,
+                            });
                         }
                     }
                 }
@@ -524,6 +531,107 @@ fn find_gep_for_var(
     None
 }
 
+/// If `index_op` is `idx[i]` (load from index array at IV), return (index_base, pattern).
+fn find_indexed_access(
+    func: &Function,
+    index_op: &Operand,
+    body: &HashSet<BlockId>,
+    iv_var: VarId,
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+) -> Option<(VarId, IndexPattern)> {
+    let Operand::Var(index_var) = index_op else {
+        return None;
+    };
+    for &block_id in body {
+        let block = func.blocks.iter().find(|b| b.id == block_id)?;
+        for inst in &block.instructions {
+            if let Instruction::Load { dest, addr, .. } = inst {
+                if *dest != *index_var {
+                    continue;
+                }
+                if let Operand::Var(addr_var) = addr {
+                    if let Some((base, pat)) =
+                        find_gep_for_var(func, *addr_var, body, iv_var, arith_ops)
+                    {
+                        if pat.scale == 1 {
+                            return Some((base, pat));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve GEP access for vectorization.
+fn resolve_gep_access(
+    func: &Function,
+    addr_var: VarId,
+    body: &HashSet<BlockId>,
+    iv_var: VarId,
+    arith_ops: &[(VarId, BinaryOp, Operand, Operand, bool)],
+) -> Option<(VarId, IndexPattern, MemAccessMode)> {
+    for &block_id in body {
+        let block = func.blocks.iter().find(|b| b.id == block_id)?;
+        for inst in &block.instructions {
+            let Instruction::GetElementPtr { dest, base, index, .. } = inst else {
+                continue;
+            };
+            if *dest != addr_var {
+                continue;
+            }
+            let Operand::Var(base_v) = base else {
+                continue;
+            };
+            if let Some(pat) = resolve_index_pattern(index, iv_var, func, body, arith_ops) {
+                if pat.scale > 0 && is_positive_power_of_two(pat.scale) {
+                    let mode = if pat.scale == 1 {
+                        MemAccessMode::Packed
+                    } else {
+                        MemAccessMode::GatherScatter
+                    };
+                    return Some((*base_v, pat, mode));
+                }
+            }
+            if let Some((idx_base, pat)) = find_indexed_access(func, index, body, iv_var, arith_ops)
+            {
+                return Some((
+                    *base_v,
+                    pat,
+                    MemAccessMode::Indexed { index_base: idx_base },
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Emit `Simd::IndexSeq` for lane indices `scale * (vec_iv + k) + offset`.
+fn emit_gather_index_vector(
+    insts: &mut Vec<Instruction>,
+    vec_iv: VarId,
+    pattern: &IndexPattern,
+    vf: usize,
+    elem_type: Type,
+    next_var: &mut usize,
+) -> VarId {
+    let dest = VarId(*next_var);
+    *next_var += 1;
+    insts.push(Instruction::Simd {
+        op: SimdOp::IndexSeq,
+        dest: Some(dest),
+        operands: vec![
+            Operand::Var(vec_iv),
+            Operand::Constant(pattern.scale),
+            Operand::Constant(pattern.offset),
+        ],
+        elem_type,
+        width: vf,
+    });
+    dest
+}
+
 /// Plan for vectorizing a loop
 #[derive(Debug)]
 struct VectorizationPlan {
@@ -568,11 +676,15 @@ fn is_vectorization_profitable(plan: &VectorizationPlan, vf: usize) -> bool {
 /// Main auto-vectorization entry point
 /// Analyzes loops and inserts vector IR annotations that codegen will use
 pub fn vectorize_function(func: &mut Function, simd_level: SimdLevel) {
+    polyhedral::prepare_affine_nests(func);
     let loops = loop_analysis::find_loops(func);
     let vf = simd_level.vector_width();
 
     for lp in &loops {
         if let Some(plan) = analyze_loop_body(func, lp) {
+            if !polyhedral::allows_vectorization(func, lp, vf) {
+                continue;
+            }
             if !memory_dependence_ok(func, &plan, vf) {
                 continue;
             }
@@ -633,27 +745,78 @@ fn append_vec_loop_body(
     let mut valid_simd_stores = 0;
 
     for load in &plan.loads {
-        let gep_dest = VarId(*next_var);
-        *next_var += 1;
         let vec_load_dest = VarId(*next_var);
         *next_var += 1;
 
-        let index_var = emit_scaled_index(insts, vec_iv, &load.index_pattern, next_var);
-        insts.push(Instruction::GetElementPtr {
-            dest: gep_dest,
-            base: Operand::Var(load.base_var),
-            index: Operand::Var(index_var),
-            element_type: load.elem_type.clone(),
-        });
-        insts.push(Instruction::Simd {
-            op: SimdOp::Load,
-            dest: Some(vec_load_dest),
-            operands: vec![Operand::Var(gep_dest)],
-            elem_type: load.elem_type.clone(),
-            width: vf,
-        });
+        let index_vec = match load.mode {
+            MemAccessMode::Packed => {
+                let gep_dest = VarId(*next_var);
+                *next_var += 1;
+                let index_var = emit_scaled_index(insts, vec_iv, &load.index_pattern, next_var);
+                insts.push(Instruction::GetElementPtr {
+                    dest: gep_dest,
+                    base: Operand::Var(load.base_var),
+                    index: Operand::Var(index_var),
+                    element_type: load.elem_type.clone(),
+                });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Load,
+                    dest: Some(vec_load_dest),
+                    operands: vec![Operand::Var(gep_dest)],
+                    elem_type: load.elem_type.clone(),
+                    width: vf,
+                });
+                vec_load_dest
+            }
+            MemAccessMode::GatherScatter => {
+                let idx_vec = emit_gather_index_vector(
+                    insts,
+                    vec_iv,
+                    &load.index_pattern,
+                    vf,
+                    load.elem_type.clone(),
+                    next_var,
+                );
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Gather,
+                    dest: Some(vec_load_dest),
+                    operands: vec![Operand::Var(load.base_var), Operand::Var(idx_vec)],
+                    elem_type: load.elem_type.clone(),
+                    width: vf,
+                });
+                vec_load_dest
+            }
+            MemAccessMode::Indexed { index_base } => {
+                let gep_idx = VarId(*next_var);
+                *next_var += 1;
+                let idx_load = VarId(*next_var);
+                *next_var += 1;
+                let index_var = emit_scaled_index(insts, vec_iv, &load.index_pattern, next_var);
+                insts.push(Instruction::GetElementPtr {
+                    dest: gep_idx,
+                    base: Operand::Var(index_base),
+                    index: Operand::Var(index_var),
+                    element_type: Type::Int,
+                });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Load,
+                    dest: Some(idx_load),
+                    operands: vec![Operand::Var(gep_idx)],
+                    elem_type: Type::Int,
+                    width: vf,
+                });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Gather,
+                    dest: Some(vec_load_dest),
+                    operands: vec![Operand::Var(load.base_var), Operand::Var(idx_load)],
+                    elem_type: load.elem_type.clone(),
+                    width: vf,
+                });
+                vec_load_dest
+            }
+        };
 
-        let mut vec_reg = vec_load_dest;
+        let mut vec_reg = index_vec;
         if let Some(mask) = mask_var {
             let masked = VarId(*next_var);
             *next_var += 1;
@@ -762,47 +925,103 @@ fn append_vec_loop_body(
             vec_src
         };
 
-        let gep_dest = VarId(*next_var);
-        *next_var += 1;
-        let index_var = emit_scaled_index(insts, vec_iv, &store.index_pattern, next_var);
-        insts.push(Instruction::GetElementPtr {
-            dest: gep_dest,
-            base: Operand::Var(store.base_var),
-            index: Operand::Var(index_var),
-            element_type: store.elem_type.clone(),
-        });
+        match store.mode {
+            MemAccessMode::Packed => {
+                let gep_dest = VarId(*next_var);
+                *next_var += 1;
+                let index_var = emit_scaled_index(insts, vec_iv, &store.index_pattern, next_var);
+                insts.push(Instruction::GetElementPtr {
+                    dest: gep_dest,
+                    base: Operand::Var(store.base_var),
+                    index: Operand::Var(index_var),
+                    element_type: store.elem_type.clone(),
+                });
 
-        let store_src = if let Some(mask) = mask_var {
-            let mem_vec = VarId(*next_var);
-            *next_var += 1;
-            insts.push(Instruction::Simd {
-                op: SimdOp::Load,
-                dest: Some(mem_vec),
-                operands: vec![Operand::Var(gep_dest)],
-                elem_type: store.elem_type.clone(),
-                width: vf,
-            });
-            let blended = VarId(*next_var);
-            *next_var += 1;
-            insts.push(Instruction::Simd {
-                op: SimdOp::Blend,
-                dest: Some(blended),
-                operands: vec![Operand::Var(mem_vec), final_vec_src, Operand::Var(mask)],
-                elem_type: store.elem_type.clone(),
-                width: vf,
-            });
-            Operand::Var(blended)
-        } else {
-            final_vec_src
-        };
+                let store_src = if let Some(mask) = mask_var {
+                    let mem_vec = VarId(*next_var);
+                    *next_var += 1;
+                    insts.push(Instruction::Simd {
+                        op: SimdOp::Load,
+                        dest: Some(mem_vec),
+                        operands: vec![Operand::Var(gep_dest)],
+                        elem_type: store.elem_type.clone(),
+                        width: vf,
+                    });
+                    let blended = VarId(*next_var);
+                    *next_var += 1;
+                    insts.push(Instruction::Simd {
+                        op: SimdOp::Blend,
+                        dest: Some(blended),
+                        operands: vec![Operand::Var(mem_vec), final_vec_src, Operand::Var(mask)],
+                        elem_type: store.elem_type.clone(),
+                        width: vf,
+                    });
+                    Operand::Var(blended)
+                } else {
+                    final_vec_src
+                };
 
-        insts.push(Instruction::Simd {
-            op: SimdOp::Store,
-            dest: None,
-            operands: vec![Operand::Var(gep_dest), store_src],
-            elem_type: store.elem_type.clone(),
-            width: vf,
-        });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Store,
+                    dest: None,
+                    operands: vec![Operand::Var(gep_dest), store_src],
+                    elem_type: store.elem_type.clone(),
+                    width: vf,
+                });
+            }
+            MemAccessMode::GatherScatter => {
+                let idx_vec = emit_gather_index_vector(
+                    insts,
+                    vec_iv,
+                    &store.index_pattern,
+                    vf,
+                    store.elem_type.clone(),
+                    next_var,
+                );
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Scatter,
+                    dest: None,
+                    operands: vec![
+                        Operand::Var(store.base_var),
+                        Operand::Var(idx_vec),
+                        final_vec_src,
+                    ],
+                    elem_type: store.elem_type.clone(),
+                    width: vf,
+                });
+            }
+            MemAccessMode::Indexed { index_base } => {
+                let gep_idx = VarId(*next_var);
+                *next_var += 1;
+                let idx_load = VarId(*next_var);
+                *next_var += 1;
+                let index_var = emit_scaled_index(insts, vec_iv, &store.index_pattern, next_var);
+                insts.push(Instruction::GetElementPtr {
+                    dest: gep_idx,
+                    base: Operand::Var(index_base),
+                    index: Operand::Var(index_var),
+                    element_type: Type::Int,
+                });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Load,
+                    dest: Some(idx_load),
+                    operands: vec![Operand::Var(gep_idx)],
+                    elem_type: Type::Int,
+                    width: vf,
+                });
+                insts.push(Instruction::Simd {
+                    op: SimdOp::Scatter,
+                    dest: None,
+                    operands: vec![
+                        Operand::Var(store.base_var),
+                        Operand::Var(idx_load),
+                        final_vec_src,
+                    ],
+                    elem_type: store.elem_type.clone(),
+                    width: vf,
+                });
+            }
+        }
         valid_simd_stores += 1;
     }
 
@@ -1066,11 +1285,11 @@ fn apply_vectorization(
     let vec_header = BasicBlock {
         id: vec_header_id,
         instructions: vec_header_insts,
-        terminator: Terminator::CondBr {
-            cond: Operand::Var(vec_cmp),
-            then_block: vec_body_id,
-            else_block: vec_exit_target,
-        },
+        terminator: Terminator::cond_br(
+            Operand::Var(vec_cmp),
+            vec_body_id,
+            vec_exit_target,
+        ),
         is_label_target: false,
     };
 
@@ -1652,11 +1871,11 @@ mod tests {
             BasicBlock {
                 id: BlockId(1),
                 instructions: vec![],
-                terminator: Terminator::CondBr {
-                    cond: Operand::Var(VarId(0)),
-                    then_block: BlockId(2),
-                    else_block: BlockId(0),
-                },
+                terminator: Terminator::cond_br(
+                    Operand::Var(VarId(0)),
+                    BlockId(2),
+                    BlockId(0),
+                ),
                 is_label_target: false,
             },
             ret_block(2),
@@ -1697,11 +1916,11 @@ mod tests {
                         ],
                     },
                 ],
-                terminator: Terminator::CondBr {
-                    cond: Operand::Var(VarId(0)),
-                    then_block: BlockId(1),
-                    else_block: BlockId(2),
-                },
+                terminator: Terminator::cond_br(
+                    Operand::Var(VarId(0)),
+                    BlockId(1),
+                    BlockId(2),
+                ),
                 is_label_target: false,
             },
             BasicBlock {
@@ -1793,6 +2012,7 @@ mod tests {
                 is_load: true,
                 data: Operand::Var(VarId(2)),
                 dest: Some(VarId(2)),
+                mode: MemAccessMode::Packed,
             }],
             stores: vec![],
             reductions: vec![],
@@ -1814,6 +2034,7 @@ mod tests {
                 is_load: true,
                 data: Operand::Var(VarId(2)),
                 dest: Some(VarId(2)),
+                mode: MemAccessMode::Packed,
             }],
             stores: vec![],
             reductions: vec![],

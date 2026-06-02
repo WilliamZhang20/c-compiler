@@ -29,7 +29,9 @@ The `Codegen` struct holds shared state: struct/union definitions, float constan
 
 - **`gen_function()`** — runs register allocation, emits prologue (callee-saved pushes, frame pointer, stack reservation with **backpatch placeholder** for late spill slots), parameter moves from ABI registers with **cycle detection** to avoid overwrites, block-by-block instruction emission, and epilogue
 - **`gen_instr()`** — dispatches each IR instruction to the appropriate generator
+- **`gen_simd_instr()`** — lowers `Instruction::Simd` to SSE/AVX: contiguous `vmovdqu`, integer `vpaddd`/`vpmulld`/bitwise, `LaneMask`/`Blend` for tails, `IndexSeq` (lane index vectors), `Gather` (`vpgatherdd` on AVX2), `Scatter` (scalar lane stores; see below)
 - **`var_to_op()` / `operand_to_op()`** — translates IR operands to `X86Operand` using register allocation results, stack slots, and alloca buffers
+- **`load_address_into()`** — materializes array bases for gather/scatter via `lea` (not `mov` from stack slots)
 - **Cast handling** — int↔float (`cvtsi2ss`/`cvttss2si`), pointer casts, 32/64-bit width mismatches
 
 Stack frame calculation accounts for locals, callee-saved registers, shadow space (Windows), and stack-passed call arguments (>6 args).
@@ -88,10 +90,12 @@ Uses conservative `is_reg_used_after()` liveness checks.
 `TypeCalculator` computes byte sizes for all C types including arrays, structs (with field padding and `__attribute__((packed))`), and unions (max-field-size).
 
 ### `x86.rs` — x86-64 instruction representation
-- `X86Reg` — 42 register variants (64/32/8-bit GP + XMM0–XMM7)
-- `X86Operand` — register, memory (byte/dword/qword/float), immediate, label, RIP-relative
-- `X86Instr` — 40-variant enum modeling integer ALU, SSE float, control flow, stack, sign-extension, raw inline assembly
+- `X86Reg` — GP registers (64/32/8-bit), XMM0–XMM15, YMM0–YMM15 for AVX
+- `X86Operand` — register, memory (byte/dword/qword/xmmword/ymmword), immediate, label, RIP-relative
+- `X86Instr` — integer ALU, SSE/AVX float and integer SIMD, control flow, stack, sign-extension, gather (`Vpgatherdd`), raw inline assembly
 - `emit_asm(instrs) -> String` — serializes to Intel-syntax assembly text
+
+**Gather/scatter notes**: `vpgatherdd` is emitted when `SimdLevel >= AVX2`. `vpscatterdd` is not emitted—GNU assembler on common Linux distributions rejects it in Intel syntax; scatter uses `pextrd` + `mov [r10 + index*4]` per lane (with `vextracti128` for 8-wide vectors).
 
 ### `control_flow.rs` / `inline_asm.rs`
 Extracted helpers for terminator code generation (`Ret`, `Br`, `CondBr` with phi resolution) and inline assembly template expansion.

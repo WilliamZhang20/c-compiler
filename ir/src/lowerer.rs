@@ -283,6 +283,7 @@ impl Lowerer {
                 Type::Long
             }
             AstExpr::VaArg { r#type, .. } => r#type.clone(),
+            AstExpr::Expect { expr, .. } => self.get_expr_type(expr),
             AstExpr::Generic { controlling, associations } => {
                 // Resolve to the matching association's expression type
                 let ctrl_type = self.get_expr_type(controlling);

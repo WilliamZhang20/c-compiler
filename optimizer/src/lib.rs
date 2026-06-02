@@ -31,11 +31,14 @@ mod loop_interchange;
 pub mod loop_analysis;
 pub mod vectorize;
 mod mem_dependence;
+mod polyhedral;
 mod slp;
 mod inline;
+mod recurrence;
 mod sroa;
 
 use ir::IRProgram;
+use recurrence::eliminate_linear_recurrences;
 use sroa::scalar_replacement_of_aggregates;
 use algebraic::algebraic_simplification;
 use strength::strength_reduce_function;
@@ -95,6 +98,12 @@ impl PassManager {
 // ═══════════════════════════════════════════════════════════════════
 //  Concrete pass wrappers
 // ═══════════════════════════════════════════════════════════════════
+
+struct RecurrenceElimination;
+impl FunctionPass for RecurrenceElimination {
+    fn name(&self) -> &str { "recurrence-elimination" }
+    fn run(&self, func: &mut ir::Function) { eliminate_linear_recurrences(func); }
+}
 
 struct SROA;
 impl FunctionPass for SROA {
@@ -238,6 +247,8 @@ pub fn default_pipeline(simd_level: SimdLevel) -> PassManager {
     pm.add_pass(Box::new(FoldingAndDCE));
 
     // ── Finalize ────────────────────────────────────────────────
+    // Transform linear sum recurrences after other opts; re-SSA before phi removal.
+    pm.add_pass(Box::new(RecurrenceElimination));
     pm.add_pass(Box::new(RemovePhis));
     pm.add_pass(Box::new(CfgSimplify));
     pm.add_pass(Box::new(BlockLayout));

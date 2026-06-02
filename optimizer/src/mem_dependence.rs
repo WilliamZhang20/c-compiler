@@ -39,21 +39,23 @@ struct IndexSpan {
 }
 
 impl IndexPattern {
-    /// Span of element indices in one VF-wide SIMD access (IV step must be 1).
+    /// Element-index span for one VF-wide access at vector IV start v=0.
+    /// Unit stride (packed): scale==1 → [offset, offset+vf-1].
+    /// Gather/scatter: scale>0 → [offset, offset+scale*(vf-1)].
     fn simd_span(&self, vf: usize) -> Option<IndexSpan> {
-        if self.scale <= 0 || vf == 0 {
-            return None;
-        }
-        // Packed load/store reads `vf` consecutive elements starting at GEP index
-        // (scale * v + offset). That matches scalar indices scale*(v+k)+offset only
-        // when scale == 1.
-        if self.scale != 1 {
+        if self.scale < 0 || vf == 0 {
             return None;
         }
         let vf = vf as i64;
+        if self.scale == 0 {
+            return Some(IndexSpan {
+                min: self.offset,
+                max: self.offset,
+            });
+        }
         Some(IndexSpan {
             min: self.offset,
-            max: self.offset + vf - 1,
+            max: self.offset + self.scale * (vf - 1),
         })
     }
 }
@@ -200,17 +202,31 @@ fn check_same_base_dependences(
         if base_stores.is_empty() || base_loads.is_empty() {
             continue;
         }
-        // Chunk k ends at index (k+1)*VF - 1 + max(store.offset); chunk k+1 loads from
-        // (k+1)*VF + min(load.offset). Equivalently at k=0: store.offset + VF - 1 < VF + load.offset.
+        // Chunk k ends at max store index; chunk k+1 starts at min load index.
+        // At k=0: max_store_end < min_load_next_chunk.
         let vf_i = vf as i64;
         let max_store_end = base_stores
             .iter()
-            .map(|s| s.index_pattern.offset + vf_i - 1)
+            .filter_map(|s| {
+                let pat = &s.index_pattern;
+                if pat.scale == 0 {
+                    Some(pat.offset)
+                } else {
+                    Some(pat.offset + pat.scale * (vf_i - 1))
+                }
+            })
             .max()
             .unwrap_or(i64::MIN);
         let min_load_next_chunk = base_loads
             .iter()
-            .map(|l| l.index_pattern.offset + vf_i)
+            .filter_map(|l| {
+                let pat = &l.index_pattern;
+                if pat.scale == 0 {
+                    Some(pat.offset + vf_i)
+                } else {
+                    Some(pat.offset + pat.scale * vf_i)
+                }
+            })
             .min()
             .unwrap_or(i64::MAX);
         if max_store_end >= min_load_next_chunk {
@@ -295,6 +311,17 @@ fn check_distinct_base_aliases(func: &Function, loads: &[MemAccess], stores: &[M
     true
 }
 
+/// Reject vectorizing IV when a store uses a fixed element slot (scale 0) but loads
+/// walk with IV (e.g. `c[i][j] += a[i][k] * b[k][j]` with IV `k`).
+fn has_invariant_store_with_iv_dependent_loads(
+    loads: &[MemAccess],
+    stores: &[MemAccess],
+) -> bool {
+    let fixed_slot_store = stores.iter().any(|s| s.index_pattern.scale == 0);
+    let iv_walking_load = loads.iter().any(|l| l.index_pattern.scale != 0);
+    fixed_slot_store && iv_walking_load
+}
+
 /// Full memory safety gate for vectorization.
 pub fn check_memory_dependence(
     func: &Function,
@@ -305,6 +332,9 @@ pub fn check_memory_dependence(
 ) -> bool {
     if vf < 2 {
         return true;
+    }
+    if has_invariant_store_with_iv_dependent_loads(loads, stores) {
+        return false;
     }
     if !check_distinct_base_aliases(func, loads, stores) {
         return false;
@@ -357,9 +387,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stride_two_simd() {
+    fn invariant_store_with_strided_loads_rejected() {
+        let func = empty_func();
+        let l = load(VarId(1), 1, 0, VarId(2));
+        let s = store(VarId(3), 0, 0, VarId(4));
+        assert!(!check_memory_dependence(&func, &[l], &[s], 8, &[]));
+    }
+
+    #[test]
+    fn stride_two_gather_span() {
         let pat = IndexPattern { scale: 2, offset: 0 };
-        assert!(pat.simd_span(4).is_none());
+        let s = pat.simd_span(4).unwrap();
+        assert_eq!(s.min, 0);
+        assert_eq!(s.max, 6);
     }
 
     #[test]

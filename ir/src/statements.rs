@@ -258,18 +258,19 @@ impl Lowerer {
                     self.lower_stmt(s)?
                 }
             }            AstStmt::If { cond, then_branch, else_branch } => {
-                let cond_val = self.lower_expr(cond)?;
+                let (cond_val, hint) = self.lower_branch_condition(cond)?;
                 let bid = self.current_block.ok_or("If outside of block")?;
 
                 let then_id = self.new_block();
                 let else_id = self.new_block();
                 let merge_id = self.new_block();
 
-                self.blocks[bid.0].terminator = Terminator::CondBr {
-                    cond: cond_val,
-                    then_block: then_id,
-                    else_block: else_id,
-                };
+                self.blocks[bid.0].terminator = Terminator::cond_br_hint(
+                    cond_val,
+                    then_id,
+                    else_id,
+                    hint,
+                );
 
                 // Lower Then
                 self.sealed_blocks.insert(then_id);
@@ -309,16 +310,17 @@ impl Lowerer {
                 self.blocks[bid.0].terminator = Terminator::Br(header_id);
 
                 self.current_block = Some(header_id);
-                let cond_val = self.lower_expr(cond)?;
+                let (cond_val, hint) = self.lower_branch_condition(cond)?;
                 // Use current_block (not header_id) because LogicalAnd/Or
                 // may have created short-circuit blocks, moving current_block
                 // to a merge block.
                 let cond_block = self.current_block.ok_or("While cond ended outside block")?;
-                self.blocks[cond_block.0].terminator = Terminator::CondBr {
-                    cond: cond_val,
-                    then_block: body_id,
-                    else_block: exit_id,
-                };
+                self.blocks[cond_block.0].terminator = Terminator::cond_br_hint(
+                    cond_val,
+                    body_id,
+                    exit_id,
+                    hint,
+                );
 
                 self.sealed_blocks.insert(body_id);
                 self.current_block = Some(body_id);
@@ -352,15 +354,16 @@ impl Lowerer {
 
                 self.sealed_blocks.insert(latch_id);
                 self.current_block = Some(latch_id);
-                let cond_val = self.lower_expr(cond)?;
+                let (cond_val, hint) = self.lower_branch_condition(cond)?;
                 // Use current_block (not latch_id) because LogicalAnd/Or
                 // may have created short-circuit blocks.
                 let cond_block = self.current_block.ok_or("DoWhile cond ended outside block")?;
-                self.blocks[cond_block.0].terminator = Terminator::CondBr {
-                    cond: cond_val,
-                    then_block: body_id,
-                    else_block: exit_id,
-                };
+                self.blocks[cond_block.0].terminator = Terminator::cond_br_hint(
+                    cond_val,
+                    body_id,
+                    exit_id,
+                    hint,
+                );
 
                 self.seal_block(body_id);
                 self.seal_block(exit_id);
@@ -384,15 +387,16 @@ impl Lowerer {
 
                 self.current_block = Some(header_id);
                 if let Some(c) = cond {
-                    let cond_val = self.lower_expr(c)?;
+                    let (cond_val, hint) = self.lower_branch_condition(c)?;
                     // Use current_block (not header_id) because LogicalAnd/Or
                     // may have created short-circuit blocks.
                     let cond_block = self.current_block.ok_or("For cond ended outside block")?;
-                    self.blocks[cond_block.0].terminator = Terminator::CondBr {
-                        cond: cond_val,
-                        then_block: body_id,
-                        else_block: exit_id,
-                    };
+                    self.blocks[cond_block.0].terminator = Terminator::cond_br_hint(
+                        cond_val,
+                        body_id,
+                        exit_id,
+                        hint,
+                    );
                 } else {
                     self.blocks[header_id.0].terminator = Terminator::Br(body_id);
                 }
@@ -481,11 +485,11 @@ impl Lowerer {
                         left: cond_val.clone(),
                         right: Operand::Constant(val),
                     });
-                    self.blocks[current_head.0].terminator = Terminator::CondBr {
-                        cond: Operand::Var(cond_var),
-                        then_block: block,
-                        else_block: next_head,
-                    };
+                    self.blocks[current_head.0].terminator = Terminator::cond_br(
+                        Operand::Var(cond_var),
+                        block,
+                        next_head,
+                    );
                     self.seal_block(next_head);
                     current_head = next_head;
                     self.current_block = Some(next_head);

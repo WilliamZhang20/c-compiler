@@ -526,20 +526,20 @@ impl<'a> Parser<'a> {
                 // Handle GCC builtins at parse time
                 match value.as_str() {
                     "__builtin_expect" | "__builtin_expect_with_probability" => {
-                        // __builtin_expect(expr, expected_val) → expr
-                        // Used by likely()/unlikely() macros in the kernel.
+                        // Preserve hint for IR/block layout (likely/unlikely macros).
                         self.expect(|t| matches!(t, Token::OpenParenthesis), "'('")?;
                         let expr = self.parse_assignment()?;
                         self.expect(|t| matches!(t, Token::Comma), "','")?;
-                        // Consume and discard the expected value (and any extra args)
-                        let _ = self.parse_assignment()?;
-                        // Handle __builtin_expect_with_probability extra arg
+                        let expected = self.parse_assignment()?;
                         if self.check(|t| matches!(t, Token::Comma)) {
                             self.advance();
                             let _ = self.parse_assignment()?;
                         }
                         self.expect(|t| matches!(t, Token::CloseParenthesis), "')'")?;
-                        Ok(expr)
+                        Ok(Expr::Expect {
+                            expr: Box::new(expr),
+                            expected: Box::new(expected),
+                        })
                     }
                     "__builtin_constant_p" => {
                         // __builtin_constant_p(expr) → 1 if expr is a compile-time constant, 0 otherwise

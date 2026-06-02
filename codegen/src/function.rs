@@ -986,9 +986,129 @@ impl<'a> FunctionGenerator<'a> {
                 self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), s_op));
                 self.asm.push(X86Instr::Mov(d_op, X86Operand::Reg(X86Reg::Eax)));
             } else {
+                // Writing eax already zero-extends into rax on x86-64.
+                if matches!(d_op, X86Operand::Reg(X86Reg::Rax))
+                    && matches!(s_op, X86Operand::Reg(X86Reg::Eax))
+                {
+                    return;
+                }
                 self.asm.push(X86Instr::Mov(d_op, s_op));
             }
         }
+    }
+
+    /// Scalar fallback for gather when AVX2 gather is unavailable.
+    fn emit_scalar_gather(&mut self, dest_idx: u8, index_idx: u8, width: usize) {
+        let chunks = (width + 3) / 4;
+        for chunk in 0..chunks {
+            let lanes = (width - chunk * 4).min(4);
+            let (idx_part, dest_part) = if chunk == 0 && width <= 4 {
+                (
+                    Self::xmm_reg(index_idx).to_str().to_string(),
+                    Self::xmm_reg(dest_idx).to_str().to_string(),
+                )
+            } else if chunk == 0 {
+                (
+                    Self::xmm_reg(index_idx).to_str().to_string(),
+                    Self::xmm_reg(dest_idx).to_str().to_string(),
+                )
+            } else {
+                let ymm_idx = Self::ymm_reg(index_idx).to_str().to_string();
+                let ymm_dest = Self::ymm_reg(dest_idx).to_str().to_string();
+                self.asm.push(X86Instr::Raw(format!(
+                    "  vextracti128 xmm15, {}, 1",
+                    ymm_idx
+                )));
+                self.asm.push(X86Instr::Raw(format!(
+                    "  vextracti128 xmm14, {}, 1",
+                    ymm_dest
+                )));
+                ("xmm15".to_string(), "xmm14".to_string())
+            };
+            for lane in 0..lanes {
+                self.asm.push(X86Instr::Raw(format!(
+                    "  pextrd eax, {}, {}",
+                    idx_part, lane
+                )));
+                self.asm.push(X86Instr::Raw("  mov ecx, [r10 + rax*4]".to_string()));
+                self.asm.push(X86Instr::Raw(format!(
+                    "  pinsrd {}, ecx, {}",
+                    dest_part, lane
+                )));
+            }
+            if chunk == 1 && width > 4 {
+                let ymm_dest = Self::ymm_reg(dest_idx).to_str().to_string();
+                self.asm.push(X86Instr::Raw(format!(
+                    "  vinserti128 {}, {}, xmm14, 1",
+                    ymm_dest, ymm_dest
+                )));
+            }
+        }
+    }
+
+    /// Scalar fallback for scatter when AVX2 scatter is unavailable.
+    fn emit_scalar_scatter(&mut self, index_idx: u8, value_idx: u8, width: usize) {
+        let chunks = (width + 3) / 4;
+        for chunk in 0..chunks {
+            let lanes = (width - chunk * 4).min(4);
+            let (idx_part, val_part) = if chunk == 0 && width <= 4 {
+                (
+                    Self::xmm_reg(index_idx).to_str().to_string(),
+                    Self::xmm_reg(value_idx).to_str().to_string(),
+                )
+            } else if chunk == 0 {
+                (
+                    Self::xmm_reg(index_idx).to_str().to_string(),
+                    Self::xmm_reg(value_idx).to_str().to_string(),
+                )
+            } else {
+                let ymm_idx = Self::ymm_reg(index_idx).to_str().to_string();
+                let ymm_val = Self::ymm_reg(value_idx).to_str().to_string();
+                self.asm.push(X86Instr::Raw(format!(
+                    "  vextracti128 xmm15, {}, 1",
+                    ymm_idx
+                )));
+                self.asm.push(X86Instr::Raw(format!(
+                    "  vextracti128 xmm14, {}, 1",
+                    ymm_val
+                )));
+                ("xmm15".to_string(), "xmm14".to_string())
+            };
+            for lane in 0..lanes {
+                self.asm.push(X86Instr::Raw(format!(
+                    "  pextrd eax, {}, {}",
+                    idx_part, lane
+                )));
+                self.asm.push(X86Instr::Raw(format!(
+                    "  pextrd ecx, {}, {}",
+                    val_part, lane
+                )));
+                self.asm.push(X86Instr::Raw("  mov [r10 + rax*4], ecx".to_string()));
+            }
+        }
+    }
+
+    fn emit_all_ones_mask(&mut self, width: usize, use_avx: bool) {
+        let spill = if width > 4 { 32 } else { 16 };
+        self.asm.push(X86Instr::Raw(format!("  sub rsp, {}", spill)));
+        for lane in 0..width {
+            self.asm.push(X86Instr::Mov(
+                X86Operand::DwordMem(X86Reg::Rsp, (lane * 4) as i32),
+                X86Operand::Imm(-1),
+            ));
+        }
+        if use_avx {
+            self.asm.push(X86Instr::Vmovdqu(
+                X86Operand::Reg(Self::ymm_reg(15)),
+                X86Operand::YmmwordMem(X86Reg::Rsp, 0),
+            ));
+        } else {
+            self.asm.push(X86Instr::Movdqu(
+                X86Operand::Reg(X86Reg::Xmm15),
+                X86Operand::XmmwordMem(X86Reg::Rsp, 0),
+            ));
+        }
+        self.asm.push(X86Instr::Raw(format!("  add rsp, {}", spill)));
     }
 
     /// Generate x86 SIMD instructions for an IR Simd instruction
@@ -1313,6 +1433,117 @@ impl<'a> FunctionGenerator<'a> {
                 if use_avx {
                     self.asm.push(X86Instr::Vzeroupper);
                 }
+            }
+
+            SimdOp::IndexSeq => {
+                let dest_var = dest.expect("IndexSeq must have dest");
+                let dest_idx = self.alloc_simd_reg(dest_var);
+                let iv_op = self.operand_to_op(&operands[0]);
+                let scale = match &operands[1] {
+                    Operand::Constant(s) => *s,
+                    _ => 1,
+                };
+                let offset = match &operands[2] {
+                    Operand::Constant(o) => *o,
+                    _ => 0,
+                };
+                let iv32 = match iv_op {
+                    X86Operand::Reg(r) => X86Operand::Reg(r.to_32bit()),
+                    X86Operand::Mem(r, off) => X86Operand::DwordMem(r.clone(), off),
+                    other => other,
+                };
+                let spill = if width > 4 { 32 } else { 16 };
+                self.asm.push(X86Instr::Raw(format!("  sub rsp, {}", spill)));
+                for lane in 0..width {
+                    self.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Eax), iv32.clone()));
+                    if lane != 0 {
+                        self.asm.push(X86Instr::Add(
+                            X86Operand::Reg(X86Reg::Eax),
+                            X86Operand::Imm(lane as i64),
+                        ));
+                    }
+                    if scale != 1 {
+                        self.asm.push(X86Instr::Imul(
+                            X86Operand::Reg(X86Reg::Eax),
+                            X86Operand::Imm(scale),
+                        ));
+                    }
+                    if offset != 0 {
+                        self.asm.push(X86Instr::Add(
+                            X86Operand::Reg(X86Reg::Eax),
+                            X86Operand::Imm(offset),
+                        ));
+                    }
+                    self.asm.push(X86Instr::Mov(
+                        X86Operand::DwordMem(X86Reg::Rsp, (lane * 4) as i32),
+                        X86Operand::Reg(X86Reg::Eax),
+                    ));
+                }
+                if use_avx {
+                    self.asm.push(X86Instr::Vmovdqu(
+                        X86Operand::Reg(Self::ymm_reg(dest_idx)),
+                        X86Operand::YmmwordMem(X86Reg::Rsp, 0),
+                    ));
+                } else {
+                    self.asm.push(X86Instr::Movdqu(
+                        X86Operand::Reg(Self::xmm_reg(dest_idx)),
+                        X86Operand::XmmwordMem(X86Reg::Rsp, 0),
+                    ));
+                }
+                self.asm.push(X86Instr::Raw(format!("  add rsp, {}", spill)));
+            }
+
+            SimdOp::Gather => {
+                let dest_var = dest.expect("Gather must have dest");
+                let dest_idx = self.alloc_simd_reg(dest_var);
+                let base_var = match &operands[0] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let index_var = match &operands[1] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let index_idx = self.simd_reg_map.get(&index_var).copied().unwrap_or(0);
+                self.load_address_into(
+                    &Operand::Var(base_var),
+                    X86Reg::R10,
+                );
+
+                if use_avx && self.target.simd_level >= model::SimdLevel::AVX2 {
+                    self.emit_all_ones_mask(width, true);
+                    let dest = X86Operand::Reg(Self::ymm_reg(dest_idx));
+                    let idx = X86Operand::Reg(Self::ymm_reg(index_idx));
+                    let mask = X86Operand::Reg(Self::ymm_reg(15));
+                    self.asm.push(X86Instr::Vpgatherdd(dest, idx, mask));
+                } else {
+                    self.emit_scalar_gather(dest_idx, index_idx, width);
+                }
+            }
+
+            SimdOp::Scatter => {
+                let base_var = match &operands[0] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let index_var = match &operands[1] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let value_var = match &operands[2] {
+                    Operand::Var(v) => *v,
+                    _ => return,
+                };
+                let index_idx = self.simd_reg_map.get(&index_var).copied().unwrap_or(0);
+                let value_idx = self.simd_reg_map.get(&value_var).copied().unwrap_or(0);
+                self.load_address_into(
+                    &Operand::Var(base_var),
+                    X86Reg::R10,
+                );
+
+                // Binutils GAS does not accept AVX2 vpscatterdd in Intel syntax; use scalar stores.
+                let _ = use_avx;
+                self.emit_scalar_scatter(index_idx, value_idx, width);
             }
         }
     }

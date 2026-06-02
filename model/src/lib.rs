@@ -407,6 +407,11 @@ pub enum Expr {
         controlling: Box<Expr>,
         associations: Vec<(Option<Type>, Expr)>,  // None = default
     },
+    /// `__builtin_expect(expr, c)` — branch prediction hint; `expected` is 0 or 1.
+    Expect {
+        expr: Box<Expr>,
+        expected: Box<Expr>,
+    },
 }
 
 /// A single item inside a brace-enclosed initializer list.

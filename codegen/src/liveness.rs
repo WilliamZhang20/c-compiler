@@ -50,7 +50,12 @@ pub fn compute_live_intervals(func: &IrFunction) -> Vec<LiveInterval> {
         
         // Handle terminator uses
         match &block.terminator {
-            IrTerminator::CondBr { cond, then_block, else_block } => {
+            IrTerminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 if let Operand::Var(v) = cond {
                     if !alloca_vars.contains(v) && !block_def[bi].contains(v) {
                         block_use[bi].insert(*v);

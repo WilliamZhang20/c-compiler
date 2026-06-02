@@ -296,10 +296,16 @@ fn inline_call_site(
                 Terminator::Br(merge_block_id)
             }
             Terminator::Br(target) => Terminator::Br(BlockId(target.0 + block_offset)),
-            Terminator::CondBr { cond, then_block, else_block } => Terminator::CondBr {
+            Terminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                hint,
+            } => Terminator::CondBr {
                 cond: remap_operand(cond, var_offset),
                 then_block: BlockId(then_block.0 + block_offset),
                 else_block: BlockId(else_block.0 + block_offset),
+                hint: *hint,
             },
             Terminator::Unreachable => Terminator::Unreachable,
         };

@@ -28,7 +28,13 @@ pub fn simplify_cfg(func: &mut Function) {
 fn fold_constant_branches(func: &mut Function) -> bool {
     let mut changed = false;
     for block in &mut func.blocks {
-        if let Terminator::CondBr { cond, then_block, else_block } = &block.terminator {
+        if let Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } = &block.terminator
+        {
             if let Operand::Constant(val) = cond {
                 let target = if *val != 0 { *then_block } else { *else_block };
                 block.terminator = Terminator::Br(target);

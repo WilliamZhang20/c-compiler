@@ -1,13 +1,25 @@
-// Fibonacci - tests function calls and recursion optimization potential
+// Fibonacci — iterative O(n) loop (same algorithm in source for all compilers).
+// Measures loop + integer codegen, not automatic recurrence elimination.
 int fib(int n) {
-    if (n <= 1) return n;
-    return fib(n - 1) + fib(n - 2);
+    int i;
+    int prev;
+    int curr;
+    int next;
+
+    if (n <= 1) {
+        return n;
+    }
+
+    prev = 0;
+    curr = 1;
+    for (i = 2; i <= n; i = i + 1) {
+        next = prev + curr;
+        prev = curr;
+        curr = next;
+    }
+    return curr;
 }
 
 int main() {
-    int total = 0;
-    int i;
-    // fib(35) = 9227465, about 9M recursive calls
-    total = fib(35);
-    return total % 256;
+    return fib(35) % 256;
 }

@@ -348,30 +348,257 @@ fn store_call_result(generator: &mut FunctionGenerator, dest: VarId, ret_type: O
     }
 }
 
+// ─── Bit-count builtin codegen ────────────────────────────────────
+
+#[derive(Copy, Clone)]
+enum BitWidth {
+    W32,
+    W64,
+}
+
+impl BitWidth {
+    fn zero_result(self) -> i64 {
+        match self {
+            BitWidth::W32 => 32,
+            BitWidth::W64 => 64,
+        }
+    }
+
+    fn clz_xor(self) -> i64 {
+        match self {
+            BitWidth::W32 => 31,
+            BitWidth::W64 => 63,
+        }
+    }
+
+    fn result_reg(self) -> X86Reg {
+        match self {
+            BitWidth::W32 => X86Reg::Eax,
+            BitWidth::W64 => X86Reg::Rax,
+        }
+    }
+
+    fn cmov_scratch(self) -> X86Reg {
+        match self {
+            BitWidth::W32 => X86Reg::Ecx,
+            BitWidth::W64 => X86Reg::Rcx,
+        }
+    }
+}
+
+fn bit_width_for_builtin(name: &str) -> Option<(BitWidth, &str)> {
+    match name {
+        "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount" => Some((BitWidth::W32, name)),
+        "__builtin_clzl" | "__builtin_ctzl" | "__builtin_popcountl" => Some((BitWidth::W64, name)),
+        "__builtin_clzll" | "__builtin_ctzll" | "__builtin_popcountll" => Some((BitWidth::W64, name)),
+        _ => None,
+    }
+}
+
+fn u32_operand(op: X86Operand) -> X86Operand {
+    match op {
+        X86Operand::Reg(r) => X86Operand::Reg(r.to_32bit()),
+        other => other,
+    }
+}
+
+fn store_result_reg_if_needed(generator: &mut FunctionGenerator, dest: VarId, result: X86Reg) {
+    let dest_op = generator.var_to_op(dest);
+    let result_op = X86Operand::Reg(result.clone());
+    let same = dest_op == result_op
+        || matches!(
+            (&dest_op, &result),
+            (X86Operand::Reg(X86Reg::Rax), X86Reg::Eax)
+                | (X86Operand::Reg(X86Reg::Eax), X86Reg::Rax)
+                | (X86Operand::Reg(X86Reg::Rcx), X86Reg::Ecx)
+                | (X86Operand::Reg(X86Reg::Ecx), X86Reg::Rcx)
+        );
+    if same {
+        return;
+    }
+
+    // 32-bit result in eax → 64-bit GPR: write low 32 bits (zero-extends into full reg).
+    if result == X86Reg::Eax {
+        if let X86Operand::Reg(dest_reg) = &dest_op {
+            let dest32 = dest_reg.to_32bit();
+            if dest32 != X86Reg::Eax {
+                generator.asm.push(X86Instr::Mov(
+                    X86Operand::Reg(dest32),
+                    X86Operand::Reg(X86Reg::Eax),
+                ));
+                return;
+            }
+        }
+    }
+
+    generator.asm.push(X86Instr::Mov(dest_op, result_op));
+}
+
+/// Branch-free clz/ctz/popcount matching GCC -O2/O3 instruction selection.
+fn gen_bit_count_builtin(
+    generator: &mut FunctionGenerator,
+    dest: VarId,
+    kind: &str,
+    width: BitWidth,
+    src_op: X86Operand,
+) {
+    if let X86Operand::Imm(v) = src_op {
+        let u = v as u64;
+        let bits = match width {
+            BitWidth::W32 => 32u32,
+            BitWidth::W64 => 64,
+        };
+        let folded = match kind {
+            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
+                if u == 0 {
+                    bits as i64
+                } else {
+                    match width {
+                        BitWidth::W32 => (u as u32).leading_zeros() as i64,
+                        BitWidth::W64 => u.leading_zeros() as i64,
+                    }
+                }
+            }
+            "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
+                if u == 0 {
+                    bits as i64
+                } else {
+                    match width {
+                        BitWidth::W32 => (u as u32).trailing_zeros() as i64,
+                        BitWidth::W64 => u.trailing_zeros() as i64,
+                    }
+                }
+            }
+            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => match width {
+                BitWidth::W32 => (u as u32).count_ones() as i64,
+                BitWidth::W64 => u.count_ones() as i64,
+            },
+            _ => unreachable!(),
+        };
+        let dest_op = generator.var_to_op(dest);
+        generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Imm(folded)));
+        return;
+    }
+
+    let result = width.result_reg();
+    let scratch = width.cmov_scratch();
+    let src = match width {
+        BitWidth::W32 => u32_operand(src_op),
+        BitWidth::W64 => src_op,
+    };
+
+    match kind {
+        "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
+            generator.asm.push(X86Instr::Raw(format!(
+                "  bsr {}, {}",
+                result.to_str(),
+                src
+            )));
+            generator.asm.push(X86Instr::Raw(format!(
+                "  xor {}, {}",
+                result.to_str(),
+                width.clz_xor()
+            )));
+            generator.asm.push(X86Instr::Mov(
+                X86Operand::Reg(scratch.clone()),
+                X86Operand::Imm(width.zero_result()),
+            ));
+            generator.asm.push(X86Instr::Raw(format!(
+                "  cmovz {}, {}",
+                result.to_str(),
+                scratch.to_str()
+            )));
+        }
+        "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
+            generator.asm.push(X86Instr::Raw(format!(
+                "  bsf {}, {}",
+                result.to_str(),
+                src
+            )));
+            generator.asm.push(X86Instr::Mov(
+                X86Operand::Reg(scratch.clone()),
+                X86Operand::Imm(width.zero_result()),
+            ));
+            generator.asm.push(X86Instr::Raw(format!(
+                "  cmovz {}, {}",
+                result.to_str(),
+                scratch.to_str()
+            )));
+        }
+        "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => {
+            generator.asm.push(X86Instr::Raw(format!(
+                "  popcnt {}, {}",
+                result.to_str(),
+                src
+            )));
+        }
+        _ => unreachable!(),
+    }
+
+    store_result_reg_if_needed(generator, dest, result);
+}
+
+fn gen_bswap_builtin(
+    generator: &mut FunctionGenerator,
+    dest: VarId,
+    name: &str,
+    src_op: X86Operand,
+) {
+    let dest_op = generator.var_to_op(dest);
+    match name {
+        "__builtin_bswap16" => {
+            if !matches!(dest_op, X86Operand::Reg(X86Reg::Ax)) {
+                generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Ax), src_op));
+                generator.asm.push(X86Instr::Raw("  rol ax, 8".to_string()));
+                if dest_op != X86Operand::Reg(X86Reg::Ax) {
+                    generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Ax)));
+                }
+            } else if dest_op != src_op {
+                generator.asm.push(X86Instr::Mov(dest_op.clone(), src_op));
+                generator.asm.push(X86Instr::Raw("  rol ax, 8".to_string()));
+            } else {
+                generator.asm.push(X86Instr::Raw("  rol ax, 8".to_string()));
+            }
+        }
+        "__builtin_bswap32" | "__builtin_bswap64" => {
+            let work = X86Reg::Rax;
+            let work_op = X86Operand::Reg(work.clone());
+            if work_op != src_op {
+                generator.asm.push(X86Instr::Mov(work_op.clone(), src_op));
+            }
+            let insn = if name == "__builtin_bswap64" {
+                "  bswap rax"
+            } else {
+                "  bswap eax"
+            };
+            generator.asm.push(X86Instr::Raw(insn.to_string()));
+            store_result_reg_if_needed(generator, dest, work);
+        }
+        _ => unreachable!(),
+    }
+}
+
 // ─── Public call generators ─────────────────────────────────────
 
 pub fn gen_call(generator: &mut FunctionGenerator, dest: &Option<VarId>, name: &str, args: &[Operand]) {
+    // Intercept __builtin_clz / ctz / popcount (32- and 64-bit variants).
+    if let Some((width, kind)) = bit_width_for_builtin(name) {
+        if args.len() == 1 {
+            if let Some(d) = dest {
+                let src_op = generator.operand_to_op(&args[0]);
+                gen_bit_count_builtin(generator, *d, kind, width, src_op);
+            }
+            return;
+        }
+    }
+
     // Intercept __builtin_bswap* — emit inline bswap instruction
     if (name == "__builtin_bswap16" || name == "__builtin_bswap32" || name == "__builtin_bswap64")
         && args.len() == 1
     {
         if let Some(d) = dest {
             let src_op = generator.operand_to_op(&args[0]);
-            generator.asm.push(X86Instr::Mov(X86Operand::Reg(X86Reg::Rax), src_op));
-            match name {
-                "__builtin_bswap64" => {
-                    generator.asm.push(X86Instr::Raw("bswap rax".to_string()));
-                }
-                "__builtin_bswap32" => {
-                    generator.asm.push(X86Instr::Raw("bswap eax".to_string()));
-                }
-                "__builtin_bswap16" => {
-                    generator.asm.push(X86Instr::Raw("rol ax, 8".to_string()));
-                }
-                _ => unreachable!(),
-            }
-            let dest_op = generator.var_to_op(*d);
-            generator.asm.push(X86Instr::Mov(dest_op, X86Operand::Reg(X86Reg::Rax)));
+            gen_bswap_builtin(generator, *d, name, src_op);
         }
         return;
     }
