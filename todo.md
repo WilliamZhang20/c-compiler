@@ -50,6 +50,9 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 - `gcc` for assembling + linking
 - **`-c`** (compile to `.o` without linking)
 - **`-nostdlib` / `--ffreestanding`** forwarded to linker/preprocessor
+- **`-fPIC` / `-fpic` / `-fPIE` / `-fpie`** — PIC/PIE codegen (`call @PLT`, label-address rodata)
+- **`-fprofile-generate` / `-fprofile-use=FILE`** — built-in PGO instrumentation and profile-guided block layout
+- **`--mno-red-zone` / `--mno-sse`** — forwarded to codegen
 - Multiple source file compilation (each compiled to `.s` or `.o`, then linked)
 - `-o`, `-S` (emit asm), `--keep-intermediates`, `--debug` flags
 
@@ -58,8 +61,8 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
 | **`-fno-builtin`** | **Critical** — kernel defines its own `memcpy`, `memset`, etc. | Not supported as driver flag |
-| **`-include` (force-include file)** | **High** — kernel uses `-include include/linux/compiler_types.h` | Not supported |
-| **`-fPIC` / `-fPIE`** | **Medium** — kernel modules need PIC | No PIC/PIE code generation |
+| **`-include` (force-include file)** | **High** — kernel uses `-include include/linux/compiler_types.h` | ✅ `--include` forwarded to GCC preprocessor |
+| **`-fPIC` / `-fPIE`** | **Medium** — kernel modules need PIC | ✅ `-fPIC`/`-fPIE` codegen (2026-06-02) |
 | **`-mcmodel=kernel`** | **High** — kernel runs in upper 2GB of virtual address space | No memory model support |
 | **`-march=` / `-mtune=`** | **Medium** — kernel sets minimum ISA level | No target architecture flags |
 | **`-std=gnu11`** | **Low** — informational; behavior should match | No standard selection |
@@ -138,7 +141,11 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 - Typedef declarations
 - Global and local variable declarations with initializers
 - Multi-declarators (`int a, b, c;`)
-- Designator initializers (`.field = val`, `[idx] = val`)
+- Designator initializers (`.field = val`, `[idx] = val`, **nested `.a.b`**, **GCC ranges `[lo ... hi]`**)
+- **`Program.prototypes`** — forward declarations stored and used for call type-checking
+- **`Program.typedefs`** — typedef definitions exported from parser
+- **`Function.is_variadic`** — variadic flag on definitions and prototypes
+- **Computed goto** (`goto *expr`) and **label addresses** (`&&label`) — parsed; IR `IndirectBr` + rodata (parser edge cases for `&&label` in some contexts remain)
 - Compound literals (`(type){...}`)
 - `_Generic` expressions
 - Statement expressions (`({ ... })`)
@@ -151,28 +158,28 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **Function prototypes / forward declarations** | **Critical** — kernel headers are full of declarations | Detected and silently skipped; not stored in AST. Means the compiler can't type-check calls to forward-declared functions |
-| **`extern` variable declarations** | **Critical** — `extern int jiffies;` pattern | Detected and silently skipped; not in AST |
-| **`static` functions/variables (internal linkage)** | **Critical** — kernel uses `static` extensively | Token consumed but linkage not tracked; all symbols emitted as `.globl` |
-| **Forward struct declarations (`struct foo;`)** | **High** — opaque pointer pattern | Detected and silently skipped |
-| **K&R-style function definitions** | **Low** — not used in modern kernel | Not supported |
-| **Complex nested declarators** | **High** — `int (*(*fp)(int))(char)` pattern | Not supported; only simple function pointer declarators work |
-| **Array of function pointers** | **High** — `void (*handlers[N])(int)` | May not parse correctly |
-| **`typeof` in declarations** | **High** — `typeof(x) y;` is common in kernel macros | `TypeofExpr` exists but unclear if it works in all declaration contexts |
-| **Variadic function flag** | **Medium** — `...` parsed but no is_variadic flag stored on function | Variadic calling convention may not be fully correct |
-| **Nested designated initializers** | **Medium** — `.a.b = 5`, `.a[0].b = 3` | Only single-level `.field` and `[index]` designators |
-| **Anonymous struct/union members** | **High** — `struct { struct { int x; }; }; s.x` | Partially supported; nested anonymous members may fail |
-| **Flexible array members** | **High** — `struct { int n; char data[]; }` | Partially supported but size computation may be wrong |
-| **Computed goto (`goto *ptr`)** | **High** — used in kernel interpreter dispatchers | Not parsed |
-| **Label addresses (`&&label`)** | **High** — needed for computed goto | Not parsed |
-| **`__label__` declarations** | **Low** — GCC local label extension | Not supported |
-| **Attributes on types and statements** | **Medium** — `int __attribute__((aligned(4))) x;` | Only supported in specific positions |
-| **`_Alignas` on struct fields** | **Medium** — alignment control on individual fields | May not be fully supported |
-| **String literal concatenation** | **Medium** — `"hello " "world"` | Handled by GCC preprocessor (`-E`), so likely OK |
-| **Designated initializer ranges** | **Medium** — `[0 ... 9] = val` (GCC extension) | Not supported |
-| **Cast-to-union** | **Low** — GCC extension | Not supported |
-| **`__auto_type`** | **Low** — GCC extension for type inference | Not supported |
-| **Nested functions** | **Low** — GCC extension, not used in kernel | Not supported |
+| **Function prototypes / forward declarations** | **Critical** | ✅ Stored in `Program.prototypes` |
+| **`extern` variable declarations** | **Critical** | ✅ `GlobalVar.is_extern` in AST |
+| **`static` functions/variables (internal linkage)** | **Critical** | ✅ `is_static`; no `.globl` for static symbols |
+| **Forward struct declarations (`struct foo;`)** | **High** | ✅ `Program.forward_structs` |
+| **K&R-style function definitions** | **Low** | Not supported |
+| **Complex nested declarators** | **High** | Not supported; only simple function pointer declarators work |
+| **Array of function pointers** | **High** | May not parse correctly |
+| **`typeof` in declarations** | **High** | `TypeofExpr` exists; declaration-context coverage incomplete |
+| **Variadic function flag** | **Medium** | ✅ `is_variadic` on `Function` / `FunctionPrototype` |
+| **Nested designated initializers** | **Medium** | ✅ `.outer.inner` supported (2026-06-02) |
+| **Anonymous struct/union members** | **High** | Partially supported; nested anonymous members may fail |
+| **Flexible array members** | **High** | Partially supported but size computation may be wrong |
+| **Computed goto (`goto *ptr`)** | **High** | ✅ Parsed → `Stmt::ComputedGoto` → `IndirectBr` |
+| **Label addresses (`&&label`)** | **High** | ✅ Parsed → `Expr::LabelAddr`; some expression-context parse failures remain |
+| **`__label__` declarations** | **Low** | Not supported |
+| **Attributes on types and statements** | **Medium** | Only supported in specific positions |
+| **`_Alignas` on struct fields** | **Medium** | May not be fully supported |
+| **String literal concatenation** | **Medium** | Handled by GCC preprocessor (`-E`) |
+| **Designated initializer ranges** | **Medium** | ✅ `[lo ... hi]` (2026-06-02) |
+| **Cast-to-union** | **Low** | Not supported |
+| **`__auto_type`** | **Low** | Not supported |
+| **Nested functions** | **Low** | Not supported |
 
 ---
 
@@ -269,35 +276,24 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 ### Currently Supported
 - Scope management (lexical scoping, nested blocks)
 - Undeclared variable detection
-- `const` assignment enforcement (on simple variables)
+- `const` assignment enforcement (simple variables and through pointers)
 - `volatile` / `restrict` qualifier tracking
 - `break`/`continue` outside loop detection
-- `case`/`default` outside switch detection
+- `case`/`default` outside switch detection; **duplicate `case` values**
 - Recursive expression/statement analysis
 - Inline ASM operand validation
+- **`TypeEnv` type checking** (2026-06-02): integer promotions, usual arithmetic conversions, assignment/return compatibility, function call arity and argument types, lvalue validation, pointer subtraction, bitfield width, **`typedef` resolution**, **`typeof(expr)`**
 
 ### Missing
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **Type inference on expressions** | **Critical** — `analyze_expr` returns no type; the compiler does zero type checking | Without expression types, no implicit conversions, no promotion rules, no assignment compatibility |
-| **Integer promotion rules (C11 §6.3.1.1)** | **Critical** — `char`, `short`, `_Bool` must promote to `int` | Not implemented |
-| **Usual arithmetic conversions (C11 §6.3.1.8)** | **Critical** — `int + unsigned long` → `unsigned long` | Not implemented |
-| **Assignment type compatibility** | **High** — RHS type not checked against LHS | Not implemented |
-| **Return type checking** | **High** — return value not checked against declared type | Not implemented |
-| **Function call arity/type checking** | **High** — argument count and types not validated | Not implemented |
-| **Implicit function declarations** | **Medium** — calling undeclared functions silently allowed | Should at least warn |
-| **`const` through pointers** | **Medium** — `const int *p; *p = 5;` not caught | Only simple variable const checked |
-| **Lvalue validation** | **Medium** — assignment to non-lvalue not detected | Only const checked |
-| **Array-to-pointer decay** | **High** — not modeled; affects type computations | Not implemented |
-| **Pointer arithmetic type rules** | **Medium** — no validation of pointer arithmetic | Not checked |
-| **Incomplete type detection** | **Medium** — `struct Foo *` before definition of `Foo` | Not checked |
-| **Duplicate declarations in same scope** | **Low** — silently allowed | Not checked |
-| **`typedef` resolution** | **High** — `Type::Typedef` never resolved to its underlying type | Not implemented |
-| **Storage class conflict detection** | **Low** — `static extern int x;` not detected | Not checked |
-| **Bitfield width validation** | **Medium** — width > type_bits not caught | Not checked |
-| **Initializer shape checking** | **Medium** — initializer list not validated against target | Not checked |
-| **Duplicate `case` value detection** | **Low** | Not checked |
+| **Initializer shape checking** | **Medium** | Init lists accepted loosely; designated/range shape not fully validated |
+| **Implicit function declarations** | **Medium** | Calls to unknown functions not flagged |
+| **Incomplete type detection** | **Medium** | e.g. use before struct definition not checked |
+| **Duplicate declarations in same scope** | **Low** | Silently allowed |
+| **Storage class conflict detection** | **Low** | e.g. `static extern int x;` not detected |
+| **Array-to-pointer decay modeling gaps** | **Medium** | Core decay works; edge cases may remain |
 
 ---
 
@@ -307,19 +303,19 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 `Binary`, `FloatBinary`, `Unary`, `FloatUnary`, `Phi`, `Copy`, `Cast`, `Alloca`, `Load`, `Store`, `GetElementPtr`, `Call`, `IndirectCall`, `VaStart`, `VaEnd`, `VaCopy`, `VaArg`, `InlineAsm`
 
 ### Supported Terminators
-`Br` (unconditional), `CondBr` (conditional), `Ret`, `Unreachable`
+`Br` (unconditional), `CondBr` (conditional), `Ret`, `Unreachable`, **`IndirectBr`** (computed goto)
 
 ### Missing
 
 | Gap | Kernel Relevance | Notes |
 |-----|-----------------|-------|
-| **Volatile flag on Load/Store** | **Critical** — MMIO, hardware registers | `Load`/`Store` have no `is_volatile` field; volatility cannot be preserved through optimization |
+| **Volatile flag on Load/Store** | **Critical** | ✅ `volatile` field on `Load`/`Store`; optimizer respects it |
 | **AtomicLoad / AtomicStore** | **Critical** — `_Atomic`, `__atomic_*` builtins | No atomic memory access instructions |
 | **AtomicRMW (read-modify-write)** | **Critical** — `atomic_fetch_add`, `__sync_fetch_and_add` | No instruction |
 | **CmpXchg (compare-and-swap)** | **Critical** — `cmpxchg` for lock-free data structures | No instruction |
 | **Fence (memory barrier)** | **Critical** — `__sync_synchronize`, `smp_mb()` | No `Fence` instruction |
 | **Memory ordering annotations** | **Critical** — relaxed/acquire/release/seq_cst | No ordering enum |
-| **IndirectBr (computed goto)** | **High** — `goto *ptr` dispatch tables | No `IndirectBr(Operand, Vec<BlockId>)` terminator |
+| **IndirectBr (computed goto)** | **High** | ✅ `IndirectBr { target }` terminator (2026-06-02) |
 | **Switch terminator** | **Medium** — switch lowered as CondBr chain; no jump table | No native `Switch` terminator |
 | **Select instruction** | **Medium** — branchless conditional `dest = cond ? a : b` | Must use `CondBr` + `Phi` |
 | **Aggregate copy / memcpy intrinsic** | **High** — struct assignment, large copies | No bulk memory copy instruction |
@@ -349,7 +345,7 @@ The compiler delegates preprocessing to `gcc -E -P`. This covers `#include`, `#d
 11. **Auto-vectorization** (SSE2/AVX2: packed, strided gather/scatter, indexed gather/scatter, masked tail; `polyhedral.rs` + `mem_dependence.rs`)
 12. Phi removal (SSA → copies)
 13. CFG simplification
-14. **Block layout** (I-cache; honors `__builtin_expect` / `BranchHint`)
+14. **Block layout** (I-cache; honors `__builtin_expect` / `BranchHint`; optional **PGO** reorder via `profile.rs`)
 
 ### Missing
 
@@ -551,13 +547,13 @@ These must be implemented before any kernel source file can be processed:
 35. **`__builtin_object_size`** — `FORTIFY_SOURCE`
 36. **`__builtin_add/sub/mul_overflow`** — checked arithmetic
 37. **`__int128` type and operations** — 128-bit arithmetic
-38. **Computed goto (`goto *ptr`, `&&label`)** — interpreter dispatch
+38. ~~**Computed goto (`goto *ptr`, `&&label`)**~~ ✅ — parsed, IR `IndirectBr`, label rodata (parser edge cases remain)
 39. **Anonymous struct/union members** — transparent member access
 40. **Complex nested declarators** — `int (*(*fp)(int))(char)` patterns
-41. **Designated initializer ranges** — `[0 ... 9] = val` (GCC extension)
+41. ~~**Designated initializer ranges**~~ ✅ — `[0 ... 9] = val` (2026-06-02)
 42. **`typeof` on types** — `typeof(int *)` not just `typeof(expr)`
 43. **Flexible array members** — correct size computation
-44. **Type inference in semantic pass** — integer promotions, usual arithmetic conversions
+44. ~~**Type inference in semantic pass**~~ ✅ — `TypeEnv`: promotions, conversions, calls (2026-06-02)
 45. **`__attribute__((visibility(...)))`** — ELF symbol visibility
 46. **`__attribute__((used))`** — prevent stripping
 47. **`__attribute__((alias(...)))`** — symbol aliasing
@@ -573,7 +569,7 @@ These must be implemented before any kernel source file can be processed:
 54. **`__attribute__((may_alias))`** — type punning
 55. **`__attribute__((no_instrument_function))`** — tracing exclusion
 56. **`__attribute__((pure/const))`** — purity annotations
-57. **PIC/PIE code generation** — kernel modules
+57. ~~**PIC/PIE code generation**~~ ✅ — `-fPIC`/`-fPIE`, `@PLT` calls (2026-06-02)
 58. **`-mcmodel=kernel`** — upper-half address space
 59. **DWARF debug info** — `CONFIG_DEBUG_INFO`
 60. **Function inlining pass** — `always_inline` enforcement

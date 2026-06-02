@@ -24,6 +24,17 @@ cargo run -- hello_world.c --include config.h
 # Freestanding / no-stdlib compilation
 cargo run -- kernel.c --nostdlib --ffreestanding
 
+# Position-independent code
+cargo run -- module.c -fPIC -c
+cargo run -- app.c -fPIE -fpie -o prog
+
+# Profile-guided optimization
+cargo run -- app.c -fprofile-generate -o prog
+cargo run -- app.c -fprofile-use=default.prof -o prog
+
+# Machine flags (kernel builds)
+cargo run -- kernel.c --mno-red-zone --mno-sse
+
 # Stop after lexing (prints tokens to stdout)
 cargo run -- hello_world.c --lex
 
@@ -50,8 +61,8 @@ cargo run -- file1.c file2.c -o output
 3. **Parsing** — `parser::parse_tokens()` builds the AST. Global variable names are deduplicated (handles `extern` forward declarations).
 4. **Semantic analysis** — `SemanticAnalyzer::analyze()` validates the AST.
 5. **IR lowering** — `Lowerer::lower_program()` translates AST to SSA-form IR.
-6. **Optimization** — `optimizer::optimize()` runs the full pass pipeline.
-7. **Code generation** — `Codegen::gen_program()` emits x86-64 assembly text, written to a `.s` file.
+6. **Optimization** — `optimizer::optimize_with_options()` runs the full pass pipeline (optional PGO profile from `-fprofile-use`).
+7. **Code generation** — `Codegen::gen_program()` emits x86-64 assembly text, written to a `.s` file. PIC/PIE selects `@PLT` calls; `-fprofile-generate` emits counter increments.
 8. **Linking** — invokes `gcc` to assemble and link all `.s` files into the final executable.
 
 At any step, `--lex`, `--parse`, `--codegen`, or `-S` will stop the pipeline and output the intermediate result.
@@ -69,7 +80,7 @@ Built with [clap](https://docs.rs/clap) for argument parsing. The `Args` struct 
 ## Source files
 
 ### `src/main.rs`
-The entire driver is a single file (~345 lines). Contains `main()`, `Args` struct, `preprocess()` (GCC invocation with `-D`/`-U`/`-I`/`--include` forwarding), `assemble()` (GCC `.s` → `.o`), and `run_linker()` (GCC invocation for link, with `--nostdlib`/`--ffreestanding` support). Intermediate `.i` and `.s` files are cleaned up unless `--keep-intermediates` or `-S` is specified.
+The entire driver is a single file (~350 lines). Contains `main()`, `Args` struct, `preprocess()` (GCC invocation with `-D`/`-U`/`-I`/`--include` forwarding), `assemble()` (GCC `.s` → `.o`), and `run_linker()` (GCC invocation for link, with `--nostdlib`/`--ffreestanding` support). Forwards **`-fPIC`/`-fpic`**, **`-fPIE`/`-fpie`**, **`-fprofile-generate`**, **`-fprofile-use=FILE`**, and **`--mno-red-zone`/`--mno-sse`** to codegen/link. Intermediate `.i` and `.s` files are cleaned up unless `--keep-intermediates` or `-S` is specified.
 
 ### `tests/integration_tests.rs`
-The integration test harness. `run_all_c_tests()` discovers all `.c` files in `testing/`, compiles each one using the driver binary, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the first line of the source file. Currently exercises 146 test programs covering the full feature set.
+The integration test harness. `run_all_c_tests()` discovers all `.c` files in `testing/`, compiles each one using the driver binary, runs the resulting executable, and asserts the exit code matches the `// EXPECT: <exit_code>` annotation in the first line of the source file. Currently exercises **177** test programs covering the full feature set.

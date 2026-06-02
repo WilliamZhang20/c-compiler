@@ -2,7 +2,10 @@
 
 The **Optimizer** runs a fixed sequence of transformation passes over the SSA-form IR, improving code efficiency without changing observable behavior.
 
-**Public API**: `optimizer::optimize(program: IRProgram) -> IRProgram`
+**Public API**:
+
+- `optimizer::optimize(program: IRProgram) -> IRProgram` — default pipeline (no profile)
+- `optimizer::optimize_with_options(program, simd_level, profile: Option<&ProfileData>) -> IRProgram` — same pipeline; when `profile` is `Some`, runs **profile-guided block layout** after pass 14
 
 Each function is processed independently through the full pipeline.
 
@@ -26,8 +29,29 @@ The passes execute in this order for each function:
 | 12 | Phi removal | `ir` crate | Lowers phi nodes into copies at predecessor block ends |
 | 13 | CFG simplification | `cfg_simplify.rs` | Merges blocks; removes dead blocks; bypasses empty blocks |
 | 14 | Block layout | `block_layout.rs` | Reorders blocks for instruction cache locality |
+| 15 | Profile layout (optional) | `profile.rs` | When `-fprofile-use` is active, reorders blocks using recorded edge counts |
 
 The pipeline runs a single pass (multi-pass iteration was found to cause codegen issues with float function pointers).
+
+## Profile-guided optimization (PGO)
+
+Built-in instrumentation — **no external profiling libraries**.
+
+| Driver flag | Effect |
+|---|---|
+| `-fprofile-generate` | Codegen emits `inc qword ptr __profc_<func>_<block>` counters in `.bss` |
+| `-fprofile-use=FILE` | Driver loads text profile (`func:block count` lines) and passes to `optimize_with_options` |
+
+Profile data format (one entry per line):
+
+```
+main:3 12847
+main:5 912
+```
+
+`profile.rs` parses this file and `apply_profile_layout()` runs after the standard block-layout pass, placing hot successor blocks adjacent to their predecessors.
+
+**Limitation**: counters are not auto-dumped on program exit; profile files must be written manually (or via a future dumper) from runtime counter values.
 
 ## Source files
 
@@ -111,7 +135,10 @@ Lightweight polyhedral-style analysis (not full ISL/Polly). **Aggressive policy:
 Tracks memory accesses with linear `IndexPattern` (`scale * iv + offset`). Computes per-chunk index spans for dependence tests between loads and stores at vector width `vf`, including non-unit stride and gather/scatter lanes. Rejects **reduction-style** patterns: invariant-index store (`scale == 0`) together with IV-strided loads (e.g. `c[i][j] += a[i][k]` with IV `k`). Used by `vectorize.rs` before applying a plan.
 
 ### `block_layout.rs` — Basic block reordering
-Reorders basic blocks for instruction cache locality. Uses a modified BFS/DFS that prioritizes placing loop body blocks immediately after loop headers (keeping hot loops tight in memory) and deferring cold exit paths, reducing I-cache misses along the most likely execution path.
+Reorders basic blocks for instruction cache locality. Uses a modified BFS/DFS that prioritizes placing loop body blocks immediately after loop headers (keeping hot loops tight in memory) and deferring cold exit paths, reducing I-cache misses along the most likely execution path. Honors `BranchHint` from `__builtin_expect`.
+
+### `profile.rs` — Profile-guided block layout
+Parses the text profile format, maps `func:block` keys to IR `BlockId`s, and reorders blocks so frequently executed edges stay contiguous. Invoked only through `optimize_with_options()` when the driver passes `-fprofile-use=FILE`.
 
 ### `utils.rs`
 Shared helpers: `is_power_of_two(n: i64) -> bool` and `log2(n: i64) -> i64`, both `#[inline]`.

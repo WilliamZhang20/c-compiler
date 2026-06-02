@@ -23,7 +23,7 @@ This single file contains the complete set of types that represent a parsed C pr
 - `FunctionPointer { return_type, param_types }`
 - `TypeofExpr(expr)` — deferred to IR lowering for resolution
 
-**`Expr`** (~23 variants) — every expression form the compiler handles:
+**`Expr`** (~25 variants) — every expression form the compiler handles:
 - `Binary`, `Unary`, prefix/postfix increment/decrement
 - `Variable`, `Constant`, `FloatConstant`, `StringLiteral`
 - `Index` (array subscript), `Call` (direct and indirect), `Cast`
@@ -32,25 +32,33 @@ This single file contains the complete set of types that represent a parsed C pr
 - `Conditional` (ternary `?:`), `Comma` (comma operator)
 - `CompoundLiteral`, `StmtExpr` (GNU statement expression), `InitList`
 - `BuiltinOffsetof`, `Generic` (C11 `_Generic` selection)
+- **`LabelAddr(String)`** — address of label (`&&label`) for computed goto
 
-**`Stmt`** — all statement forms: `Return`, `If`, `While`, `DoWhile`, `For`, `Switch`, `Case`, `Default`, `Break`, `Continue`, `Goto`, `Label`, `Declaration`, `MultiDecl`, `InlineAsm`, `Block`, `Expr`
+**`Stmt`** — all statement forms: `Return`, `If`, `While`, `DoWhile`, `For`, `Switch`, `Case`, `Default`, `Break`, `Continue`, `Goto`, **`ComputedGoto`**, `Label`, `Declaration`, `MultiDecl`, `InlineAsm`, `Block`, `Expr`
 
 **`Attribute`** — GCC `__attribute__` variants: `Packed`, `Aligned(N)`, `Section(name)`, `NoReturn`, `AlwaysInline`, `Weak`, `Unused`, `Constructor`, `Destructor`
 
-**Supporting types**: `TypeQualifiers` (`const`/`volatile`/`restrict`), `BinaryOp` (20 variants including compound assignment), `UnaryOp`, `InitItem`/`Designator` for initializer lists, `AsmOperand` for inline assembly, `Program`/`Function`/`GlobalVar`/`FunctionPrototype`/`StructDef`/`UnionDef`/`EnumDef`/`Block`/`StructField`.
+**`InitItem`/`Designator`** — initializer lists support `.field`, `[index]`, nested `.a.b`, and GCC range designators `[lo ... hi]`.
+
+**Supporting types**: `TypeQualifiers` (`const`/`volatile`/`restrict`), `BinaryOp` (20 variants including compound assignment), `UnaryOp`, `AsmOperand` for inline assembly, `Program`/`Function`/`GlobalVar`/`FunctionPrototype`/`StructDef`/`UnionDef`/`EnumDef`/`Block`/`StructField`.
 
 **`Program`** contains:
 - `functions: Vec<Function>` — function definitions with bodies
 - `globals: Vec<GlobalVar>` — global variable declarations (with `is_extern` and `is_static` flags)
 - `structs`, `unions`, `enums` — type definitions
-- `prototypes: Vec<FunctionPrototype>` — function declarations without bodies (return type, name, params, variadic flag)
+- `prototypes: Vec<FunctionPrototype>` — function declarations without bodies (return type, name, params, **`is_variadic`**)
+- `typedefs: HashMap<String, Type>` — resolved typedef names → underlying types
 - `forward_structs: Vec<String>` — forward-declared struct names (`struct foo;`)
 
 **`Function`** includes `is_static: bool` — controls linkage visibility (`.globl` vs local). **`GlobalVar`** includes `is_extern: bool` and `is_static: bool`.
 
 ### `target.rs` — Platform abstraction
 
-Defines `Platform` (Windows/Linux), `CallingConvention` (WindowsX64/SystemV), and `TargetConfig`. Auto-detects the host platform at compile time via `cfg!` macros. Used by the driver to select executable extensions and by codegen to select calling conventions, shadow space sizes, and callee-saved register sets.
+Defines `Platform` (Windows/Linux), `CallingConvention` (WindowsX64/SystemV), **`PicMode`** (`None`, `Pic`, `Pie`), and `TargetConfig`. Auto-detects the host platform at compile time via `cfg!` macros. Used by the driver to select executable extensions and by codegen to select calling conventions, shadow space sizes, callee-saved register sets, and **`call name@PLT`** when PIC/PIE is enabled.
+
+### `typing.rs` — Shared type environment
+
+**`TypeEnv`** and **`FunctionSig`** provide typedef resolution, `typeof(expr)` in context, integer promotions, usual arithmetic conversions, assignment/return/call compatibility checks, lvalue validation, `const` through pointers, pointer subtraction rules, and bitfield width validation. Used by the semantic analyzer and available to other passes.
 
 ## Design decisions
 

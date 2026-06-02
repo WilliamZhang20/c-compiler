@@ -41,6 +41,18 @@ cargo build --bin driver --release
 # Freestanding / no standard library
 ./target/release/driver --nostdlib --ffreestanding kernel.c
 
+# Position-independent code (shared objects / modules)
+./target/release/driver -fPIC -shared -c module.c
+./target/release/driver -fPIE -fpie -o prog app.c
+
+# Profile-guided optimization (built-in; no external profiler libs)
+./target/release/driver -fprofile-generate -o prog app.c
+./prog   # run workload; counters live in __profc_* globals
+./target/release/driver -fprofile-use=default.prof -o prog app.c
+
+# Machine / kernel flags
+./target/release/driver --mno-red-zone --mno-sse kernel.c
+
 # Keep intermediate files (.i preprocessed, .s assembly)
 ./target/release/driver hello_world.c --keep-intermediates
 
@@ -73,7 +85,7 @@ On Windows, the same binary works with MinGW GCC. The compiler auto-detects the 
 └──────┬───────┘
        ▼
 ┌──────────────┐
-│  Semantic    │  name resolution, qualifier checks, control flow validation
+│  Semantic    │  TypeEnv: promotions, assignment/call checks, qualifiers
 └──────┬───────┘
        ▼
 ┌──────────────┐
@@ -110,9 +122,9 @@ The workspace is split into 8 crates with clear dependency flow:
 | **model** | Shared AST types: `Token`, `Expr`, `Stmt`, `Type`, `Attribute`, platform config | `use model::*` |
 | **lexer** | Tokenization of C source into `Vec<Token>` | `lexer::lex(src)` |
 | **parser** | Recursive descent parser producing AST `Program` | `parser::parse_tokens(tokens)` |
-| **semantic** | Name resolution, qualifier enforcement, control flow checks | `SemanticAnalyzer::analyze(program)` |
+| **semantic** | `TypeEnv` type checking: promotions, calls, assignments, qualifiers | `SemanticAnalyzer::analyze(program)` |
 | **ir** | AST → SSA IR lowering with Braun et al. phi construction | `Lowerer::lower_program(program)` |
-| **optimizer** | 14-pass optimization pipeline over SSA IR | `optimizer::optimize(ir_program)` |
+| **optimizer** | 14-pass pipeline + optional PGO block layout | `optimizer::optimize(ir_program)` or `optimize_with_options(..., profile)` |
 | **codegen** | x86-64 assembly generation with graph-coloring register allocation | `Codegen::gen_program(ir_program)` |
 | **driver** | CLI entry point, orchestrates the full pipeline | `cargo run -- file.c` |
 
@@ -148,7 +160,8 @@ Dependency graph: `driver` → `codegen` → `optimizer` → `ir` → `semantic`
 - Multi-variable declarations: `int a = 1, b = 2;`
 - `if`/`else`, `while`, `do-while`, `for` loops
 - `switch`/`case`/`default` with fallthrough
-- `break`, `continue`, `goto`/labels
+- `break`, `continue`, `goto`/labels, **computed goto** (`goto *expr`; IR `IndirectBr`)
+- **Label addresses** (`&&label`) — parsed; codegen emits rodata pointers (parser edge cases remain)
 - `return` with optional expression
 - Block scoping with `{ }`
 - Inline assembly (`asm`/`__asm__`) with operand constraints
@@ -156,7 +169,8 @@ Dependency graph: `driver` → `codegen` → `optimizer` → `ir` → `semantic`
 ### Declarations and Attributes
 - `static`, `extern`, `inline`, `register`, `const`, `volatile`, `restrict`
 - `_Noreturn` / `noreturn`
-- `typedef` for type aliases
+- Designated initializers (`.field`, `[index]`, nested `.a.b`, GCC ranges `[lo ... hi]`)
+- Function prototypes stored in `Program.prototypes`; **`typedef` definitions** in `Program.typedefs`
 - `_Static_assert(expr, "message")` (C11)
 - `__attribute__((packed))`, `__attribute__((aligned(N)))`, `__attribute__((section("name")))`
 - `__attribute__((noreturn))`, `__attribute__((always_inline))`
@@ -201,6 +215,7 @@ The optimizer runs 14 passes in a fixed sequence:
 12. **Phi removal** — deconstructs phi nodes into copies at predecessor block ends
 13. **CFG simplification** — merge single-successor/single-predecessor block pairs, bypass empty blocks, eliminate dead blocks, fold constant branches
 14. **Block layout** — reorders basic blocks for I-cache locality, keeping hot loop bodies tight and deferring cold exit paths
+15. **Profile layout** (optional, `-fprofile-use`) — reorders blocks using recorded execution counts from a text profile file
 
 ## Testing
 
@@ -211,7 +226,7 @@ cargo test
 # Run only unit tests (fast)
 cargo test --lib
 
-# Run only integration tests (compiles 165 C programs)
+# Run only integration tests (compiles 177 C programs)
 cargo test --test integration_tests
 ```
 
